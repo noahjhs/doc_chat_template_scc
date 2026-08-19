@@ -21,13 +21,13 @@ else:
 
     # Let the user upload a file via `st.file_uploader`.
     uploaded_file = st.file_uploader(
-        "Upload a document (.txt or .md)", type=("txt", "md")
+        "Gimme a .txt or .md", type=("txt", "md")
     )
 
     # Ask the user for a question via `st.text_area`.
     question = st.text_area(
-        "Now ask a question about the document!",
-        placeholder="Can you give me a short summary?",
+        "Now whaddya wanna know?",
+        placeholder="How do you feel about it?",
         disabled=not uploaded_file,
     )
 
