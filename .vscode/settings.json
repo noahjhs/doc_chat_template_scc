@@ -1,0 +1,31 @@
+{
+  // Editor settings for doc_chat_template_scc.
+  // Note: this project's .idea/inspectionProfiles/profiles_settings.xml has
+  // USE_PROJECT_PROFILE=false, meaning PyCharm was using its global default
+  // inspection profile rather than a custom one — so there's no custom
+  // lint/inspection config to port over. These settings just wire up the
+  // recommended extensions (ruff, black, isort) to run automatically,
+  // roughly matching PyCharm's default "inspect + reformat on save" feel.
+
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "isort.args": ["--profile", "black"],
+  "ruff.lint.enable": true,
+  "ruff.organizeImports": false,
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  }
+
+  // No Python interpreter/venv path is set here: this project's .idea files
+  // don't record a project-specific SDK (no .idea/misc.xml), so PyCharm was
+  // using an inherited/default interpreter. Pick one via
+  // Cmd+Shift+P > "Python: Select Interpreter" the first time you open this
+  // in VS Code, and it'll be remembered for the workspace after that.
+}

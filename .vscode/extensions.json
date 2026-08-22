@@ -1,0 +1,27 @@
+{
+  // Recommended extensions for doc_chat_template_scc.
+  // VS Code will prompt to install these when the folder is opened
+  // (or via the Extensions panel > "Show Recommended Extensions").
+  "recommendations": [
+    // Core Python support: IntelliSense, debugging, interpreter/venv selection
+    // — already referenced in .devcontainer/devcontainer.json.
+    "ms-python.python",
+    // Fast language server with type checking, the closest match to
+    // PyCharm's built-in code intelligence and inspections.
+    "ms-python.vscode-pylance",
+    // Fast linter (style, unused imports, common bugs) — the nearest VS Code
+    // equivalent of PyCharm's built-in code inspections, since this project
+    // doesn't pin a specific linter of its own.
+    "charliermarsh.ruff",
+    // Code formatter, equivalent to PyCharm's "Reformat Code".
+    "ms-python.black-formatter",
+    // Auto-sorts/organizes imports, equivalent to PyCharm's "Optimize Imports".
+    "ms-python.isort",
+    // Richer git history, blame, and diff views — PyCharm has strong built-in
+    // VCS tooling that VS Code doesn't match out of the box.
+    "eamodio.gitlens",
+    // GitHub PR review from the editor — this project's PyCharm workspace
+    // config shows active use of PyCharm's GitHub PR integration.
+    "GitHub.vscode-pull-request-github"
+  ]
+}
