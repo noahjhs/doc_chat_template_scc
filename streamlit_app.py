@@ -1,8 +1,15 @@
 import streamlit as st
 from openai import OpenAI
 
+# Initialize formats
+with open("assets/text.md", "r") as f:
+    st.markdown(
+        f.read(),
+        unsafe_allow_html=True
+    )
+
 # Show title and description.
-st.title("📄 Talk about documents!")
+st.title("📄 Doc talk")
 st.write(
     "Provide a document and talk about it. "
 #    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
@@ -29,7 +36,7 @@ if True:
     # Ask the user for a question via `st.text_area`.
     question = st.text_area(
         "Now whaddya wanna know?",
-        placeholder="How do you feel about it?",
+        placeholder="",
         disabled=not uploaded_file,
     )
 
