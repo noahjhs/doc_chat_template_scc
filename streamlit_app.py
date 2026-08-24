@@ -1,6 +1,15 @@
 import streamlit as st
 from openai import OpenAI
 
+# for live coding
+#st.session_state.clear()
+
+# Initialize sidebar
+#if 'sidebar_state' not in st.session_state:
+#    st.session_state.sidebar_state = 'expanded'
+
+#st.set_page_config(initial_sidebar_state = st.session_state.sidebar_state)
+
 # Initialize formats
 with open("assets/text.md", "r") as f:
     st.markdown(
@@ -20,43 +29,49 @@ openai_api_key = st.secrets["OPENAI_API_KEY"]
 # Create an OpenAI client.
 client = OpenAI(api_key=openai_api_key)
 
-if True:
+with st.sidebar:
 
     # Let the user pick a model.
     model = st.selectbox(
         "Model",
-        ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-3.5-turbo"],
+        ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-3.5-turbo"]
     )
 
     # Let the user upload a file via `st.file_uploader`.
     uploaded_file = st.file_uploader(
-        "Gimme a .txt or .md", type=("txt", "md")
+        "Gimme a .txt or .md", 
+        type=("txt", "md")
     )
 
-    # Ask the user for a question via `st.text_area`.
-    question = st.text_area(
-        "Now whaddya wanna know?",
-        placeholder="",
-        disabled=not uploaded_file,
+# Put away sidebar
+#if uploaded_file and st.session_state.sidebar_state == 'expanded':
+#    st.session_state.sidebar_state = 'collapsed'
+#    st.rerun()
+
+# Ask the user for a question via `st.text_area`.
+question = st.text_area(
+    "Now whaddya wanna know?",
+    placeholder = "",
+    disabled = not uploaded_file,
+)
+
+if uploaded_file and question:
+
+    # Process the uploaded file and question.
+    document = uploaded_file.read().decode()
+    messages = [
+        {
+            "role": "user",
+            "content": f"Here's a document: {document} \n\n---\n\n {question}",
+        }
+    ]
+
+    # Generate an answer using the OpenAI API.
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
     )
 
-    if uploaded_file and question:
-
-        # Process the uploaded file and question.
-        document = uploaded_file.read().decode()
-        messages = [
-            {
-                "role": "user",
-                "content": f"Here's a document: {document} \n\n---\n\n {question}",
-            }
-        ]
-
-        # Generate an answer using the OpenAI API.
-        stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
-        )
-
-        # Stream the response to the app using `st.write_stream`.
-        st.write_stream(stream)
+    # Stream the response to the app using `st.write_stream`.
+    st.write_stream(stream)
