@@ -20,8 +20,7 @@ with open("assets/text.md", "r") as f:
 # Show title and description.
 st.title("📄 Doc talk")
 st.write(
-    "Provide a document and talk about it. "
-#    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
+    "Provide a document and talk about it. ",
 )
 
 openai_api_key = st.secrets["OPENAI_API_KEY"]
@@ -34,13 +33,13 @@ with st.sidebar:
     # Let the user pick a model.
     model = st.selectbox(
         "Model",
-        ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-3.5-turbo"]
+        ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-3.5-turbo"],
     )
 
     # Let the user upload a file via `st.file_uploader`.
     uploaded_file = st.file_uploader(
         "Gimme a .txt or .md", 
-        type=("txt", "md")
+        type=("txt", "md"),
     )
 
 # Put away sidebar
@@ -48,12 +47,23 @@ with st.sidebar:
 #    st.session_state.sidebar_state = 'collapsed'
 #    st.rerun()
 
+def process_and_reset():
+    # Save the typed text into processing variable
+    st.session_state.submitted_text = st.session_state.my_text_area
+    
+    # Immediately clear the widget's internal session state
+    st.session_state.my_text_area = ""
+
 # Ask the user for a question via `st.text_area`.
-question = st.text_area(
+st.text_area(
     "Now whaddya wanna know?",
-    placeholder = "",
-    disabled = not uploaded_file,
+    placeholder="",
+    disabled=not uploaded_file,
+    key="my_text_area",
+    on_change=process_and_reset,
 )
+
+question = st.session_state.get("submitted_text", "")
 
 if uploaded_file and question:
 
@@ -75,3 +85,4 @@ if uploaded_file and question:
 
     # Stream the response to the app using `st.write_stream`.
     st.write_stream(stream)
+
