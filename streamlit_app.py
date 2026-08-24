@@ -38,7 +38,7 @@ with st.sidebar:
 
 def answer_them():
 
-    # Read the user's document and prompt
+    # Read the user's prompt and document
     doc = uploaded_file.read().decode()
     their_prompt = st.session_state.prompt
 
@@ -60,11 +60,20 @@ def answer_them():
     # Show the response
     st.write_stream(response)
 
+
+
 # Prompt the user
-st.chat_input(
+if their_prompt := st.chat_input(
     placeholder="Chat",
     disabled=not uploaded_file,
     key="prompt",
-    on_submit=answer_them,
-)
+
+):
+    # Show the user's prompt in the chat message container.
+    st.chat_message("user").write(their_prompt)
+
+    # Get the model's response and show it in a chat message container.
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            answer_them()
 
