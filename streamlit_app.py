@@ -46,8 +46,9 @@ with st.sidebar:
     )
 
     # Running total spend, updated in place as the conversation progresses.
+    st.divider()
     spend_placeholder = st.empty()
-    spend_placeholder.metric("Total spend", f"${st.session_state.total_spend:.4f}")
+    spend_placeholder.caption(f"Total spend: ${st.session_state.total_spend:.4f}")
 
 
 # Initialize chat history
@@ -59,6 +60,9 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
         st.caption(f"{message['tokens']:,} tokens")
+        if "context" in message:
+            with st.expander("Inspect prompt"):
+                st.code(message["context"], language=None)
 
 # Handle user input
 if their_prompt := st.chat_input(
@@ -84,6 +88,7 @@ if their_prompt := st.chat_input(
             "role": "user",
             "content": their_prompt,
             "tokens": input_tokens,
+            "context": our_prompt[0]["content"],
         }
     )
 
@@ -91,6 +96,8 @@ if their_prompt := st.chat_input(
     with st.chat_message("user"):
         st.write(their_prompt)
         st.caption(f"{input_tokens:,} tokens")
+        with st.expander("Inspect prompt"):
+            st.code(our_prompt[0]["content"], language=None)
 
     # In a chat message container labeled with the assistant avatar
     with st.chat_message("assistant"):
@@ -120,4 +127,4 @@ if their_prompt := st.chat_input(
 
     # Update the running spend total in the sidebar
     st.session_state.total_spend += estimate_cost(model, input_tokens, output_tokens)
-    spend_placeholder.metric("Total spend", f"${st.session_state.total_spend:.4f}")
+    spend_placeholder.caption(f"Total spend: ${st.session_state.total_spend:.4f}")
