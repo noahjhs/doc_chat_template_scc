@@ -6,6 +6,7 @@ from utils.data_helpers import (
     load_markdown_styles,
     get_client,
     count_tokens,
+    estimate_cost,
 )
 
 # Apply styles
@@ -21,6 +22,10 @@ st.write(
 )
 
 client = get_client()
+
+# Initialize running spend total
+if "total_spend" not in st.session_state:
+    st.session_state.total_spend = 0.0
 
 with st.sidebar:
 
@@ -47,6 +52,10 @@ with st.sidebar:
         "Gimme a .txt or .md",
         type=("txt", "md"),
     )
+
+    # Running total spend, updated in place as the conversation progresses.
+    spend_placeholder = st.empty()
+    spend_placeholder.metric("Total spend", f"${st.session_state.total_spend:.4f}")
 
 
 # Initialize chat history
@@ -116,3 +125,7 @@ if their_prompt := st.chat_input(
             "tokens": output_tokens,
         }
     )
+
+    # Update the running spend total in the sidebar
+    st.session_state.total_spend += estimate_cost(model, input_tokens, output_tokens)
+    spend_placeholder.metric("Total spend", f"${st.session_state.total_spend:.4f}")

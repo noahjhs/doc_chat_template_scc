@@ -50,3 +50,10 @@ def count_tokens(text: str, model: str) -> int:
     except KeyError:
         encoding = tiktoken.get_encoding("o200k_base")
     return len(encoding.encode(text))
+
+
+def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Estimate the dollar cost of a turn using short-context pricing per 1M tokens."""
+    prices = load_pricing().loc[model, ["Short context input", "Short context output"]]
+    input_price, output_price = (float(p.strip("$")) for p in prices)
+    return input_tokens / 1_000_000 * input_price + output_tokens / 1_000_000 * output_price
