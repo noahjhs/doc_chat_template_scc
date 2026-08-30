@@ -57,24 +57,13 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
+        st.caption(f"{message['tokens']:,} tokens")
 
 # Handle user input
 if their_prompt := st.chat_input(
     placeholder="Chat",
     disabled=not uploaded_file,
 ):
-    # Append the user's message to the chat history
-    st.session_state.messages.append(
-        {
-            "role": "user",
-            "content": their_prompt,
-        }
-    )
-
-    # Show user's message to the chat message container.
-    with st.chat_message("user"):
-        st.write(their_prompt)
-
     # Read the user's prompt and document
     doc = uploaded_file.read().decode()
 
@@ -87,7 +76,20 @@ if their_prompt := st.chat_input(
     ]
 
     input_tokens = count_tokens(our_prompt[0]["content"], model)
-    st.caption(f"{input_tokens:,} input tokens")
+
+    # Append the user's message to the chat history
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": their_prompt,
+            "tokens": input_tokens,
+        }
+    )
+
+    # Show user's message to the chat message container.
+    with st.chat_message("user"):
+        st.write(their_prompt)
+        st.caption(f"{input_tokens:,} tokens")
 
     # In a chat message container labeled with the assistant avatar
     with st.chat_message("assistant"):
@@ -104,7 +106,13 @@ if their_prompt := st.chat_input(
             full_response = st.write_stream(stream_response)
 
         output_tokens = count_tokens(full_response, model)
-        st.caption(f"{output_tokens:,} output tokens")
+        st.caption(f"{output_tokens:,} tokens")
 
     # Add response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": full_response,
+            "tokens": output_tokens,
+        }
+    )
