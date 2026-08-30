@@ -2,11 +2,11 @@ from prompt_toolkit import prompt
 import streamlit as st
 
 from utils.data_helpers import (
-    load_pricing,
     load_markdown_styles,
     get_client,
     count_tokens,
     estimate_cost,
+    model_label,
 )
 
 # Apply styles
@@ -36,15 +36,7 @@ with st.sidebar:
         "Model",
         models,
         accept_new_options=False,
-    )
-
-    # Show pricing (per 1M tokens) for the available models.
-    st.dataframe(
-        load_pricing()
-        .loc[models, ["Short context input", "Short context output"]]
-        .rename(
-            columns={"Short context input": "Input", "Short context output": "Output"}
-        )
+        format_func=model_label,
     )
 
     # Let the user upload a file via `st.file_uploader`.

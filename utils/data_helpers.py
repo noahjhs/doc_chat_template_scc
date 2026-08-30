@@ -57,3 +57,9 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     prices = load_pricing().loc[model, ["Short context input", "Short context output"]]
     input_price, output_price = (float(p.strip("$")) for p in prices)
     return input_tokens / 1_000_000 * input_price + output_tokens / 1_000_000 * output_price
+
+
+def model_label(model: str) -> str:
+    """Model name with input/output prices (per 1M tokens) for display in a selector."""
+    row = load_pricing().loc[model]
+    return f"{model} ({row['Short context input']} in / {row['Short context output']} out)"
