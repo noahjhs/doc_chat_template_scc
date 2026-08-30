@@ -69,18 +69,25 @@ if their_prompt := st.chat_input(
     placeholder="Chat",
     disabled=not uploaded_file,
 ):
-    # Read the user's prompt and document
-    doc = uploaded_file.read().decode()
-
-    # Generate our prompt
-    our_prompt = [
-        {
+    # Generate this turn's message. The document only needs to go in once —
+    # it stays in the conversation history for every later turn.
+    if st.session_state.messages:
+        new_message = {"role": "user", "content": their_prompt}
+    else:
+        doc = uploaded_file.read().decode()
+        new_message = {
             "role": "user",
             "content": f"Here's a document: {doc} \n\n---\n\n {their_prompt}",
         }
-    ]
 
-    input_tokens = count_tokens(our_prompt[0]["content"], model)
+    # Full conversation history (as sent to the API on prior turns) plus the new turn
+    history = [
+        {"role": m["role"], "content": m.get("context", m["content"])}
+        for m in st.session_state.messages
+    ]
+    our_prompt = history + [new_message]
+
+    input_tokens = sum(count_tokens(m["content"], model) for m in our_prompt)
 
     # Append the user's message to the chat history
     st.session_state.messages.append(
@@ -88,7 +95,7 @@ if their_prompt := st.chat_input(
             "role": "user",
             "content": their_prompt,
             "tokens": input_tokens,
-            "context": our_prompt[0]["content"],
+            "context": new_message["content"],
         }
     )
 
@@ -97,7 +104,7 @@ if their_prompt := st.chat_input(
         st.write(their_prompt)
         st.caption(f"{input_tokens:,} tokens")
         with st.expander("Inspect prompt"):
-            st.code(our_prompt[0]["content"], language=None)
+            st.code(new_message["content"], language=None)
 
     # In a chat message container labeled with the assistant avatar
     with st.chat_message("assistant"):
