@@ -1,10 +1,18 @@
 from prompt_toolkit import prompt
 import streamlit as st
 
-from utils.data_helpers import load_pricing, load_markdown_styles, get_client
+from utils.data_helpers import (
+    load_pricing,
+    load_markdown_styles,
+    get_client,
+    count_tokens,
+)
 
 # Apply styles
-st.markdown(load_markdown_styles())
+st.markdown(
+    load_markdown_styles(),
+    unsafe_allow_html=True,
+)
 
 # Show title and description.
 st.title("📄 Doc talk")
@@ -78,6 +86,9 @@ if their_prompt := st.chat_input(
         }
     ]
 
+    input_tokens = count_tokens(our_prompt[0]["content"], model)
+    st.caption(f"{input_tokens:,} input tokens")
+
     # In a chat message container labeled with the assistant avatar
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
@@ -91,6 +102,9 @@ if their_prompt := st.chat_input(
 
             # Show the response as it streams in
             full_response = st.write_stream(stream_response)
+
+        output_tokens = count_tokens(full_response, model)
+        st.caption(f"{output_tokens:,} output tokens")
 
     # Add response to chat history
     st.session_state.messages.append({"role": "assistant", "content": full_response})
