@@ -1,13 +1,10 @@
 from prompt_toolkit import prompt
 import streamlit as st
-from openai import OpenAI
 
-# Set styles
-with open("assets/text.md", "r") as f:
-    st.markdown(
-        f.read(),
-        unsafe_allow_html=True,
-    )
+from utils.data_helpers import load_pricing, load_markdown_styles, get_client
+
+# Apply styles
+st.markdown(load_markdown_styles())
 
 # Show title and description.
 st.title("📄 Doc talk")
@@ -15,22 +12,31 @@ st.write(
     "Provide a document. Talk to me about it. ",
 )
 
-openai_api_key = st.secrets["OPENAI_API_KEY"]
-
-# Create an OpenAI client.
-client = OpenAI(api_key=openai_api_key)
+client = get_client()
 
 with st.sidebar:
+
+    models = ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-3.5-turbo"]
 
     # Let the user pick a model.
     model = st.selectbox(
         "Model",
-        ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-3.5-turbo"],
+        models,
+        accept_new_options=False,
+    )
+
+    # Show pricing (per 1M tokens) for the available models.
+    st.dataframe(
+        load_pricing()
+        .loc[models, ["Short context input", "Short context output"]]
+        .rename(
+            columns={"Short context input": "Input", "Short context output": "Output"}
+        )
     )
 
     # Let the user upload a file via `st.file_uploader`.
     uploaded_file = st.file_uploader(
-        "Gimme a .txt or .md", 
+        "Gimme a .txt or .md",
         type=("txt", "md"),
     )
 
@@ -52,7 +58,7 @@ if their_prompt := st.chat_input(
     # Append the user's message to the chat history
     st.session_state.messages.append(
         {
-            "role": "user", 
+            "role": "user",
             "content": their_prompt,
         }
     )
@@ -61,9 +67,9 @@ if their_prompt := st.chat_input(
     with st.chat_message("user"):
         st.write(their_prompt)
 
-   # Read the user's prompt and document
+    # Read the user's prompt and document
     doc = uploaded_file.read().decode()
-    
+
     # Generate our prompt
     our_prompt = [
         {
@@ -87,9 +93,4 @@ if their_prompt := st.chat_input(
             full_response = st.write_stream(stream_response)
 
     # Add response to chat history
-    st.session_state.messages.append(
-        {
-            "role": "assistant", 
-            "content": full_response
-        }
-    )
+    st.session_state.messages.append({"role": "assistant", "content": full_response})

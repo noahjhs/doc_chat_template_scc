@@ -1,4 +1,6 @@
 .streamlit/secrets.toml
+.pricing/openai.md
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
