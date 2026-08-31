@@ -4,7 +4,6 @@ import streamlit as st
 from utils.data_helpers import (
     load_markdown_styles,
     get_client,
-    count_tokens,
     estimate_cost,
     model_label,
 )
@@ -26,6 +25,11 @@ client = get_client()
 # Initialize running spend total
 if "total_spend" not in st.session_state:
     st.session_state.total_spend = 0.0
+
+# The Responses API tracks conversation history server-side, keyed off the
+# previous turn's response id.
+if "previous_response_id" not in st.session_state:
+    st.session_state.previous_response_id = None
 
 with st.sidebar:
 
@@ -70,7 +74,7 @@ if their_prompt := st.chat_input(
     disabled=not uploaded_file,
 ):
     # Generate this turn's message. The document only needs to go in once —
-    # it stays in the conversation history for every later turn.
+    # the Responses API keeps it in server-side history for every later turn.
     if st.session_state.messages:
         new_message = {"role": "user", "content": their_prompt}
     else:
@@ -80,16 +84,50 @@ if their_prompt := st.chat_input(
             "content": f"Here's a document: {doc} \n\n---\n\n {their_prompt}",
         }
 
-    # Full conversation history (as sent to the API on prior turns) plus the new turn
-    history = [
-        {"role": m["role"], "content": m.get("context", m["content"])}
-        for m in st.session_state.messages
-    ]
-    our_prompt = history + [new_message]
+    # Show user's message right away; its token count fills in once the API
+    # call returns actual usage below.
+    with st.chat_message("user"):
+        st.write(their_prompt)
+        input_tokens_placeholder = st.empty()
+        with st.expander("Inspect prompt"):
+            st.code(new_message["content"], language=None)
 
-    input_tokens = sum(count_tokens(m["content"], model) for m in our_prompt)
+    # Captures the response id (for chaining) and usage from the stream as a
+    # side effect, since st.write_stream fully consumes the event stream.
+    response_meta = {}
 
-    # Append the user's message to the chat history
+    def capture_response_meta(stream):
+        for event in stream:
+            if event.type == "response.completed":
+                response_meta["id"] = event.response.id
+                response_meta["usage"] = event.response.usage
+            yield event
+
+    # In a chat message container labeled with the assistant avatar
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+
+            # Get a streaming response from the OpenAI API. Only the new
+            # message is sent — previous_response_id pulls in prior turns.
+            stream_response = client.responses.create(
+                model=model,
+                input=[new_message],
+                previous_response_id=st.session_state.previous_response_id,
+                stream=True,
+            )
+
+            # Show the response as it streams in
+            full_response = st.write_stream(capture_response_meta(stream_response))
+
+        usage = response_meta["usage"]
+        input_tokens = usage.input_tokens
+        output_tokens = usage.output_tokens
+        st.caption(f"{output_tokens:,} tokens")
+
+    input_tokens_placeholder.caption(f"{input_tokens:,} tokens")
+    st.session_state.previous_response_id = response_meta["id"]
+
+    # Now that token counts are known, record both turns in the chat history.
     st.session_state.messages.append(
         {
             "role": "user",
@@ -98,32 +136,6 @@ if their_prompt := st.chat_input(
             "context": new_message["content"],
         }
     )
-
-    # Show user's message to the chat message container.
-    with st.chat_message("user"):
-        st.write(their_prompt)
-        st.caption(f"{input_tokens:,} tokens")
-        with st.expander("Inspect prompt"):
-            st.code(new_message["content"], language=None)
-
-    # In a chat message container labeled with the assistant avatar
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-
-            # Get a streaming response from the OpenAI API
-            stream_response = client.chat.completions.create(
-                model=model,
-                messages=our_prompt,
-                stream=True,
-            )
-
-            # Show the response as it streams in
-            full_response = st.write_stream(stream_response)
-
-        output_tokens = count_tokens(full_response, model)
-        st.caption(f"{output_tokens:,} tokens")
-
-    # Add response to chat history
     st.session_state.messages.append(
         {
             "role": "assistant",

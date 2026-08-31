@@ -1,6 +1,5 @@
 import pandas as pd
 import streamlit as st
-import tiktoken
 from openai import OpenAI
 
 
@@ -41,15 +40,6 @@ def load_markdown_styles() -> str:
 def get_client():
     openai_api_key = st.secrets["OPENAI_API_KEY"]
     return OpenAI(api_key=openai_api_key)
-
-
-def count_tokens(text: str, model: str) -> int:
-    """Count tokens in `text` using the tokenizer for `model`."""
-    try:
-        encoding = tiktoken.encoding_for_model(model)
-    except KeyError:
-        encoding = tiktoken.get_encoding("o200k_base")
-    return len(encoding.encode(text))
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
