@@ -10,16 +10,11 @@ from utils.data_helpers import (
 )
 
 # Apply styles
-st.markdown(
-    load_markdown_styles(),
-    unsafe_allow_html=True,
-)
+st.markdown(load_markdown_styles(), unsafe_allow_html=True)
 
 # Show title and description.
 st.title("📄 Doc talk")
-st.write(
-    "Provide a document. Talk to me about it. ",
-)
+st.write("Provide a document. Talk to me about it. ")
 
 client = get_client()
 
@@ -48,14 +43,63 @@ with st.sidebar:
     # https://developers.openai.com/api/docs/guides/file-inputs
     ALLOWED_FILE_TYPES = {
         "PDF": ["pdf"],
-        "Spreadsheets": ["xla", "xlb", "xlc", "xlm", "xls", "xlsx", "xlt", "xlw", "csv", "tsv", "iif"],
+        "Spreadsheets": [
+            "xla",
+            "xlb",
+            "xlc",
+            "xlm",
+            "xls",
+            "xlsx",
+            "xlt",
+            "xlw",
+            "csv",
+            "tsv",
+            "iif",
+        ],
         "Documents": ["doc", "docx", "dot", "odt", "rtf"],
         "Presentations": ["pot", "ppa", "pps", "ppt", "pptx", "pwz", "wiz"],
         "Text & code": [
-            "asm", "bat", "c", "cc", "conf", "cpp", "css", "cxx", "def", "dic", "eml",
-            "h", "hh", "htm", "html", "ics", "ifb", "in", "js", "json", "ksh", "list",
-            "log", "markdown", "md", "mht", "mhtml", "mime", "mjs", "nws", "pl", "py",
-            "rst", "s", "sql", "srt", "text", "txt", "vcf", "vtt", "xml",
+            "asm",
+            "bat",
+            "c",
+            "cc",
+            "conf",
+            "cpp",
+            "css",
+            "cxx",
+            "def",
+            "dic",
+            "eml",
+            "h",
+            "hh",
+            "htm",
+            "html",
+            "ics",
+            "ifb",
+            "in",
+            "js",
+            "json",
+            "ksh",
+            "list",
+            "log",
+            "markdown",
+            "md",
+            "mht",
+            "mhtml",
+            "mime",
+            "mjs",
+            "nws",
+            "pl",
+            "py",
+            "rst",
+            "s",
+            "sql",
+            "srt",
+            "text",
+            "txt",
+            "vcf",
+            "vtt",
+            "xml",
         ],
     }
 
@@ -75,7 +119,9 @@ with st.sidebar:
     if uploaded_file:
         if st.session_state.get("uploaded_file_key") != uploaded_file.file_id:
             with st.spinner("Uploading..."):
-                st.session_state.uploaded_file_id = upload_document(client, uploaded_file)
+                st.session_state.uploaded_file_id = upload_document(
+                    client, uploaded_file
+                )
             st.session_state.uploaded_file_key = uploaded_file.file_id
     else:
         st.session_state.pop("uploaded_file_id", None)
