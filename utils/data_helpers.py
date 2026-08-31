@@ -42,6 +42,12 @@ def get_client():
     return OpenAI(api_key=openai_api_key)
 
 
+def upload_document(client: OpenAI, uploaded_file) -> str:
+    """Upload a file via the Files API for use as Responses API input; returns its file id."""
+    result = client.files.create(file=(uploaded_file.name, uploaded_file), purpose="user_data")
+    return result.id
+
+
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimate the dollar cost of a turn using short-context pricing per 1M tokens."""
     prices = load_pricing().loc[model, ["Short context input", "Short context output"]]

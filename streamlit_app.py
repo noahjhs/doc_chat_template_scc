@@ -4,6 +4,7 @@ import streamlit as st
 from utils.data_helpers import (
     load_markdown_styles,
     get_client,
+    upload_document,
     estimate_cost,
     model_label,
 )
@@ -77,12 +78,17 @@ if their_prompt := st.chat_input(
     # the Responses API keeps it in server-side history for every later turn.
     if st.session_state.messages:
         new_message = {"role": "user", "content": their_prompt}
+        context_display = their_prompt
     else:
-        doc = uploaded_file.read().decode()
+        file_id = upload_document(client, uploaded_file)
         new_message = {
             "role": "user",
-            "content": f"Here's a document: {doc} \n\n---\n\n {their_prompt}",
+            "content": [
+                {"type": "input_file", "file_id": file_id},
+                {"type": "input_text", "text": their_prompt},
+            ],
         }
+        context_display = f"[Attached file: {uploaded_file.name} ({file_id})]\n\n{their_prompt}"
 
     # Show user's message right away; its token count fills in once the API
     # call returns actual usage below.
@@ -90,7 +96,7 @@ if their_prompt := st.chat_input(
         st.write(their_prompt)
         input_tokens_placeholder = st.empty()
         with st.expander("Inspect prompt"):
-            st.code(new_message["content"], language=None)
+            st.code(context_display, language=None)
 
     # Captures the response id (for chaining) and usage from the stream as a
     # side effect, since st.write_stream fully consumes the event stream.
@@ -133,7 +139,7 @@ if their_prompt := st.chat_input(
             "role": "user",
             "content": their_prompt,
             "tokens": input_tokens,
-            "context": new_message["content"],
+            "context": context_display,
         }
     )
     st.session_state.messages.append(
