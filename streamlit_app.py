@@ -111,9 +111,12 @@ if their_prompt := st.chat_input(
     placeholder="Chat",
     disabled=not (uploaded_file or document_url),
 ):
-    # Generate this turn's message. The document only needs to go in once —
-    # the Responses API keeps it in server-side history for every later turn.
-    if st.session_state.messages:
+    # A document only needs to go in once — the Responses API keeps it in
+    # server-side history for every later turn — but a *new* or *changed*
+    # document should be attached again even mid-conversation.
+    active_source_key = uploaded_file.file_id if uploaded_file else document_url
+
+    if active_source_key == st.session_state.get("last_sent_file_key"):
         new_message = {"role": "user", "content": their_prompt}
         context_display = their_prompt
     elif uploaded_file:
@@ -180,6 +183,7 @@ if their_prompt := st.chat_input(
 
     input_tokens_placeholder.caption(f"{input_tokens:,} tokens")
     st.session_state.previous_response_id = response_meta["id"]
+    st.session_state.last_sent_file_key = active_source_key
 
     # Now that token counts are known, record both turns in the chat history.
     st.session_state.messages.append(
