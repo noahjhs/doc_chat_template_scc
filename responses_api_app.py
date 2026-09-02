@@ -1,6 +1,7 @@
 import base64
 
 import streamlit as st
+import streamlit_authenticator as stauth
 from openai import OpenAI
 
 
@@ -8,6 +9,38 @@ from openai import OpenAI
 def get_client():
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
+
+def build_authenticator():
+    # Not cached: Authenticate() creates a cookie-manager widget component
+    # internally, and Streamlit disallows widget commands in cached functions.
+    auth_config = st.secrets["auth"]
+    credentials = {
+        "usernames": {
+            username: dict(fields)
+            for username, fields in auth_config["credentials"]["usernames"].items()
+        }
+    }
+    return stauth.Authenticate(
+        credentials=credentials,
+        cookie_name=auth_config["cookie"]["name"],
+        cookie_key=auth_config["cookie"]["key"],
+        cookie_expiry_days=auth_config["cookie"]["expiry_days"],
+    )
+
+
+authenticator = build_authenticator()
+authenticator.login()
+
+if st.session_state.get("authentication_status") is False:
+    st.error("Username/password is incorrect")
+    st.stop()
+elif st.session_state.get("authentication_status") is None:
+    st.warning("Please enter your username and password")
+    st.stop()
+
+with st.sidebar:
+    authenticator.logout()
+    st.caption(f"Signed in as {st.session_state.get('name')}")
 
 client = get_client()
 

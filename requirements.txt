@@ -2,3 +2,4 @@ streamlit
 openai
 prompt_toolkit
 pandas
+streamlit-authenticator
