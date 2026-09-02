@@ -41,22 +41,34 @@ def show_web_search(searches, sources):
             st.markdown(f"- [{title}]({url})")
 
 
+def show_code_interpreter(code_blocks):
+    """Render a demo-friendly summary of code interpreter tool calls: the
+    Python code that was actually executed."""
+    if not code_blocks:
+        return
+    label = f"🧮 Ran code ({len(code_blocks)} block{'s' if len(code_blocks) != 1 else ''})"
+    with st.expander(label):
+        for code in code_blocks:
+            st.code(code, language="python")
+
+
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
         if message.get("image"):
             st.image(base64.b64decode(message["image"]))
         show_web_search(message.get("searches"), message.get("sources", []))
+        show_code_interpreter(message.get("code_blocks", []))
 
 if prompt := st.chat_input("Chat"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
 
-    # Captures the response id (for chaining), plus any generated image and
-    # web search activity, from the stream as a side effect, since
-    # st.write_stream fully consumes it.
-    response_meta = {"searches": [], "sources": []}
+    # Captures the response id (for chaining), plus any generated image, web
+    # search activity, and code interpreter activity, from the stream as a
+    # side effect, since st.write_stream fully consumes it.
+    response_meta = {"searches": [], "sources": [], "code_blocks": []}
 
     def capture_response_meta(stream):
         for event in stream:
@@ -67,6 +79,8 @@ if prompt := st.chat_input("Chat"):
                         response_meta["image"] = item.result
                     elif item.type == "web_search_call" and item.action:
                         response_meta["searches"].append(item.action.query)
+                    elif item.type == "code_interpreter_call" and item.code:
+                        response_meta["code_blocks"].append(item.code)
                     elif item.type == "message":
                         for content in item.content:
                             for annotation in (
@@ -91,6 +105,7 @@ if prompt := st.chat_input("Chat"):
         if "image" in response_meta:
             st.image(base64.b64decode(response_meta["image"]))
         show_web_search(response_meta["searches"], response_meta["sources"])
+        show_code_interpreter(response_meta["code_blocks"])
 
     st.session_state.previous_response_id = response_meta["id"]
     st.session_state.messages.append(
@@ -100,5 +115,6 @@ if prompt := st.chat_input("Chat"):
             "image": response_meta.get("image"),
             "searches": response_meta["searches"],
             "sources": response_meta["sources"],
+            "code_blocks": response_meta["code_blocks"],
         }
     )
