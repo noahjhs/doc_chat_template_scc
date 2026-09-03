@@ -1,5 +1,6 @@
 .streamlit/secrets.toml
 .pricing/openai.md
+api_key.txt
 
 
 # Byte-compiled / optimized / DLL files
