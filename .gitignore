@@ -1,6 +1,15 @@
 .streamlit/secrets.toml
 .pricing/openai.md
 api_key.txt
+command_log.txt
+app_url.txt
+
+# Control API packaging: fetched binaries and build output, not source.
+vendor/cloudflared/*
+!vendor/cloudflared/.gitkeep
+dist/
+build/pyinstaller_work/
+build/*.spec
 
 
 # Byte-compiled / optimized / DLL files
@@ -13,7 +22,6 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/

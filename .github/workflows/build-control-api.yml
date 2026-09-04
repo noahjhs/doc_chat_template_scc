@@ -1,0 +1,49 @@
+name: Build Control API installers
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - control_api.py
+      - build/**
+      - vendor/cloudflared/**
+      - local_agent_requirements.txt
+      - .github/workflows/build-control-api.yml
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r local_agent_requirements.txt
+      - name: Fetch cloudflared
+        shell: bash
+        run: |
+          mkdir -p vendor/cloudflared
+          curl -sL -o vendor/cloudflared/cloudflared-windows-amd64.exe \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+      - run: .\build\build_windows.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocChatControlAPI-windows
+          path: dist/DocChatControlAPI-windows.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r local_agent_requirements.txt
+      - run: chmod +x vendor/fetch_cloudflared.sh build/build_macos.sh && vendor/fetch_cloudflared.sh
+      - run: ./build/build_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocChatControlAPI-macos
+          path: dist/DocChatControlAPI-macos.zip

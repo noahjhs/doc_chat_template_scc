@@ -1,10 +1,12 @@
 import base64
 import json
+from datetime import datetime
 
 import requests
 import streamlit as st
-import streamlit_authenticator as stauth
 from openai import OpenAI
+
+from utils.auth import require_login
 
 
 @st.cache_resource
@@ -12,49 +14,37 @@ def get_client():
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
-def build_authenticator():
-    # Not cached: Authenticate() creates a cookie-manager widget component
-    # internally, and Streamlit disallows widget commands in cached functions.
-    auth_config = st.secrets["auth"]
-    credentials = {
-        "usernames": {
-            username: dict(fields)
-            for username, fields in auth_config["credentials"]["usernames"].items()
-        }
-    }
-    return stauth.Authenticate(
-        credentials=credentials,
-        cookie_name=auth_config["cookie"]["name"],
-        cookie_key=auth_config["cookie"]["key"],
-        cookie_expiry_days=auth_config["cookie"]["expiry_days"],
-    )
-
-
-authenticator = build_authenticator()
-authenticator.login()
-
-if st.session_state.get("authentication_status") is False:
-    st.error("Username/password is incorrect")
-    st.stop()
-elif st.session_state.get("authentication_status") is None:
-    st.warning("Please enter your username and password")
-    st.stop()
-
+authenticator = require_login()
 client = get_client()
+
+# One entry per request: each script rerun (page load, widget change, chat
+# message) is a fresh request from the browser. Streamlit reports None for
+# localhost connections specifically (see st.context.ip_address docs) —
+# show that plainly rather than the literal string "None".
+if "ip_log" not in st.session_state:
+    st.session_state.ip_log = []
+ip = st.context.ip_address or "localhost"
+st.session_state.ip_log.append(f"{datetime.now().strftime('%H:%M:%S')}  {ip}")
+st.session_state.ip_log = st.session_state.ip_log[-100:]  # cap growth
 
 with st.sidebar:
     authenticator.logout()
     st.caption(f"Signed in as {st.session_state.get('name')}")
 
     st.divider()
-    st.subheader("Local agent")
-    st.caption(
-        "Point this at a running control_api.py instance (see that file) "
-        "to let the assistant run a few read-only git commands against "
-        "your local repo. Entered here for this session only."
+    st.subheader("Request IP log")
+    st.text_area(
+        "Request IP log",
+        value="\n".join(reversed(st.session_state.ip_log)),
+        height=150,
+        disabled=True,
+        label_visibility="collapsed",
     )
-    local_agent_url = st.text_input("Local agent URL", placeholder="http://localhost:8000")
-    local_agent_key = st.text_input("API key", type="password")
+
+    st.divider()
+    st.subheader("Local agent")
+    local_agent_url = st.query_params.get("local_agent_url", "")
+    local_agent_key = st.secrets.get("LOCAL_AGENT_API_KEY", "")
 
     local_agent_config = None
     if local_agent_url and local_agent_key:
@@ -62,7 +52,13 @@ with st.sidebar:
             "url": local_agent_url.rstrip("/"),
             "api_key": local_agent_key,
         }
-        st.caption("🔧 Local agent configured — git status/branch/log are available.")
+        st.caption("🔧 Local agent configured — git status/branch/log, ls, and cd are available.")
+    else:
+        st.caption(
+            "Not connected. Get it from the home page (sidebar nav above) "
+            "and run it on your own machine — it'll open a new tab here "
+            "already connected."
+        )
 
 # All the built-in Responses API tools that don't need extra setup (unlike
 # file_search, which needs a vector store), plus the local git tool if
@@ -74,28 +70,39 @@ TOOLS = [
 ]
 LOCAL_AGENT_TOOL = {
     "type": "function",
-    "name": "run_git_command",
+    "name": "run_local_command",
     "description": (
-        "Run a read-only git command against the repository on the user's "
-        "local machine, via their local agent server."
+        "Run a command on the user's local machine via their local agent "
+        "server — not arbitrary shell access, but a fixed set of safe "
+        "operations: read-only git status/branch/log, 'ls' to list the "
+        "current directory, and 'cd' to switch which directory later "
+        "commands run in (persists across calls until changed again)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["status", "branch", "log"],
-                "description": "Which git command to run.",
+                "enum": ["status", "branch", "log", "ls", "cd"],
+                "description": "Which local action to run.",
             },
             "limit": {
                 "type": "integer",
                 "description": "Number of log entries to show (only used for the 'log' action).",
+            },
+            "path": {
+                "type": "string",
+                "description": (
+                    "Directory to switch to (only used for the 'cd' action). "
+                    "Absolute, or relative to the current directory."
+                ),
             },
         },
         "required": ["action"],
     },
 }
 active_tools = TOOLS + ([LOCAL_AGENT_TOOL] if local_agent_config else [])
+GIT_ACTIONS = {"status", "branch", "log"}  # the rest ("ls", "cd") aren't git subcommands
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -106,13 +113,13 @@ if "previous_response_id" not in st.session_state:
     st.session_state.previous_response_id = None
 
 
-def call_local_agent(local_agent_config, action, limit=5):
+def call_local_agent(local_agent_config, action, limit=5, path=None):
     """Call the user's local agent server; never raises, so a connection
     failure just gets reported back to the model as text."""
     try:
         response = requests.post(
             f"{local_agent_config['url']}/api/git",
-            json={"action": action, "limit": limit},
+            json={"action": action, "limit": limit, "path": path},
             headers={"X-API-Key": local_agent_config["api_key"]},
             timeout=15,
         )
@@ -152,10 +159,16 @@ def show_local_agent_calls(calls):
     """Render a demo-friendly summary of local agent tool calls."""
     if not calls:
         return
-    label = f"🔧 Ran {len(calls)} local git command{'s' if len(calls) != 1 else ''}"
+    label = f"🔧 Ran {len(calls)} local agent command{'s' if len(calls) != 1 else ''}"
     with st.expander(label):
         for entry in calls:
-            st.code(f"$ git {entry['action']}\n{entry['output']}", language="text")
+            if entry["action"] == "cd":
+                prefix = "$ cd"
+            elif entry["action"] in GIT_ACTIONS:
+                prefix = f"$ git {entry['action']}"
+            else:
+                prefix = f"$ {entry['action']}"
+            st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
 for message in st.session_state.messages:
@@ -251,11 +264,20 @@ if prompt := st.chat_input("Chat"):
             turn_input = []
             for call in response_meta["function_calls"]:
                 args = json.loads(call["arguments"])
-                if call["name"] == "run_git_command":
+                if call["name"] == "run_local_command":
                     action = args.get("action", "")
-                    with st.status(f"🔧 Running: git {action}"):
+                    if action == "cd":
+                        label = f"🔧 cd {args.get('path', '')}"
+                    elif action in GIT_ACTIONS:
+                        label = f"🔧 Running: git {action}"
+                    else:
+                        label = f"🔧 Running: {action}"
+                    with st.status(label):
                         output = call_local_agent(
-                            local_agent_config, action, args.get("limit", 5)
+                            local_agent_config,
+                            action,
+                            args.get("limit", 5),
+                            args.get("path"),
                         )
                         st.code(output, language="text")
                     aggregate["local_agent_calls"].append(
