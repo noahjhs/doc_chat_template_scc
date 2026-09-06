@@ -2,13 +2,19 @@
 .pricing/openai.md
 api_key.txt
 command_log.txt
-app_url.txt
+app_server.txt
+auth_server.txt
+session.json
 
-# Control API packaging: fetched binaries and build output, not source.
+# Auth service's local SQLite store -- never committed, deploy-time only.
+auth_service/users.db*
+
+# Control Tool packaging: fetched binaries and build output, not source.
 vendor/cloudflared/*
 !vendor/cloudflared/.gitkeep
 dist/
 build/pyinstaller_work/
+build/pyinstaller_dist/
 build/*.spec
 
 

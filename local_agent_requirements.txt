@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 pydantic
+requests
 
-# Build-only, for packaging control_api.py into a standalone executable
+# Build-only, for packaging control_tool.py into a standalone executable
 # (see build/build_macos.sh and build/build_windows.ps1). Not needed to
 # just run the server.
 pyinstaller

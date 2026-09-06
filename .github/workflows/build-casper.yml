@@ -1,14 +1,14 @@
-name: Build Control API installers
+name: Build Casper installers
 
 on:
   push:
     branches: [main, dev]
     paths:
-      - control_api.py
+      - casper_tool.py
       - build/**
       - vendor/cloudflared/**
       - local_agent_requirements.txt
-      - .github/workflows/build-control-api.yml
+      - .github/workflows/build-casper.yml
   workflow_dispatch:
 
 jobs:
@@ -30,8 +30,8 @@ jobs:
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
-          name: DocChatControlAPI-windows
-          path: dist/DocChatControlAPI-windows.zip
+          name: Casper-windows
+          path: dist/Casper-windows.zip
 
   macos:
     runs-on: macos-latest
@@ -45,5 +45,5 @@ jobs:
       - run: ./build/build_macos.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: DocChatControlAPI-macos
-          path: dist/DocChatControlAPI-macos.zip
+          name: Casper-macos
+          path: dist/Casper-macos.zip
