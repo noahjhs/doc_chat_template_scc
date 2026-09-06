@@ -1,0 +1,26 @@
+NAME = "Casper"
+TAGLINE = "your friendly ghost."
+
+# A simple, original ghost illustration (not any existing character's
+# design) -- plain SVG markup, safe to render via st.markdown(unsafe_allow_html=True)
+# since it's static vector markup, not a <script> tag (which that mechanism
+# can't reliably execute -- see pages/chat.py's notes on st.iframe).
+GHOST_SVG = """
+<svg width="{size}" height="{size}" viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg">
+  <path d="M60 8 C31 8 8 31 8 62 L8 122
+           C8 130 17 135 24 129 L35 118
+           C39 114 45 114 49 118 L55 125
+           C58 129 63 129 66 125 L72 118
+           C76 114 82 114 86 118 L97 129
+           C104 135 113 130 113 122 L113 62
+           C113 31 90 8 60 8 Z"
+        fill="#F3F7FF" stroke="#B9CDEE" stroke-width="2.5"/>
+  <circle cx="42" cy="60" r="7.5" fill="#3A4A63"/>
+  <circle cx="79" cy="60" r="7.5" fill="#3A4A63"/>
+  <path d="M44 84 Q60 97 77 84" stroke="#3A4A63" stroke-width="4" fill="none" stroke-linecap="round"/>
+</svg>
+"""
+
+
+def ghost_svg(size=120):
+    return GHOST_SVG.format(size=size)
