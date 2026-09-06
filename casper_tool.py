@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Run this on your own machine, e.g. via the packaged app, or from source
@@ -163,18 +162,9 @@ def clear_session():
         logger.warning("clear_session: couldn't remove %s: %s", SESSION_FILE, e)
 
 
-def save_session(username, token, browser_name=None):
-    """`browser_name` is the macOS app name detected from the sign-in
-    request's User-Agent (see detect_browser_name) -- remembered here so a
-    later run's bring_tab_into_view() has a real answer without needing a
-    fresh detection (the silent-reuse path never sees another HTTP request
-    to sniff a User-Agent from). Preserves whatever was already saved if
-    not given this time, rather than blanking it out."""
-    if browser_name is None:
-        existing = load_session()
-        browser_name = existing.get("browser") if existing else None
+def save_session(username, token):
     with open(SESSION_FILE, "w") as f:
-        json.dump({"username": username, "token": token, "browser": browser_name}, f)
+        json.dump({"username": username, "token": token}, f)
     try:
         os.chmod(SESSION_FILE, 0o600)
     except OSError:
@@ -197,37 +187,11 @@ def verify_session(auth_domain, token):
         return None
 
 
-def detect_browser_name(user_agent):
-    """Best-effort mapping from a browser's own User-Agent string (sniffed
-    from an actual HTTP request it made -- see open_pairing_page_and_wait)
-    to its macOS application name, for bring_tab_into_view()'s AppleScript.
-    Reliable for the major engines that identify themselves truthfully;
-    many Chromium-based browsers (Brave, Vivaldi, Arc, ...) deliberately
-    present as plain "Chrome" in their UA specifically to avoid this kind
-    of sniffing, so those are indistinguishable from real Chrome here --
-    returns None (letting the caller fall back to --browser/"Safari")
-    rather than guess wrong with false confidence."""
-    ua = user_agent or ""
-    if "Edg/" in ua or "EdgA/" in ua or "EdgiOS/" in ua:
-        return "Microsoft Edge"
-    if "OPR/" in ua:
-        return "Opera"
-    if "Firefox/" in ua and "Seamonkey" not in ua:
-        return "Firefox"
-    if "Chrome/" in ua and "Chromium/" not in ua:
-        return "Google Chrome"
-    if "Chromium/" in ua:
-        return "Chromium"
-    if "Safari/" in ua and "Chrome/" not in ua:
-        return "Safari"
-    return None
-
-
-# Maps a macOS application name (what --browser/bring_tab_into_view use)
+# Maps a macOS application name (what --browser/open_url_with_browser use)
 # to the short name Python's webbrowser module recognizes via
-# webbrowser.get() -- a much smaller set than the browsers we can *detect*
-# or *activate*, since it only covers browsers webbrowser.py ships a
-# controller for on macOS.
+# webbrowser.get() -- a much smaller set than the browsers we can *activate*,
+# since it only covers browsers webbrowser.py ships a controller for on
+# macOS.
 _WEBBROWSER_CONTROLLER_NAMES = {
     "safari": "safari",
     "google chrome": "chrome",
@@ -327,9 +291,8 @@ def open_url_with_browser(url, browser_name, new=2):
     Python's webbrowser module has a controller for it, otherwise falling
     back to the plain system default (webbrowser.open()) -- e.g. for
     browser_name=None, or browsers webbrowser.py doesn't specifically know
-    (Edge, Brave, Opera, ...). Used for testing against a browser other
-    than your system default (--browser), separately from
-    bring_tab_into_view's use of the same --browser value.
+    (Edge, Brave, Opera, ...). `browser_name` comes from --browser, for
+    testing against a browser other than your system default.
 
     Special-cased for a cold-launched Safari specifically (see
     _open_in_safaris_startup_tab) -- whether that's because `browser_name`
@@ -402,77 +365,6 @@ def show_farewell_dialog():
         logger.warning("show_farewell_dialog: couldn't show it: %s", e)
 
 
-def bring_tab_into_view(browser_name, title_substring):
-    """Best-effort, macOS-only: raises `browser_name` and switches it to
-    whichever of its tabs has `title_substring` in its title. Used when an
-    already-open tab self-navigates via JS (see click_anchor_js) -- that
-    changes the tab's content, but nothing about a page navigating itself
-    brings its own browser window forward, so without this the user has no
-    visual indication anything happened. Silently does nothing on
-    non-macOS, or if the named browser isn't running, isn't scriptable
-    (Firefox has essentially no AppleScript tab support at all), or
-    Automation permission hasn't been granted -- this is a nicety, never
-    something sign-in depends on.
-
-    Safari and Chromium-based browsers (Chrome, Edge, Opera, ...) use
-    genuinely different AppleScript terminology for the same concepts --
-    confirmed directly (not assumed) against a real running Safari:
-    a tab's page-title property is `name`, not `title` (`title of tab ...`
-    is flatly not a term Safari's dictionary recognizes), and a window's
-    displayed tab is set via `current tab of window`, not the
-    `active tab index` property Chromium's dictionary uses. Using the
-    wrong one doesn't fail quietly -- it's a syntax/runtime error, so both
-    are handled explicitly rather than guessing one and hoping."""
-    if sys.platform != "darwin":
-        return
-
-    if browser_name.strip().lower() == "safari":
-        script = f"""
-        tell application "{browser_name}"
-            set winCount to count of windows
-            repeat with i from 1 to winCount
-                set w to window i
-                set tabCount to count of tabs of w
-                repeat with j from 1 to tabCount
-                    if name of tab j of w contains "{title_substring}" then
-                        set current tab of w to tab j of w
-                        set index of w to 1
-                        activate
-                    end if
-                end repeat
-            end repeat
-        end tell
-        """
-    else:
-        script = f"""
-        tell application "{browser_name}"
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if title of t contains "{title_substring}" then
-                        set active tab index of w to (index of t)
-                        set index of w to 1
-                        activate
-                    end if
-                end repeat
-            end repeat
-        end tell
-        """
-
-    try:
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5, check=False, text=True)
-        if result.returncode != 0:
-            # Logged (not just swallowed) since this is otherwise invisible --
-            # e.g. macOS denying Apple Events from this unsigned,
-            # non-.app-bundle binary would show up here rather than as a
-            # permission prompt the way a proper .app would get.
-            logger.warning(
-                "bring_tab_into_view: osascript exited %s targeting %r: %s",
-                result.returncode, browser_name, result.stderr.strip(),
-            )
-    except Exception as e:  # noqa: BLE001 -- best-effort only, but still log why
-        logger.warning("bring_tab_into_view: couldn't run osascript: %s", e)
-
-
 # A complete, ordinary standalone page -- sent as soon as the sign-in
 # callback lands (see open_pairing_page_and_wait), before the Cloudflare
 # tunnel has actually come up, so the tab shows something rather than a
@@ -484,9 +376,7 @@ def bring_tab_into_view(browser_name, title_substring):
 # question entirely: this response is done the moment it's sent (ordinary
 # framing, nothing kept open), and this page's own JS polls /status on
 # this same local listener for when the tunnel's ready, redirecting itself
-# once it is -- the same already-working pattern casper_app.py's landing
-# page and pages/chat.py's reconnect poll already use elsewhere in this
-# codebase, just against this run's pairing listener instead.
+# once it is.
 PAIRING_SPINNER_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Casper</title>
 <style>
@@ -529,9 +419,8 @@ def open_pairing_page_and_wait(app_domain, on_authenticated, port, browser_name,
 
     Binds to `port` (the same port the main API server uses once pairing
     completes -- they never run at the same time, so there's no conflict)
-    rather than a random one, so a landing/chat page left open from a
-    previous run can discover this run's /signin URL via /api/pairing-info
-    and navigate itself there, instead of a new tab being opened for it.
+    rather than a random one -- that's just so both phases of this one run
+    share a single, predictable port.
 
     `on_authenticated(username, token)` runs in a background thread once
     that callback arrives -- callers do the tunnel-starting work in there
@@ -548,7 +437,6 @@ def open_pairing_page_and_wait(app_domain, on_authenticated, port, browser_name,
     sitting on the one request. Exits the process if nothing arrives within
     `timeout` seconds."""
     nonce = secrets.token_urlsafe(16)
-    done = {}
     auth_result = {}
     auth_done_event = threading.Event()
     pair_url = (
@@ -558,26 +446,6 @@ def open_pairing_page_and_wait(app_domain, on_authenticated, port, browser_name,
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlsplit(self.path)
-            if parsed.path == "/api/pairing-info":
-                # Unauthenticated (no token exists yet to check) and
-                # CORS-open, since an already-open page on a different
-                # origin (the deployed web app) is what polls this -- it
-                # only ever reveals a URL to go sign in at, never anything
-                # sensitive. Marking this "polled" is what lets the grace
-                # period below skip opening a second tab -- something is
-                # already about to navigate itself there.
-                done["polled"] = True
-                detected = detect_browser_name(self.headers.get("User-Agent", ""))
-                if detected:
-                    done["browser"] = detected
-                body = json.dumps({"signin_url": pair_url}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
             if parsed.path == "/status":
                 # Polled by PAIRING_SPINNER_HTML's own JS -- same-origin
                 # (that page came from this same listener), no CORS needed.
@@ -594,13 +462,9 @@ def open_pairing_page_and_wait(app_domain, on_authenticated, port, browser_name,
             if qs.get("nonce", [None])[0] == nonce and qs.get("token"):
                 username = qs.get("username", [""])[0]
                 token = qs["token"][0]
-                detected = detect_browser_name(self.headers.get("User-Agent", ""))
-                if detected:
-                    done["browser"] = detected
-                done["token_received"] = True
 
                 def _run_on_authenticated():
-                    auth_result["chat_url"] = on_authenticated(username, token, done.get("browser"))
+                    auth_result["chat_url"] = on_authenticated(username, token)
                     auth_done_event.set()
 
                 threading.Thread(target=_run_on_authenticated, daemon=True).start()
@@ -623,44 +487,10 @@ def open_pairing_page_and_wait(app_domain, on_authenticated, port, browser_name,
         sys.exit(1)
 
     print(f"Sign in to continue: {pair_url}", flush=True)
-
-    # Give an already-open landing/chat page (polling /api/pairing-info --
-    # see casper_app.py and pages/chat.py's signed-out state) a brief window
-    # to discover this pairing session and navigate itself there first.
-    # Only open a new tab if nothing claims it in time (e.g. no such page is
-    # currently open) -- otherwise we'd end up with two tabs both landing
-    # on /signin. This is dead time on every run where no such page happens
-    # to be open (the common case -- most launches), so it's kept as short
-    # as casper_app.py's own poll interval reasonably allows: that page
-    # polls immediately on load and every 750ms after, so 1.5s comfortably
-    # covers one full cycle of that (with real margin for network/page-load
-    # jitter) without unnecessarily stretching out every other launch.
-    grace_deadline = time.time() + 1.5
-    while "polled" not in done and "token_received" not in done and time.time() < grace_deadline:
-        server.timeout = max(0.1, grace_deadline - time.time())
-        server.handle_request()
-
-    if "token_received" not in done and "polled" not in done:
-        try:
-            open_url_with_browser(pair_url, browser_name)
-        except Exception:  # noqa: BLE001 -- fall through to the printed URL either way
-            pass
-    elif "polled" in done:
-        # An already-open tab is about to navigate itself to /signin (no
-        # new tab opened for it) -- but that self-navigation doesn't bring
-        # its own browser window forward, so do that explicitly. Only ever
-        # uses the browser actually detected from that tab's own request
-        # (see detect_browser_name) -- deliberately *not* --browser/default:
-        # that flag is about which browser *opens a new tab*, a separate
-        # concern, and guessing wrong here wouldn't just silently do
-        # nothing -- `tell application "X"` launches X if it isn't already
-        # running, so a wrong guess could pop open a browser that has
-        # nothing to do with this session.
-        detected = done.get("browser")
-        if detected:
-            bring_tab_into_view(detected, "Casper")
-        else:
-            logger.info("Couldn't tell which browser that tab is in (unrecognized User-Agent) -- not bringing it forward.")
+    try:
+        open_url_with_browser(pair_url, browser_name)
+    except Exception:  # noqa: BLE001 -- fall through to the printed URL either way
+        pass
 
     # Keeps answering requests (the initial token callback, then the
     # spinner page's own /status polls) until on_authenticated's background
@@ -711,8 +541,8 @@ def ensure_authenticated(app_domain, auth_domain, port, browser_name):
 
     result = {}
 
-    def on_authenticated(username, token, detected_browser):
-        save_session(username, token, detected_browser)
+    def on_authenticated(username, token):
+        save_session(username, token)
         logger.info("Signed in as %s", username)
         tunnel_proc, chat_url = start_and_open_chat(app_domain, token, port, open_new_tab=False)
         result["token"] = token
@@ -724,18 +554,6 @@ def ensure_authenticated(app_domain, auth_domain, port, browser_name):
 
 
 app = FastAPI()
-
-# /api/session-info is fetched directly from the browser (not server-side
-# like the other endpoints), so it needs real CORS headers or the browser
-# blocks it before the request ever lands here. Permissive by design: the
-# X-API-Key check on every endpoint is the actual security boundary, not
-# CORS -- this just lets a page prove it holds a valid key at all.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["X-API-Key"],
-)
 
 # Set in __main__ before the server starts serving -- None only very briefly
 # at import time, and always non-None by the time any request is handled.
@@ -749,12 +567,6 @@ API_KEY = None
 # own event loop notice and shut down in-process, which does.
 _uvicorn_server = None
 
-# The current Cloudflare tunnel's public URL, set in start_and_open_chat()
-# once the tunnel comes up. Lets an already-open chat tab from a previous
-# run (see /api/session-info below) discover it without a new tab ever
-# being opened for it.
-CURRENT_TUNNEL_URL = None
-
 
 def require_api_key(x_api_key: str = Header(default=None)) -> None:
     if API_KEY is None or x_api_key != API_KEY:
@@ -765,15 +577,6 @@ def require_api_key(x_api_key: str = Header(default=None)) -> None:
 @app.get("/api/health")
 def health(_=Depends(require_api_key)):
     return {"ok": True}
-
-
-@app.get("/api/session-info")
-def session_info(_=Depends(require_api_key)):
-    """Lets a chat tab still open from a previous run discover this run's
-    (new) tunnel URL -- see pages/chat.py's background reconnect poll. Only
-    reachable with the same API key that tab already has, so this doesn't
-    leak anything to a session that isn't already this one."""
-    return {"tunnel_url": CURRENT_TUNNEL_URL}
 
 
 # Deliberately NOT in ACTION_HANDLERS/COMMAND_CATEGORIES below -- this must
@@ -1214,20 +1017,14 @@ def start_tunnel(port, url_timeout=30):
 
 def start_and_open_chat(app_domain, api_key, port, open_new_tab, browser_name=None):
     """Starts the Cloudflare tunnel and builds the chat app's URL, passing
-    the tunnel URL, API key, this server's own local port, and the confined
-    workspace directory along as query params so the chat page connects
-    automatically and can greet the user with it -- the port is what lets a
-    chat tab still open from a previous run find this run's
-    /api/session-info and reconnect itself instead of a new tab being
-    opened for it (see pages/chat.py). If `open_new_tab`, also opens it in
-    a new browser tab (in `browser_name` if given -- see
-    open_url_with_browser -- otherwise the system default) -- pass
-    open_new_tab=False when the caller will instead redirect an
-    already-open tab there itself (e.g. the /signin tab, once pairing
-    completes). Returns (tunnel_proc, chat_url)."""
-    global CURRENT_TUNNEL_URL
+    the tunnel URL, API key, and the confined workspace directory along as
+    query params so the chat page connects automatically and can greet the
+    user with it. If `open_new_tab`, also opens it in a new browser tab (in
+    `browser_name` if given -- see open_url_with_browser -- otherwise the
+    system default) -- pass open_new_tab=False when the caller will instead
+    redirect an already-open tab there itself (e.g. the /signin tab, once
+    pairing completes). Returns (tunnel_proc, chat_url)."""
     tunnel_proc, tunnel_url = start_tunnel(port)
-    CURRENT_TUNNEL_URL = tunnel_url
 
     app_url = build_app_url(app_domain)
     open_url = app_url
@@ -1236,7 +1033,6 @@ def start_and_open_chat(app_domain, api_key, port, open_new_tab, browser_name=No
         query = f"{parts.query}&" if parts.query else ""
         query += f"local_agent_url={quote(tunnel_url, safe='')}"
         query += f"&local_agent_token={quote(api_key, safe='')}"
-        query += f"&local_agent_port={port}"
         query += f"&local_agent_workspace={quote(ROOT_DIR, safe='')}"
         open_url = urlunsplit(parts._replace(query=query))
 
@@ -1279,16 +1075,10 @@ if __name__ == "__main__":
             "macOS application name of the browser to use, e.g. 'Safari', "
             "'Google Chrome', 'Firefox' -- for testing against a browser "
             "other than your system default (the default when this isn't "
-            "given at all). Only "
-            "controls which browser opens when a brand new tab is needed "
-            "(no effect if Python's webbrowser module has no specific "
-            "support for it, e.g. Edge/Brave/Opera -- falls back to the "
-            "system default for those). Unrelated to, and never used for, "
-            "bringing an *already-open* tab to the front when it's reused "
-            "for sign-in instead of a new one being opened -- that's always "
-            "based on whatever browser is actually detected from that tab's "
-            "own request, never a guess. No effect on non-macOS; sign-in "
-            "itself works regardless of any of this."
+            "given at all). No effect if Python's webbrowser module has no "
+            "specific support for it (e.g. Edge/Brave/Opera -- falls back "
+            "to the system default for those). No effect on non-macOS; "
+            "sign-in itself works regardless of any of this."
         ),
     )
     cli_args = arg_parser.parse_args()

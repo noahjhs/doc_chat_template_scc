@@ -5,8 +5,8 @@ import streamlit as st
 from utils.auth import build_pairing_redirect_url, login_with_auth_service
 from utils.browser_nav import autofocus_input_js, click_anchor_js
 
-# Same reasoning as casper_app.py's set_page_config -- keeps the tab title
-# searchable by casper_tool.py's bring-tab-into-view AppleScript.
+# Same reasoning as casper_app.py's set_page_config -- a consistent tab
+# identity across the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
 
 st.title("Sign in")

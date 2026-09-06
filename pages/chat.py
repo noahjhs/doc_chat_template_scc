@@ -8,10 +8,9 @@ from openai import OpenAI
 
 from utils.auth import require_agent_session, revoke_token_with_auth_service
 from utils.branding import NAME, TAGLINE, ghost_svg
-from utils.browser_nav import click_anchor_js
 
-# Same reasoning as casper_app.py's set_page_config -- keeps the tab title
-# searchable by casper_tool.py's bring-tab-into-view AppleScript.
+# Same reasoning as casper_app.py's set_page_config -- a consistent tab
+# identity across the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
 
 
@@ -111,13 +110,11 @@ st.session_state.ip_log = st.session_state.ip_log[-100:]  # cap growth
 if "_local_agent_config" not in st.session_state:
     local_agent_url = st.query_params.get("local_agent_url", "")
     local_agent_token = st.query_params.get("local_agent_token", "")
-    local_agent_port = st.query_params.get("local_agent_port", "")
     local_agent_workspace = st.query_params.get("local_agent_workspace", "")
     st.session_state["_local_agent_config"] = (
         {
             "url": local_agent_url.rstrip("/"),
             "api_key": local_agent_token,
-            "port": local_agent_port,
             "workspace": local_agent_workspace,
         }
         if local_agent_url and local_agent_token
@@ -125,52 +122,14 @@ if "_local_agent_config" not in st.session_state:
     )
 local_agent_config = st.session_state["_local_agent_config"]
 
-# Background reconnect: if Casper gets fully quit and relaunched while this
-# tab is still open, its tunnel dies with it, and a new one opens for the
-# fresh run -- rather than leaving this tab dead (and a second tab getting
-# opened for that new run), poll Casper directly on localhost (same
-# machine, not through the tunnel) for its current tunnel URL, and if it's
-# different from this tab's, navigate this same tab to it. Requires the
-# port Casper's own server is bound to, which older links (from before this
-# feature) won't carry -- skip silently if so.
-if local_agent_config and local_agent_config.get("port"):
-    reconnect_nav_js = click_anchor_js(
-        'window.parent.location.pathname + "?" + params.toString()'
-    )
-    st.iframe(
-        f"""<script>
-(function() {{
-    var port = {json.dumps(local_agent_config["port"])};
-    var token = {json.dumps(local_agent_config["api_key"])};
-    var currentUrl = {json.dumps(local_agent_config["url"])};
-    function poll() {{
-        fetch("http://localhost:" + port + "/api/session-info", {{headers: {{"X-API-Key": token}}}})
-            .then(function(r) {{ return r.ok ? r.json() : null; }})
-            .then(function(data) {{
-                if (data && data.tunnel_url && data.tunnel_url !== currentUrl) {{
-                    var params = new URLSearchParams();
-                    params.set("local_agent_url", data.tunnel_url);
-                    params.set("local_agent_token", token);
-                    params.set("local_agent_port", port);
-                    {reconnect_nav_js}
-                }}
-            }})
-            .catch(function() {{}});
-    }}
-    setInterval(poll, 5000);
-}})();
-</script>""",
-        height=1,
-    )
-
 # Cosmetic: once the query params have been read (above), drop them from
 # the visible URL so the address bar just shows .../chat. This only
 # rewrites what's displayed (history.replaceState doesn't fire a
 # navigation or a popstate event), so it doesn't affect the already-cached
 # session_state values above or trigger a rerun. Runs in the *parent* page
 # (window.parent), since the script itself executes inside st.iframe's own
-# iframe -- see the note on the sign-out modal above for why st.iframe
-# instead of st.markdown(unsafe_allow_html=True).
+# iframe -- st.iframe (not st.markdown(unsafe_allow_html=True)) is what
+# actually gets a script to run at all here.
 if "_url_cleaned" not in st.session_state:
     st.iframe(
         "<script>window.parent.history.replaceState(null, '', window.parent.location.pathname);</script>",
