@@ -12,13 +12,7 @@ auth_service/users.db*
 # Control Tool packaging: fetched binaries and build output, not source.
 vendor/cloudflared/*
 !vendor/cloudflared/.gitkeep
-# The staged Casper/ subdirectory (which also picks up runtime files like
-# session.json/command_log.txt from a local test run) stays ignored -- only
-# the actual distributable zips are tracked (via Git LFS -- see
-# .gitattributes), since casper_app.py's download page serves them straight
-# from this path on the deployed app.
-dist/*
-!dist/*.zip
+dist/
 build/pyinstaller_work/
 build/pyinstaller_dist/
 build/*.spec
@@ -35,6 +29,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 develop-eggs/
+dist/
 downloads/
 eggs/
 .eggs/
