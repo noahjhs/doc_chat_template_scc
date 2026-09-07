@@ -1,5 +1,6 @@
 import base64
 import json
+import threading
 from datetime import datetime
 
 import requests
@@ -10,8 +11,17 @@ from utils.auth import require_agent_session, revoke_token_with_auth_service
 from utils.branding import NAME, TAGLINE, ghost_svg
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
-# identity across the whole flow.
-st.set_page_config(page_title="Casper", page_icon="👻")
+# identity across the whole flow -- except once signed out, when the title
+# switches to "Done" so the tab reads at a glance (useful in a crowded tab
+# bar) that it's finished and safe to close, since it doesn't close itself
+# (see the _signed_out branch below for why). st.set_page_config must be the
+# first Streamlit call in the script but only runs once per rerun, so
+# picking the title from session_state up front (not a second call) is what
+# makes this conditional.
+st.set_page_config(
+    page_title="Done" if st.session_state.get("_signed_out") else "Casper",
+    page_icon="👻",
+)
 
 
 @st.cache_resource
@@ -59,15 +69,24 @@ if st.session_state.get("_signing_out"):
     agent_config = st.session_state.get("_local_agent_config")
     with st.spinner("Signing out..."):
         if agent_config:
-            try:
-                requests.post(
-                    f"{agent_config['url']}/api/shutdown",
-                    headers={"X-API-Key": agent_config["api_key"]},
-                    timeout=5,
-                )
-            except requests.RequestException:
-                pass  # best-effort -- the local process may already be gone
+            # Was sequential (up to 5s + 5s) -- run the shutdown call on a
+            # background thread so it overlaps with the revoke call instead
+            # of adding to it, since both are independent, best-effort, and
+            # already individually timeout-bounded.
+            def _shutdown_local_agent():
+                try:
+                    requests.post(
+                        f"{agent_config['url']}/api/shutdown",
+                        headers={"X-API-Key": agent_config["api_key"]},
+                        timeout=5,
+                    )
+                except requests.RequestException:
+                    pass  # best-effort -- the local process may already be gone
+
+            shutdown_thread = threading.Thread(target=_shutdown_local_agent)
+            shutdown_thread.start()
             revoke_token_with_auth_service(st.secrets["AUTH_SERVICE_DOMAIN"], agent_config["api_key"])
+            shutdown_thread.join(timeout=5)
     st.session_state.clear()
     st.query_params.clear()
     st.session_state["_signed_out"] = True
@@ -148,7 +167,7 @@ def _start_sign_out():
 
 
 with st.sidebar:
-    st.button("Sign out", on_click=_start_sign_out)
+    st.button("Sign out", key="sign_out_button", on_click=_start_sign_out)
     st.caption(f"Signed in as {username}")
 
     st.divider()

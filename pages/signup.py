@@ -1,4 +1,5 @@
 import json
+import time
 
 import streamlit as st
 
@@ -32,8 +33,13 @@ auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
 # (and, for signup specifically, fail outright with "username taken").
 if "_signup_redirect_url" not in st.session_state:
     with st.form("signup_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        # autocomplete="new-password" (not "current-password") is the actual
+        # signal browsers use to tell a signup form apart from a login one --
+        # it's what stops Keychain/Chrome from offering to autofill an
+        # *existing* saved credential here, while still letting them offer to
+        # generate/remember a new one, which is the behavior we want.
+        username = st.text_input("Username", autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="new-password")
         submitted = st.form_submit_button("Sign up", type="primary")
 
     # Ready to type into without an extra click.
@@ -46,7 +52,15 @@ if "_signup_redirect_url" not in st.session_state:
     )
 
     if submitted:
-        result = signup_with_auth_service(auth_domain, username, password)
+        # See pages/signin.py's identical spinner for why, including the
+        # minimum-duration padding: without it, a repeated failure (e.g.
+        # "username taken") renders identical text in the same spot, and the
+        # request round trip is fast enough that the spinner alone flashes
+        # by too quickly to actually be seen.
+        start = time.monotonic()
+        with st.spinner("Signing up..."):
+            result = signup_with_auth_service(auth_domain, username, password)
+            time.sleep(max(0.0, 0.5 - (time.monotonic() - start)))
         if "error" in result:
             st.error(result["error"])
         else:

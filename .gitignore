@@ -4,6 +4,7 @@ api_key.txt
 command_log.txt
 app_server.txt
 auth_server.txt
+relay_server.txt
 session.json
 
 # Auth service's local SQLite store -- never committed, deploy-time only.
@@ -22,6 +23,9 @@ dist/
 build/pyinstaller_work/
 build/pyinstaller_dist/
 build/*.spec
+build/go_macos_dist/
+build/Casper.icns
+build/Casper.iconset/
 
 
 # Byte-compiled / optimized / DLL files

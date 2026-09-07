@@ -29,6 +29,17 @@ services:
     networks:
       - casper-net
 
+  relay:
+    build:
+      context: ./relay
+      dockerfile: Dockerfile
+    container_name: casper-relay
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8600:8600"   # local-only, for debugging
+    networks:
+      - casper-net
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: casper-cloudflared
@@ -45,6 +56,7 @@ services:
     depends_on:
       - app
       - auth
+      - relay
     networks:
       - casper-net
 
