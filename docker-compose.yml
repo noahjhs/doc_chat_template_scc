@@ -1,0 +1,56 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: casper-app
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./dist:/app/dist:ro
+    ports:
+      - "127.0.0.1:8501:8501"   # local-only, for debugging; not required for the tunnel
+    depends_on:
+      - auth
+    networks:
+      - casper-net
+
+  auth:
+    build:
+      context: ./auth_service
+      dockerfile: Dockerfile
+    container_name: casper-auth
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - auth_db:/data
+    ports:
+      - "127.0.0.1:8100:8100"   # local-only, for debugging
+    networks:
+      - casper-net
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: casper-cloudflared
+    restart: unless-stopped
+    # The official image runs as non-root (UID 65532, $HOME=/home/nonroot) --
+    # cloudflared's default cert/credentials paths live under $HOME/.cloudflared,
+    # so the mount point below must match that, not an arbitrary path like
+    # /etc/cloudflared (confirmed the hard way: "tunnel login" silently wrote
+    # cert.pem to the container's ephemeral /home/nonroot/.cloudflared instead
+    # of a wrong mount point, and it was lost on container exit).
+    command: tunnel --config /home/nonroot/.cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/home/nonroot/.cloudflared
+    depends_on:
+      - app
+      - auth
+    networks:
+      - casper-net
+
+networks:
+  casper-net:
+    driver: bridge
+
+volumes:
+  auth_db:
