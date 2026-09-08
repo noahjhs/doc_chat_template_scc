@@ -40,29 +40,15 @@ services:
     networks:
       - casper-net
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: casper-cloudflared
-    restart: unless-stopped
-    # The official image runs as non-root (UID 65532, $HOME=/home/nonroot) --
-    # cloudflared's default cert/credentials paths live under $HOME/.cloudflared,
-    # so the mount point below must match that, not an arbitrary path like
-    # /etc/cloudflared (confirmed the hard way: "tunnel login" silently wrote
-    # cert.pem to the container's ephemeral /home/nonroot/.cloudflared instead
-    # of a wrong mount point, and it was lost on container exit).
-    command: tunnel --config /home/nonroot/.cloudflared/config.yml run
-    volumes:
-      - ./cloudflared:/home/nonroot/.cloudflared
-    depends_on:
-      - app
-      - auth
-      - relay
-    networks:
-      - casper-net
-
 networks:
+  # Shared across the dev and prod environments (and cloudflared, which lives
+  # in its own ~/casper-infra/ directory, outside either environment's git
+  # checkout) -- externally created once (`docker network create
+  # casper-shared`), not owned by this compose project's lifecycle, so
+  # `docker compose down` here never risks recreating or orphaning it.
   casper-net:
-    driver: bridge
+    external: true
+    name: casper-shared
 
 volumes:
   auth_db:
