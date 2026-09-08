@@ -16,6 +16,16 @@ def _auth_domain():
     return st.secrets["AUTH_SERVICE_DOMAIN"]
 
 
+def app_subdomain_url():
+    """Base URL (with scheme) of this deployment's "app" subdomain -- where
+    /signin, /signup, and /chat live. Used by the www-hosted landing/download
+    pages to link there across subdomains (see APP_SUBDOMAIN_DOMAIN in
+    docker/app-entrypoint.sh) -- pages already served from the app subdomain
+    itself (signin.py, signup.py, chat.py) never need this; they link to
+    each other with plain relative paths."""
+    return _base_url(st.secrets["APP_SUBDOMAIN_DOMAIN"])
+
+
 def signup_with_auth_service(auth_domain, username, password):
     """POST /signup. Returns {"username", "token"} on success, or
     {"error": str} -- a taken username, a validation failure, and a network

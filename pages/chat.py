@@ -15,7 +15,7 @@ from utils.auth import (
     require_agent_session,
     revoke_token_with_auth_service,
 )
-from utils.branding import NAME, TAGLINE, ghost_svg
+from utils.branding import NAME, page_header
 from utils.browser_nav import click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
@@ -74,12 +74,7 @@ if st.session_state.get("_signing_out"):
 username = require_agent_session()
 client = get_client()
 
-col1, col2 = st.columns([1, 8])
-with col1:
-    st.markdown(ghost_svg(48), unsafe_allow_html=True)
-with col2:
-    st.subheader(NAME)
-    st.caption(TAGLINE)
+page_header(size=48)
 
 # Mirrors casper_tool.py's COMMAND_CATEGORIES — the two run as separate
 # processes on separate machines, so this list is duplicated rather than

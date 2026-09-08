@@ -9,6 +9,7 @@ mkdir -p /app/.streamlit
 cat > /app/.streamlit/secrets.toml <<EOF
 OPENAI_API_KEY = "${OPENAI_API_KEY:?OPENAI_API_KEY not set}"
 AUTH_SERVICE_DOMAIN = "${AUTH_SERVICE_DOMAIN:?AUTH_SERVICE_DOMAIN not set}"
+APP_SUBDOMAIN_DOMAIN = "${APP_SUBDOMAIN_DOMAIN:?APP_SUBDOMAIN_DOMAIN not set}"
 EOF
 
 exec "$@"

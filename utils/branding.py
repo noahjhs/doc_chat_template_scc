@@ -1,3 +1,5 @@
+import streamlit as st
+
 NAME = "Casper"
 TAGLINE = "your friendly ghost."
 
@@ -24,3 +26,23 @@ GHOST_SVG = """
 
 def ghost_svg(size=120):
     return GHOST_SVG.format(size=size)
+
+
+def page_header(size=32):
+    """The clickable brand+logo every page shows in the upper-left, linking
+    back to the home page -- so no page ever needs its own "back home" link.
+    A real <a> tag (not st.markdown's `[text](url)` syntax) is deliberate:
+    Streamlit's frontend specially intercepts markdown-authored links whose
+    href matches a known page path for client-side multipage routing, which
+    is what was silently breaking the browser back button when navigating
+    between pages -- a raw HTML anchor isn't subject to that, so the browser
+    handles it as an ordinary same-tab navigation with normal history.
+    target="_self" is explicit for the same reason casper_app.py's other
+    same-subdomain links are: this always points at a relative "/", so it's
+    always same-subdomain navigation, which should never open a new tab."""
+    st.markdown(
+        f'<a href="/" target="_self" style="text-decoration:none;color:inherit;'
+        f'display:inline-flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">'
+        f'{ghost_svg(size)}<span style="font-size:{round(size * 0.6)}px;font-weight:700;">{NAME}</span></a>',
+        unsafe_allow_html=True,
+    )
