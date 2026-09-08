@@ -1,9 +1,11 @@
-// Casper — your friendly ghost. Run this on your own machine; first run
-// opens a browser tab to sign up or log in, after that it's silent. For a
-// non-interactive run (dev/CI), set CONTROL_TOOL_KEY directly.
-//
-// A port of casper_tool.py's __main__ orchestration, tying together the
-// config/browser/dialog/pairing/tunnel/commands/server packages.
+// Casper — your friendly ghost. Runs as a persistent background daemon,
+// typically added to macOS Login Items and left running indefinitely,
+// toggled on/off via its status-bar icon. Users sign in by navigating to
+// the deployed web app themselves; a successful sign-in fires a
+// casper://pair?token=...&username=... link, which the OS hands to this
+// process (already running, or freshly launched) as an Apple Event -- see
+// internal/urlscheme and daemon.go's handlePairURL. For a non-interactive
+// run (dev/CI), set CONTROL_TOOL_KEY directly.
 package main
 
 import (
@@ -11,74 +13,26 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"syscall"
 
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
-	"casper-agent/internal/pairing"
 	"casper-agent/internal/server"
-	"casper-agent/internal/tunnel"
+	"casper-agent/internal/urlscheme"
+
+	"github.com/getlantern/systray"
 )
 
-func usage() {
-	fmt.Fprint(os.Stderr, `Casper — your friendly ghost
-
-Usage: casper [--agent-server [HOST[:PORT]]] [--browser NAME]
-
-  --agent-server [HOST[:PORT]]
-        Open the chat app at HOST[:PORT] (default localhost:8501, Streamlit's
-        default) instead of the baked-in domain -- for testing against a
-        Streamlit instance running elsewhere.
-
-  --browser NAME
-        macOS application name of the browser to use, e.g. 'Safari',
-        'Google Chrome', 'Firefox' -- for testing against a browser other
-        than your system default. No effect on non-macOS.
-`)
-}
-
-// parseArgs replicates argparse's nargs="?" behavior for --agent-server
-// (bare flag -> "localhost:8501"; flag with a value -> that value; flag
-// absent -> nil) -- Go's stdlib flag package has no equivalent mode, so this
-// is done by hand rather than fighting it into that shape.
-func parseArgs(args []string) (agentServer *string, browserName string) {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			usage()
-			os.Exit(0)
-		case arg == "--agent-server":
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				v := args[i+1]
-				agentServer = &v
-				i++
-			} else {
-				v := "localhost:8501"
-				agentServer = &v
-			}
-		case strings.HasPrefix(arg, "--agent-server="):
-			v := strings.TrimPrefix(arg, "--agent-server=")
-			agentServer = &v
-		case arg == "--browser":
-			if i+1 < len(args) {
-				browserName = args[i+1]
-				i++
-			}
-		case strings.HasPrefix(arg, "--browser="):
-			browserName = strings.TrimPrefix(arg, "--browser=")
-		}
-	}
-	return
-}
-
-// fatal shows a native error dialog and exits -- the only way a startup
-// failure is ever visible to the user now that the binary runs directly
-// with no console (see build/build_go_macos.sh). Still prints too, which
-// remains useful when run from an actual terminal during development.
+// fatal shows a native error dialog and exits -- used only for startup
+// failures that leave the daemon unable to do anything useful at all (no
+// workspace, no log file, no domains configured). Once past startup, a
+// failure (relay down, auth service unreachable) no longer takes the whole
+// process down -- it just leaves the daemon retrying/idle, since it's now
+// meant to keep running indefinitely as a login item.
 func fatal(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	fmt.Fprintln(os.Stderr, message)
@@ -87,12 +41,24 @@ func fatal(format string, args ...any) {
 }
 
 func main() {
-	agentServerOverride, browserName := parseArgs(os.Args[1:])
+	// Registered before anything else -- in particular, before
+	// config.ResolveWorkspaceDir() below, which can block on a native
+	// folder-picker dialog, and before systray.Run(). A throwaway spike
+	// confirmed registering this late (even just inside systray's onReady)
+	// reliably misses the Apple Event on a cold launch triggered by the
+	// pairing link itself; registering here catches both that case and the
+	// already-running case. Events that arrive before setup below finishes
+	// just queue here rather than being dropped.
+	pendingPairURLs := make(chan string, 4)
+	if err := urlscheme.Register(func(rawURL string) {
+		select {
+		case pendingPairURLs <- rawURL:
+		default: // buffer full -- extremely unlikely; drop rather than block the dispatch thread
+		}
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Couldn't register the casper:// URL handler: %s\n", err)
+	}
 
-	// Resolving the workspace can block on a native folder-picker dialog --
-	// deliberately the very first thing that happens, before any logging or
-	// network setup, matching casper_tool.py's ROOT_DIR being resolved at
-	// module import time (before __main__ runs at all).
 	workspaceDir, err := config.ResolveWorkspaceDir()
 	if err != nil {
 		fatal("Couldn't resolve a workspace directory: %s", err)
@@ -117,17 +83,6 @@ func main() {
 		}
 	}
 
-	appDomain := config.LoadAppDomain()
-	if agentServerOverride != nil {
-		appDomain = *agentServerOverride
-	}
-	if appDomain == "" {
-		fatal("No web app domain configured (app_server.txt/--agent-server) — can't sign in or open the chat app.")
-	}
-
-	// Authenticate before the relay connection starts: pairing only ever
-	// talks to localhost (the browser reaches this machine directly, not
-	// through the relay), so there's nothing relay-dependent about it.
 	authDomain, err := config.LoadAuthDomain()
 	if err != nil {
 		fatal("%s", err)
@@ -136,29 +91,104 @@ func main() {
 	if err != nil {
 		fatal("%s", err)
 	}
-
-	var apiKey string
-	var tun *tunnel.Tunnel
-	if envKey := os.Getenv("CONTROL_TOOL_KEY"); envKey != "" {
-		apiKey = envKey
-		tun, _ = pairing.StartAndOpenChat(appDomain, relayDomain, apiKey, port, workspaceDir, true, browserName)
-	} else {
-		apiKey, tun, err = pairing.EnsureAuthenticated(appDomain, authDomain, relayDomain, port, workspaceDir, browserName, logf)
-		if err != nil {
-			fatal("%s", err)
-		}
+	routingKey, err := config.LoadOrCreateRoutingKey()
+	if err != nil {
+		fatal("Couldn't set up a relay routing key: %s", err)
 	}
-	defer tun.Terminate()
 
 	cmdHandler := commands.New(workspaceDir)
-	srv := server.New(apiKey, cmdHandler, logger)
+	srv := server.New("", cmdHandler, logger)
 	srv.ClearSession = func() { config.ClearSession(logf) }
-	srv.OnShutdownRequested = func() {
-		dialog.ShowFarewellDialog(logf)
-		srv.Shutdown()
+
+	state := newDaemonState(srv, relayDomain, authDomain, routingKey, port, workspaceDir, logf)
+	srv.OnSignOut = state.onSignOut
+
+	go func() {
+		if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
+			logf("Server error: %s", err)
+		}
+	}()
+
+	go func() {
+		for rawURL := range pendingPairURLs {
+			state.handlePairURL(rawURL)
+		}
+	}()
+
+	// A non-interactive run (dev/CI): use the key directly, skip the
+	// session file/casper:// pairing entirely.
+	if envKey := os.Getenv("CONTROL_TOOL_KEY"); envKey != "" {
+		state.setToken(envKey)
+		srv.SetAPIKey(envKey)
+		state.setEnabled(true)
+	} else {
+		// Verifying a cached session can block on a network call --
+		// deliberately not on main()'s startup path, so the status-bar icon
+		// (and the ability to receive a fresh casper:// pairing) is
+		// available immediately even while this is still in flight.
+		go func() {
+			session, err := config.LoadSession()
+			if err != nil || session == nil {
+				return
+			}
+			result := config.VerifySession(authDomain, session.Token)
+			if result == config.VerifyInvalid {
+				config.ClearSession(logf)
+				logf("Saved session is no longer valid -- waiting to be paired again.")
+				return
+			}
+			if result == config.VerifyUnknown {
+				logf("Couldn't verify saved session (offline?) -- using it anyway.")
+			}
+			logf("Resuming session for %s", session.Username)
+			state.resumeSession(session.Token)
+		}()
 	}
 
-	if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
-		fatal("Server error: %s", err)
-	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		logf("received termination signal, shutting down")
+		systray.Quit()
+	}()
+
+	systray.Run(func() { onReady(state, logf) }, func() { onExit(state, srv, logf) })
+}
+
+func onReady(state *daemonState, logf func(format string, args ...any)) {
+	systray.SetTitle("👻")
+	systray.SetTooltip("Casper")
+
+	mToggle := systray.AddMenuItem("Turn off", "Pause/resume the relay connection")
+	mSignOut := systray.AddMenuItem("Sign out", "Sign out of Casper")
+	systray.AddSeparator()
+	mQuit := systray.AddMenuItem("Quit", "Quit Casper")
+
+	state.mToggle = mToggle
+	state.mSignOut = mSignOut
+	state.applyState() // covers a pairing event that arrived before this ran
+
+	go func() {
+		for range mToggle.ClickedCh {
+			state.setEnabled(!state.isEnabled())
+		}
+	}()
+	go func() {
+		for range mSignOut.ClickedCh {
+			logf("Sign out requested from the status bar")
+			state.signOutFromTray()
+		}
+	}()
+	go func() {
+		<-mQuit.ClickedCh
+		logf("Quit requested from the status bar")
+		systray.Quit()
+	}()
+}
+
+func onExit(state *daemonState, srv *server.Server, logf func(format string, args ...any)) {
+	state.stopTunnel()
+	srv.Shutdown()
+	logf("casper-agent exiting")
 }

@@ -1,9 +1,10 @@
 import json
 import time
+from urllib.parse import quote
 
 import streamlit as st
 
-from utils.auth import build_pairing_redirect_url, signup_with_auth_service
+from utils.auth import build_pair_url, signup_with_auth_service
 from utils.browser_nav import autofocus_input_js, click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
@@ -11,17 +12,6 @@ from utils.browser_nav import autofocus_input_js, click_anchor_js
 st.set_page_config(page_title="Casper", page_icon="👻")
 
 st.title("Sign up")
-
-callback_port = st.query_params.get("callback_port", "")
-nonce = st.query_params.get("nonce", "")
-
-if not (callback_port and nonce):
-    st.info(
-        "This page is part of Casper's sign-in flow — run it "
-        "first (see the home page), and it'll bring you back here "
-        "automatically."
-    )
-    st.stop()
 
 auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
 
@@ -31,7 +21,7 @@ auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
 # meta-refresh tag, a confused user could click "Sign up" again, which
 # would rotate the very token the first attempt is still waiting to use
 # (and, for signup specifically, fail outright with "username taken").
-if "_signup_redirect_url" not in st.session_state:
+if "_signup_token" not in st.session_state:
     with st.form("signup_form"):
         # autocomplete="new-password" (not "current-password") is the actual
         # signal browsers use to tell a signup form apart from a login one --
@@ -45,11 +35,7 @@ if "_signup_redirect_url" not in st.session_state:
     # Ready to type into without an extra click.
     st.iframe(f"<script>{autofocus_input_js('Username')}</script>", height=1)
 
-    st.markdown(
-        "Already have an account? "
-        f'<a href="/signin?callback_port={callback_port}&nonce={nonce}" target="_self">Sign in</a>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('Already have an account? <a href="/signin" target="_self">Sign in</a>', unsafe_allow_html=True)
 
     if submitted:
         # See pages/signin.py's identical spinner for why, including the
@@ -64,22 +50,32 @@ if "_signup_redirect_url" not in st.session_state:
         if "error" in result:
             st.error(result["error"])
         else:
-            st.session_state["_signup_redirect_url"] = build_pairing_redirect_url(
-                callback_port, nonce, result["token"], result["username"]
-            )
+            st.session_state["_signup_token"] = result["token"]
+            st.session_state["_signup_username"] = result["username"]
             st.rerun()  # so the form is fully gone on the next render, not shown alongside the success message
 
-if "_signup_redirect_url" in st.session_state:
-    redirect_url = st.session_state["_signup_redirect_url"]
+if "_signup_token" in st.session_state:
+    token = st.session_state["_signup_token"]
+    username = st.session_state["_signup_username"]
+    pair_url = build_pair_url(token, username)
+    chat_url = f"/chat?local_agent_token={quote(token, safe='')}"
+
     st.success("Signed up.")
     # A same-tab fallback link, in case the auto-navigate below doesn't
     # fire for some reason (st.link_button opens a new tab, which isn't
     # what we want here).
     st.markdown(
-        f'<a id="continue-link" href="{redirect_url}" target="_self">Continue if nothing happens</a>',
+        f'<a id="continue-link" href="{chat_url}" target="_self">Continue if nothing happens</a>',
         unsafe_allow_html=True,
     )
-    # Auto-navigate by clicking that same link programmatically -- see
-    # click_anchor_js's docstring for why a direct window.parent.location
-    # assignment doesn't reliably work from inside st.iframe's sandbox.
-    st.iframe(f"<script>{click_anchor_js(json.dumps(redirect_url))}</script>", height=1)
+    # Fires the casper://pair hand-off first (a custom-scheme anchor click
+    # dispatches to the OS without navigating the tab away -- unlike an
+    # http(s) URL), then redirects this same tab to /chat. Both in one
+    # script so the pairing dispatch has definitely started before the /chat
+    # navigation unloads the page. See click_anchor_js's docstring for why a
+    # direct window.parent.location assignment doesn't reliably work from
+    # inside st.iframe's sandbox.
+    st.iframe(
+        f"<script>{click_anchor_js(json.dumps(pair_url))}{click_anchor_js(json.dumps(chat_url))}</script>",
+        height=1,
+    )

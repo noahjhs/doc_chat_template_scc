@@ -7,33 +7,64 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 
 	"casper-agent/internal/commands"
 )
 
-// Server holds everything the HTTP handlers need. OnShutdownRequested is
-// called (in its own goroutine, by the /api/shutdown handler) after the
-// response has already been written -- it's expected to show the farewell
-// dialog and then call Shutdown() itself, mirroring casper_tool.py's
-// _farewell_then_exit()/should_exit split (the response must reach the
-// caller before the process actually starts winding down).
+// Server holds everything the HTTP handlers need. OnSignOut is called (in
+// its own goroutine, by the /api/shutdown handler) after the response has
+// already been written -- unlike the one-shot agent this used to be, signing
+// out no longer ends the process: OnSignOut is expected to clear local state
+// (session file, relay tunnel, presence) and leave the daemon running, idle,
+// waiting to be paired again. The process itself only ever exits via the
+// status-bar "Quit" item (see cmd/casper/main.go), which calls Shutdown()
+// directly.
 type Server struct {
-	APIKey              string
-	Commands            *commands.Handler
-	Logger              *log.Logger
-	OnShutdownRequested func()
-	ClearSession        func()
+	Commands     *commands.Handler
+	Logger       *log.Logger
+	OnSignOut    func()
+	ClearSession func()
 
+	mu         sync.RWMutex
+	apiKey     string
 	httpServer *http.Server
 }
 
 func New(apiKey string, cmdHandler *commands.Handler, logger *log.Logger) *Server {
-	return &Server{APIKey: apiKey, Commands: cmdHandler, Logger: logger}
+	s := &Server{Commands: cmdHandler, Logger: logger}
+	s.SetAPIKey(apiKey)
+	return s
+}
+
+// SetAPIKey changes the key this server accepts, live -- needed because
+// re-pairing an already-running daemon (a fresh token from a new browser
+// login) must take effect without restarting the HTTP listener. Passing ""
+// rejects every request (matches the zero-value behavior requireAPIKey
+// always had for an unset key).
+func (s *Server) SetAPIKey(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.apiKey = key
+}
+
+func (s *Server) getAPIKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.apiKey
+}
+
+// HasAPIKey reports whether the server currently has a key set at all --
+// used by the daemon's status-bar state machine to tell "signed in" from
+// "signed out" without exposing the key itself outside this package.
+func (s *Server) HasAPIKey() bool {
+	return s.getAPIKey() != ""
 }
 
 func (s *Server) requireAPIKey(r *http.Request) bool {
 	key := r.Header.Get("X-API-Key")
-	if s.APIKey == "" || key != s.APIKey {
+	expected := s.getAPIKey()
+	if expected == "" || key != expected {
 		s.Logger.Printf("REJECTED request with invalid/missing API key")
 		return false
 	}
@@ -56,14 +87,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // Deliberately not reachable from the assistant's command schema (unlike
 // /api/command's ACTION_HANDLERS) -- only the web app's dedicated sign-out
-// button calls this, same as the Python version's comment on
-// _farewell_then_exit() explains.
+// button calls this. Unlike the one-shot agent this used to be, handling
+// this request no longer ends the process -- it just clears local session
+// state (this API key included, via OnSignOut) and returns the daemon to an
+// idle, unpaired state; it stays running, waiting for a fresh casper://
+// pairing.
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAPIKey(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"detail": "Invalid or missing X-API-Key."})
 		return
 	}
-	s.Logger.Printf("Shutdown requested -- showing the farewell dialog, then exiting.")
+	s.Logger.Printf("Sign-out requested -- clearing session, staying up.")
 	// Cleared right away, not from the background goroutine below -- this
 	// token is also being revoked server-side right now (the web app's
 	// sign-out flow calls the auth service separately), so there's nothing
@@ -73,12 +107,12 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if s.ClearSession != nil {
 		s.ClearSession()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "message": "Shutting down."})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "message": "Signed out."})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-	if s.OnShutdownRequested != nil {
-		go s.OnShutdownRequested()
+	if s.OnSignOut != nil {
+		go s.OnSignOut()
 	}
 }
 

@@ -71,14 +71,31 @@ def verify_token_with_auth_service(auth_domain, token):
         return None
 
 
-def build_pairing_redirect_url(callback_port, nonce, token, username):
-    """The URL pages/signin.py and pages/signup.py redirect the browser to
-    on success -- casper_tool.py's local loopback listener, which is what
-    actually hands the token back to the waiting process."""
-    return (
-        f"http://localhost:{callback_port}/?nonce={quote(nonce, safe='')}"
-        f"&token={quote(token, safe='')}&username={quote(username, safe='')}"
-    )
+def build_pair_url(token, username):
+    """The casper://pair URL pages/signin.py and pages/signup.py fire on
+    success -- the OS hands this to the user's already-running (or
+    freshly-launched) Casper daemon as an Apple Event (see
+    agent/internal/urlscheme), which is what actually completes pairing.
+    Replaces the old localhost-callback redirect entirely: the daemon no
+    longer opens a browser tab itself, so there's nothing at localhost to
+    hand a token back to."""
+    return f"casper://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"
+
+
+def get_presence(auth_domain, token):
+    """GET /presence. Returns {"connected": bool, "local_agent_url":
+    str|None, "workspace": str|None}, or None on network failure -- callers
+    must handle both, same posture as verify_token_with_auth_service."""
+    try:
+        response = requests.get(
+            f"{_base_url(auth_domain)}/presence",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException:
+        return None
 
 
 def revoke_token_with_auth_service(auth_domain, token):
@@ -94,21 +111,24 @@ def revoke_token_with_auth_service(auth_domain, token):
 
 
 def require_agent_session():
-    """Gate a page on a token minted by a locally-run casper_tool.py --
-    the only sign-up/sign-in surface for the product. Verifies once per
-    browser session (cached in session_state) rather than per query-param
-    value -- the page strips local_agent_token from the visible URL after
-    reading it, so on later reruns it may no longer be present in
-    st.query_params at all; checking session_state first, independent of
-    what the current query params say, is what keeps that safe. st.stop()s
-    with a 'run Casper' message if there's no token, it's invalid, or the
-    auth service is unreachable. Returns the signed-in username."""
+    """Gate a page on a token minted by signing in/up (see pages/signin.py,
+    pages/signup.py) -- the only sign-up/sign-in surface for the product.
+    Verifies once per browser session (cached in session_state) rather than
+    per query-param value -- the page strips local_agent_token from the
+    visible URL after reading it, so on later reruns it may no longer be
+    present in st.query_params at all; checking session_state first,
+    independent of what the current query params say, is what keeps that
+    safe. st.stop()s with a 'sign in' message if there's no token, it's
+    invalid, or the auth service is unreachable. Returns the signed-in
+    username; the verified token itself is cached separately in
+    session_state["_authenticated_token"] (see current_token()) for callers
+    that need it -- e.g. pages/chat.py's presence lookup."""
     if st.session_state.get("_authenticated_username"):
         return st.session_state["_authenticated_username"]
 
     token = st.query_params.get("local_agent_token", "")
     if not token:
-        st.info(f"Run {NAME} to sign in.")
+        st.info(f"Sign in to use {NAME}.")
         st.stop()
 
     result = verify_token_with_auth_service(_auth_domain(), token)
@@ -116,8 +136,16 @@ def require_agent_session():
         st.error("Couldn't reach the auth service right now. Try again shortly.")
         st.stop()
     if not result.get("valid"):
-        st.error(f"This sign-in link is no longer valid. Run {NAME} again to get a fresh one.")
+        st.error("This sign-in link is no longer valid. Sign in again to get a fresh one.")
         st.stop()
 
     st.session_state["_authenticated_username"] = result["username"]
+    st.session_state["_authenticated_token"] = token
     return result["username"]
+
+
+def current_token():
+    """The verified token cached by require_agent_session() -- only
+    meaningful after that's already been called (and passed) earlier in the
+    same script run."""
+    return st.session_state.get("_authenticated_token", "")

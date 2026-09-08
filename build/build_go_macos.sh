@@ -52,22 +52,21 @@ fi
 
 rm -rf build/go_macos_dist
 mkdir -p build/go_macos_dist
-( cd agent && GOOS=darwin GOARCH="$GOARCH" CGO_ENABLED=0 go build -o "../build/go_macos_dist/casper-bin" ./cmd/casper )
+# CGO_ENABLED=1 (this module's first cgo dependency): the status-bar icon
+# (github.com/getlantern/systray) and the casper:// URL-scheme handler
+# (internal/urlscheme) both bind Cocoa/AppKit directly. Requires Xcode
+# Command Line Tools' clang on the build machine.
+( cd agent && GOOS=darwin GOARCH="$GOARCH" CGO_ENABLED=1 go build -o "../build/go_macos_dist/casper-bin" ./cmd/casper )
 
 APP_DIR="dist/CasperGo/Casper.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 # CFBundleExecutable -- what Finder actually double-click-launches. Runs
-# directly, no wrapper: no visible Terminal window, and Finder/LaunchServices
-# track this exact process under the Casper.app identity for as long as it
-# runs, which is what keeps a Dock icon present the whole time it's active --
-# no extra plumbing needed for that once nothing hands off to a separate
-# app (Terminal) anymore. stdout/stderr go nowhere when launched this way
-# (same as any ordinary double-clicked Mac app); status that used to be
-# printed (e.g. "Sign in to continue: <url>" if the browser doesn't
-# auto-open) has no visible fallback now -- command_log.txt and the native
-# dialogs (farewell, workspace picker) remain the user-visible channels.
+# directly, no wrapper: no visible Terminal window. stdout/stderr go nowhere
+# when launched this way (same as any ordinary double-clicked Mac app);
+# command_log.txt and the native dialogs (farewell, workspace picker) remain
+# the user-visible channels, alongside the status-bar icon itself.
 cp build/go_macos_dist/casper-bin "$APP_DIR/Contents/MacOS/Casper"
 chmod +x "$APP_DIR/Contents/MacOS/Casper"
 
@@ -81,6 +80,20 @@ if [ -s assets/ghost.png ]; then
     iconutil -c icns "$ICONSET" -o build/Casper.icns
 fi
 
+# LSUIElement -- no Dock icon, no Cmd+Tab entry. A reversal of the earlier
+# one-shot-tool build (which deliberately showed a Dock icon while it ran in
+# the foreground for a single session): Casper is now a persistent
+# background daemon whose only UI is its status-bar icon, so a permanently-
+# present Dock icon with no window behind it would just be confusing clutter
+# for something meant to run quietly as a login item.
+#
+# CFBundleURLTypes -- registers the casper:// scheme with LaunchServices, so
+# a signed-in web app can hand this (already-running, or freshly-launched)
+# process a fresh pairing token via casper://pair?token=...&username=...
+# (see agent/internal/urlscheme). Confirmed via a throwaway spike that this
+# registers reliably for an unsigned bundle like this one, as long as it's
+# not sitting in a system staging/temp path (e.g. /private/tmp) -- a normal
+# install location (Applications, Desktop, Downloads, etc.) is fine.
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -93,6 +106,12 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>LSMinimumSystemVersion</key><string>10.13</string>
+  <key>LSUIElement</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>com.docchat.casper.pair</string>
+    <key>CFBundleURLSchemes</key><array><string>casper</string></array>
+  </dict></array>
 $( [ -f build/Casper.icns ] && echo '  <key>CFBundleIconFile</key><string>Casper.icns</string>' )
 </dict></plist>
 PLIST

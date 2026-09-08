@@ -1,61 +1,32 @@
 import base64
 import json
 import threading
+import time
 from datetime import datetime
 
 import requests
 import streamlit as st
 from openai import OpenAI
 
-from utils.auth import require_agent_session, revoke_token_with_auth_service
+from utils.auth import (
+    build_pair_url,
+    current_token,
+    get_presence,
+    require_agent_session,
+    revoke_token_with_auth_service,
+)
 from utils.branding import NAME, TAGLINE, ghost_svg
+from utils.browser_nav import click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
-# identity across the whole flow -- except once signed out, when the title
-# switches to "Done" so the tab reads at a glance (useful in a crowded tab
-# bar) that it's finished and safe to close, since it doesn't close itself
-# (see the _signed_out branch below for why). st.set_page_config must be the
-# first Streamlit call in the script but only runs once per rerun, so
-# picking the title from session_state up front (not a second call) is what
-# makes this conditional.
-st.set_page_config(
-    page_title="Done" if st.session_state.get("_signed_out") else "Casper",
-    page_icon="👻",
-)
+# identity across the whole flow.
+st.set_page_config(page_title="Casper", page_icon="👻")
 
 
 @st.cache_resource
 def get_client():
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-
-if st.session_state.get("_signed_out"):
-    # A plain, chrome-less goodbye page -- no navigation, no tab-closing
-    # attempt of any kind (neither window.close() nor casper_tool.py
-    # AppleScript-ing the browser -- both were tried; confirmed directly
-    # that window.close() is a silent no-op here, since this tab crosses
-    # origins twice over its lifetime -- the deployed app ->
-    # casper_tool.py's own localhost listener -> the deployed app again,
-    # for the /signin -> /chat handoff -- and AppleScript-closing it back
-    # in casper_tool.py needed Automation permission and still wasn't
-    # reliable). Simplest fix: just ask the user to close it themselves,
-    # with Streamlit's own sidebar/header/menu hidden (real, confirmed
-    # data-testid selectors from the installed Streamlit build, not
-    # guessed) so this doesn't look like a broken app still sitting there.
-    st.markdown(
-        """
-        <style>
-        [data-testid="stHeader"], [data-testid="stSidebar"],
-        [data-testid="stExpandSidebarButton"], [data-testid="stToolbar"],
-        [data-testid="stMainMenu"], [data-testid="stStatusWidget"] {
-            display: none;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.write("Session finished! You may close this tab.")
-    st.stop()
 
 if st.session_state.get("_signing_out"):
     # Split from the button click itself (below) on purpose: these are
@@ -72,7 +43,10 @@ if st.session_state.get("_signing_out"):
             # Was sequential (up to 5s + 5s) -- run the shutdown call on a
             # background thread so it overlaps with the revoke call instead
             # of adding to it, since both are independent, best-effort, and
-            # already individually timeout-bounded.
+            # already individually timeout-bounded. Unlike the old one-shot
+            # agent, /api/shutdown no longer ends the daemon's process -- it
+            # just clears its session and leaves it running, idle, waiting
+            # to be paired again.
             def _shutdown_local_agent():
                 try:
                     requests.post(
@@ -81,7 +55,7 @@ if st.session_state.get("_signing_out"):
                         timeout=5,
                     )
                 except requests.RequestException:
-                    pass  # best-effort -- the local process may already be gone
+                    pass  # best-effort -- the local daemon may be unreachable
 
             shutdown_thread = threading.Thread(target=_shutdown_local_agent)
             shutdown_thread.start()
@@ -89,8 +63,13 @@ if st.session_state.get("_signing_out"):
             shutdown_thread.join(timeout=5)
     st.session_state.clear()
     st.query_params.clear()
-    st.session_state["_signed_out"] = True
-    st.rerun()
+    # Signing out no longer means this tab's job is done (the daemon behind
+    # it isn't dying) -- send the browser back to the login page instead of
+    # a dead-end "you may close this tab" page, so starting a new session is
+    # just clicking "Sign in" again.
+    st.success("Signed out.")
+    st.iframe(f"<script>{click_anchor_js(json.dumps('/signin'))}</script>", height=1)
+    st.stop()
 
 username = require_agent_session()
 client = get_client()
@@ -123,20 +102,35 @@ ip = st.context.ip_address or "localhost"
 st.session_state.ip_log.append(f"{datetime.now().strftime('%H:%M:%S')}  {ip}")
 st.session_state.ip_log = st.session_state.ip_log[-100:]  # cap growth
 
-# Read once from the query params and cache in session_state -- the URL
-# gets its query string stripped (below) right after this first read, so a
-# later rerun can't rely on st.query_params still having these.
+# Looked up once (cached in session_state) rather than carried via query
+# params -- the daemon no longer redirects a browser tab itself (see
+# pages/signin.py), so it can't hand local_agent_url/workspace along that
+# way anymore. Instead it reports them to the auth service on pairing/
+# toggle (see agent/internal/config/presence.go), and this looks that up by
+# the same token require_agent_session() already verified.
 if "_local_agent_config" not in st.session_state:
-    local_agent_url = st.query_params.get("local_agent_url", "")
-    local_agent_token = st.query_params.get("local_agent_token", "")
-    local_agent_workspace = st.query_params.get("local_agent_workspace", "")
+    # Retried briefly rather than checked once: landing here right after
+    # sign-in (the common case) races the casper://pair hand-off, which
+    # typically finishes a beat after this page has already loaded --
+    # confirmed directly (a real click-through showed "Not connected" on
+    # first load, then the daemon's pairing log line appeared a moment
+    # later). Same reasoning as the old pairing spinner's poll loop: a
+    # single check is too eager, but this shouldn't retry forever either,
+    # so it gives up (leaving local_agent_config None) after a few seconds.
+    presence = None
+    for attempt in range(6):
+        presence = get_presence(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
+        if presence and presence.get("connected") and presence.get("local_agent_url"):
+            break
+        if attempt < 5:
+            time.sleep(0.5)
     st.session_state["_local_agent_config"] = (
         {
-            "url": local_agent_url.rstrip("/"),
-            "api_key": local_agent_token,
-            "workspace": local_agent_workspace,
+            "url": presence["local_agent_url"].rstrip("/"),
+            "api_key": current_token(),
+            "workspace": presence.get("workspace", ""),
         }
-        if local_agent_url and local_agent_token
+        if presence and presence.get("connected") and presence.get("local_agent_url")
         else None
     )
 local_agent_config = st.session_state["_local_agent_config"]
@@ -166,6 +160,13 @@ def _start_sign_out():
     st.session_state["_signing_out"] = True
 
 
+def _recheck_local_agent_config():
+    # Drops the cached (possibly stale) connection state so the retry loop
+    # above runs again on the rerun this triggers -- see the "Check again"
+    # button below.
+    st.session_state.pop("_local_agent_config", None)
+
+
 with st.sidebar:
     st.button("Sign out", key="sign_out_button", on_click=_start_sign_out)
     st.caption(f"Signed in as {username}")
@@ -189,11 +190,19 @@ with st.sidebar:
     if local_agent_config:
         st.caption(f"🔧 {NAME} connected and ready to run.")
     else:
-        st.caption(
-            f"Not connected. Download {NAME} from the home page and run it "
-            "on your own machine — it'll bring you back here already "
-            "connected."
-        )
+        st.caption(f"Not connected. Download {NAME} from the home page and run it on your own machine.")
+        # Two distinct manual fallbacks for two distinct failure modes, both
+        # confirmed via a real click-through test: "Reconnect" re-fires the
+        # casper://pair hand-off (for when it truly never reached the
+        # daemon -- wasn't running yet, missed the event); "Check again"
+        # just re-runs the presence lookup above (for when pairing *did*
+        # succeed, only moments after this page's one-shot check already
+        # gave up and cached "not connected" -- the retry loop above covers
+        # the common case, but a slow click through Chrome's "Open
+        # Casper?" prompt can still outlast it).
+        reconnect_url = build_pair_url(current_token(), username)
+        st.markdown(f'Already running {NAME}? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
+        st.button("Check again", on_click=_recheck_local_agent_config)
 
 # All the built-in Responses API tools that don't need extra setup (unlike
 # file_search, which needs a vector store), plus the local git tool if

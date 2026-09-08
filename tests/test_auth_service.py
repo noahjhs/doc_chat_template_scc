@@ -90,3 +90,89 @@ def test_rate_limit(client):
         client.post("/login", json={"username": "nobody", "password": "whatever"})
     r = client.post("/login", json={"username": "nobody", "password": "whatever"})
     assert r.status_code == 429
+
+
+def test_presence_requires_a_valid_token(client):
+    r = client.get("/presence", headers={"Authorization": "Bearer not-a-real-token"})
+    assert r.status_code == 401
+    assert client.post(
+        "/presence",
+        json={"local_agent_url": "https://relay.example/agent/x", "workspace": "/tmp/ws"},
+        headers={"Authorization": "Bearer not-a-real-token"},
+    ).status_code == 401
+    assert client.delete("/presence", headers={"Authorization": "Bearer not-a-real-token"}).status_code == 401
+
+
+def test_presence_report_then_lookup(client):
+    signup = client.post("/signup", json={"username": "erin", "password": "correct-horse"}).json()
+    token = signup["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # nothing reported yet
+    assert client.get("/presence", headers=headers).json() == {
+        "connected": False,
+        "local_agent_url": None,
+        "workspace": None,
+    }
+
+    report = client.post(
+        "/presence",
+        json={"local_agent_url": "https://relay.example/agent/abc123", "workspace": "/Users/erin/project"},
+        headers=headers,
+    )
+    assert report.status_code == 200
+    assert report.json() == {
+        "connected": True,
+        "local_agent_url": "https://relay.example/agent/abc123",
+        "workspace": "/Users/erin/project",
+    }
+
+    lookup = client.get("/presence", headers=headers)
+    assert lookup.json() == report.json()
+
+    # a second report overwrites, not duplicates, the row (one per user)
+    client.post(
+        "/presence",
+        json={"local_agent_url": "https://relay.example/agent/xyz789", "workspace": "/Users/erin/other"},
+        headers=headers,
+    )
+    assert client.get("/presence", headers=headers).json()["local_agent_url"] == "https://relay.example/agent/xyz789"
+
+
+def test_presence_clear(client):
+    signup = client.post("/signup", json={"username": "frank", "password": "correct-horse"}).json()
+    token = signup["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    client.post(
+        "/presence",
+        json={"local_agent_url": "https://relay.example/agent/x", "workspace": "/tmp/ws"},
+        headers=headers,
+    )
+    assert client.get("/presence", headers=headers).json()["connected"] is True
+
+    cleared = client.delete("/presence", headers=headers)
+    assert cleared.status_code == 200
+    assert cleared.json() == {"connected": False, "local_agent_url": None, "workspace": None}
+    assert client.get("/presence", headers=headers).json()["connected"] is False
+
+    # idempotent
+    assert client.delete("/presence", headers=headers).status_code == 200
+
+
+def test_presence_is_per_user(client):
+    a = client.post("/signup", json={"username": "gina", "password": "correct-horse"}).json()
+    b = client.post("/signup", json={"username": "hank", "password": "correct-horse"}).json()
+
+    client.post(
+        "/presence",
+        json={"local_agent_url": "https://relay.example/agent/gina", "workspace": "/tmp/gina"},
+        headers={"Authorization": f"Bearer {a['token']}"},
+    )
+
+    # b has never reported presence -- must not see a's row
+    assert client.get("/presence", headers={"Authorization": f"Bearer {b['token']}"}).json()["connected"] is False
+    assert (
+        client.get("/presence", headers={"Authorization": f"Bearer {a['token']}"}).json()["local_agent_url"]
+        == "https://relay.example/agent/gina"
+    )

@@ -14,6 +14,20 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
+
+-- Where a user's Casper daemon is currently reachable, so the web app can
+-- learn its relay URL/workspace without the daemon redirecting a browser
+-- tab itself (the old callback_port/nonce pairing flow this replaces --
+-- see pages/signin.py). One row per user, matching the one-active-token
+-- model /login already enforces. A new table rather than new columns on
+-- users -- there's no migration mechanism here (init_db() is purely
+-- additive), so extending an already-live table isn't safe.
+CREATE TABLE IF NOT EXISTS agent_presence (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    local_agent_url TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
