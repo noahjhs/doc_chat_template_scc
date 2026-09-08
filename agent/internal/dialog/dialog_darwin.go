@@ -10,8 +10,10 @@ package dialog
 
 import (
 	_ "embed"
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 //go:embed assets/ghost.png
@@ -49,4 +51,30 @@ display dialog "See you next time!" with title "Casper" buttons {"OK"} default b
 			logf("show_farewell_dialog: couldn't show it: %s: %s", err, string(out))
 		}
 	}
+}
+
+// escapeForAppleScript makes an arbitrary string safe to embed inside an
+// AppleScript double-quoted string literal (backslashes first, then double
+// quotes -- order matters). Skipping this for a message with its own quotes
+// or backslashes (e.g. a file path, or a Go error's text) produces malformed
+// AppleScript that osascript rejects outright -- confirmed the hard way
+// once already by the build script's Terminal-launching wrapper, before
+// that wrapper was removed entirely in favor of running the binary directly.
+func escapeForAppleScript(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return r.Replace(s)
+}
+
+// ShowFatalError displays a native modal for a fatal startup error. Without
+// a console (the binary now runs directly, no Terminal-launching wrapper --
+// see build/build_go_macos.sh), this is the only way such an error is ever
+// visible to the user at all; previously it just printed to a stdout that
+// went nowhere. Best-effort: if osascript itself fails, there's no more
+// visible fallback left, so this just gives up quietly.
+func ShowFatalError(message string) {
+	script := fmt.Sprintf(
+		`display dialog "%s" with title "Casper" buttons {"OK"} default button "OK" with icon stop`,
+		escapeForAppleScript(message),
+	)
+	_ = exec.Command("osascript", "-e", script).Run()
 }

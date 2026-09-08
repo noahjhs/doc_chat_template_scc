@@ -75,6 +75,17 @@ func parseArgs(args []string) (agentServer *string, browserName string) {
 	return
 }
 
+// fatal shows a native error dialog and exits -- the only way a startup
+// failure is ever visible to the user now that the binary runs directly
+// with no console (see build/build_go_macos.sh). Still prints too, which
+// remains useful when run from an actual terminal during development.
+func fatal(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	fmt.Fprintln(os.Stderr, message)
+	dialog.ShowFatalError(message)
+	os.Exit(1)
+}
+
 func main() {
 	agentServerOverride, browserName := parseArgs(os.Args[1:])
 
@@ -84,8 +95,7 @@ func main() {
 	// module import time (before __main__ runs at all).
 	workspaceDir, err := config.ResolveWorkspaceDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Couldn't resolve a workspace directory: %s\n", err)
-		os.Exit(1)
+		fatal("Couldn't resolve a workspace directory: %s", err)
 	}
 
 	logPath := os.Getenv("CONTROL_TOOL_LOG_FILE")
@@ -94,8 +104,7 @@ func main() {
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Couldn't open log file %s: %s\n", logPath, err)
-		os.Exit(1)
+		fatal("Couldn't open log file %s: %s", logPath, err)
 	}
 	defer logFile.Close()
 	logger := log.New(io.MultiWriter(os.Stdout, logFile), "", log.LstdFlags)
@@ -113,8 +122,7 @@ func main() {
 		appDomain = *agentServerOverride
 	}
 	if appDomain == "" {
-		fmt.Println("No web app domain configured (app_server.txt/--agent-server) — can't sign in or open the chat app. Exiting.")
-		os.Exit(1)
+		fatal("No web app domain configured (app_server.txt/--agent-server) — can't sign in or open the chat app.")
 	}
 
 	// Authenticate before the relay connection starts: pairing only ever
@@ -122,13 +130,11 @@ func main() {
 	// through the relay), so there's nothing relay-dependent about it.
 	authDomain, err := config.LoadAuthDomain()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		fatal("%s", err)
 	}
 	relayDomain, err := config.LoadRelayDomain()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		fatal("%s", err)
 	}
 
 	var apiKey string
@@ -139,8 +145,7 @@ func main() {
 	} else {
 		apiKey, tun, err = pairing.EnsureAuthenticated(appDomain, authDomain, relayDomain, port, workspaceDir, browserName, logf)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			fatal("%s", err)
 		}
 	}
 	defer tun.Terminate()
@@ -154,7 +159,6 @@ func main() {
 	}
 
 	if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
-		fmt.Fprintf(os.Stderr, "Server error: %s\n", err)
-		os.Exit(1)
+		fatal("Server error: %s", err)
 	}
 }

@@ -58,22 +58,17 @@ APP_DIR="dist/CasperGo/Casper.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
-cp build/go_macos_dist/casper-bin "$APP_DIR/Contents/MacOS/Casper-bin"
-chmod +x "$APP_DIR/Contents/MacOS/Casper-bin"
-
-# CFBundleExecutable -- what Finder actually double-click-launches. Opens a
-# real Terminal window and runs the console binary in it, since a bare .app
-# (unlike a raw executable/.command file) never gets a controlling terminal
-# from Finder on its own -- confirmed this is a LaunchServices limitation,
-# not specific to PyInstaller, so it applies here too. The trailing `read`
-# keeps the window open even if Casper-bin exits immediately (e.g. a startup
-# error), so the message is actually readable instead of the window vanishing.
-cat > "$APP_DIR/Contents/MacOS/Casper" <<'WRAPPER'
-#!/bin/bash
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CMD="\"$DIR/Casper-bin\"; echo; read -n 1 -s -r -p 'Press any key to close this window...'"
-osascript -e "tell application \"Terminal\" to do script \"$CMD\""
-WRAPPER
+# CFBundleExecutable -- what Finder actually double-click-launches. Runs
+# directly, no wrapper: no visible Terminal window, and Finder/LaunchServices
+# track this exact process under the Casper.app identity for as long as it
+# runs, which is what keeps a Dock icon present the whole time it's active --
+# no extra plumbing needed for that once nothing hands off to a separate
+# app (Terminal) anymore. stdout/stderr go nowhere when launched this way
+# (same as any ordinary double-clicked Mac app); status that used to be
+# printed (e.g. "Sign in to continue: <url>" if the browser doesn't
+# auto-open) has no visible fallback now -- command_log.txt and the native
+# dialogs (farewell, workspace picker) remain the user-visible channels.
+cp build/go_macos_dist/casper-bin "$APP_DIR/Contents/MacOS/Casper"
 chmod +x "$APP_DIR/Contents/MacOS/Casper"
 
 if [ -s assets/ghost.png ]; then

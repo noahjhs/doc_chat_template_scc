@@ -118,6 +118,23 @@ func OpenPairingPageAndWait(appDomain string, port int, browserName string, time
 			mu.Lock()
 			chatURL = result
 			mu.Unlock()
+			// Give the spinner page's own polling JS (300ms interval) a
+			// real chance to see chat_url ready via /status before this
+			// listener closes (OpenPairingPageAndWait returns as soon as
+			// authDone fires, and its deferred srv.Close() tears down this
+			// exact port). With the relay-based tunnel, onAuthenticated now
+			// completes almost instantly instead of taking up to 30s (the
+			// old cloudflared-scraping wait) -- fast enough that, without
+			// this pause, authDone can fire and close the server before
+			// the browser has even finished painting the spinner page and
+			// firing its first /status fetch, let alone gotten a chance to
+			// see it succeed -- reported directly as a hang on that
+			// spinner. A synthetic same-process test can't reliably
+			// reproduce this exact race (a local Go HTTP round-trip is far
+			// faster than real page-load + JS-startup latency, so it
+			// passes with or without this line) -- the real evidence is
+			// the reported hang itself, not a passing test.
+			time.Sleep(2 * time.Second)
 			closeOnce.Do(func() { close(authDone) })
 		}()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -126,7 +143,16 @@ func OpenPairingPageAndWait(appDomain string, port int, browserName string, time
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return fmt.Errorf("couldn't start the sign-in listener on port %d: %w", port, err)
+		// The overwhelmingly common cause: an earlier Casper launch is
+		// still running in the background, still holding this port --
+		// easy to end up with unnoticed now that there's no console/Dock
+		// window to make a prior instance's continued existence obvious.
+		return fmt.Errorf(
+			"Casper couldn't start (port %d is already in use). "+
+				"Casper may already be running -- quit it first (check Activity "+
+				"Monitor for another \"Casper\" process) and try again. (%s)",
+			port, err,
+		)
 	}
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(listener) }()
