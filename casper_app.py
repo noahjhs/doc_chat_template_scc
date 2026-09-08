@@ -1,15 +1,18 @@
 import streamlit as st
 
-from utils.auth import app_subdomain_url
-from utils.branding import NAME, TAGLINE, page_header
+from utils.branding import NAME, TAGLINE, ghost_svg
 
 # The browser tab's actual title (not just the on-page st.title() heading) --
 # every Casper page sets this the same way for a consistent identity across
 # the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
 
-page_header(size=100)
-st.caption(TAGLINE)
+col1, col2 = st.columns([1, 3])
+with col1:
+    st.markdown(ghost_svg(100), unsafe_allow_html=True)
+with col2:
+    st.title(NAME)
+    st.caption(TAGLINE)
 
 st.write(
     f"**{NAME}** is an AI assistant with real tools. It can search the web, run code, "
@@ -19,16 +22,7 @@ st.write(
     "workspace you choose, and every action it takes is shown back to you."
 )
 
-# Download stays on this same subdomain (same-tab, plain relative link).
-# Sign in/up live on the app subdomain instead (see utils/auth.py's
-# app_subdomain_url()) -- a genuinely different origin, so those open in a
-# new tab. Real <a> tags throughout, not st.markdown's `[text](url)` syntax
-# -- see page_header's docstring for why that distinction actually matters
-# here (it's what was breaking the browser back button).
-app_url = app_subdomain_url()
 st.markdown(
-    '<a href="/download" target="_self">📥 Download Casper</a> · '
-    f'<a href="{app_url}/signin" target="_blank" rel="noopener">Sign in</a> · '
-    f'<a href="{app_url}/signup" target="_blank" rel="noopener">Sign up</a>',
+    "[📥 Download Casper](/download) · [Sign in](/signin) · [Sign up](/signup)",
     unsafe_allow_html=True,
 )

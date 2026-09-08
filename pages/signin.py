@@ -5,14 +5,12 @@ from urllib.parse import quote
 import streamlit as st
 
 from utils.auth import build_pair_url, login_with_auth_service
-from utils.branding import page_header
 from utils.browser_nav import autofocus_input_js, click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
 # identity across the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
 
-page_header()
 st.title("Sign in")
 
 auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
