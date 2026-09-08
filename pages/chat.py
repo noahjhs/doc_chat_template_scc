@@ -1,5 +1,6 @@
 import base64
 import json
+import threading
 from datetime import datetime
 
 import requests
@@ -8,11 +9,19 @@ from openai import OpenAI
 
 from utils.auth import require_agent_session, revoke_token_with_auth_service
 from utils.branding import NAME, TAGLINE, ghost_svg
-from utils.browser_nav import click_anchor_js
 
-# Same reasoning as casper_app.py's set_page_config -- keeps the tab title
-# searchable by casper_tool.py's bring-tab-into-view AppleScript.
-st.set_page_config(page_title="Casper", page_icon="👻")
+# Same reasoning as casper_app.py's set_page_config -- a consistent tab
+# identity across the whole flow -- except once signed out, when the title
+# switches to "Done" so the tab reads at a glance (useful in a crowded tab
+# bar) that it's finished and safe to close, since it doesn't close itself
+# (see the _signed_out branch below for why). st.set_page_config must be the
+# first Streamlit call in the script but only runs once per rerun, so
+# picking the title from session_state up front (not a second call) is what
+# makes this conditional.
+st.set_page_config(
+    page_title="Done" if st.session_state.get("_signed_out") else "Casper",
+    page_icon="👻",
+)
 
 
 @st.cache_resource
@@ -60,15 +69,24 @@ if st.session_state.get("_signing_out"):
     agent_config = st.session_state.get("_local_agent_config")
     with st.spinner("Signing out..."):
         if agent_config:
-            try:
-                requests.post(
-                    f"{agent_config['url']}/api/shutdown",
-                    headers={"X-API-Key": agent_config["api_key"]},
-                    timeout=5,
-                )
-            except requests.RequestException:
-                pass  # best-effort -- the local process may already be gone
+            # Was sequential (up to 5s + 5s) -- run the shutdown call on a
+            # background thread so it overlaps with the revoke call instead
+            # of adding to it, since both are independent, best-effort, and
+            # already individually timeout-bounded.
+            def _shutdown_local_agent():
+                try:
+                    requests.post(
+                        f"{agent_config['url']}/api/shutdown",
+                        headers={"X-API-Key": agent_config["api_key"]},
+                        timeout=5,
+                    )
+                except requests.RequestException:
+                    pass  # best-effort -- the local process may already be gone
+
+            shutdown_thread = threading.Thread(target=_shutdown_local_agent)
+            shutdown_thread.start()
             revoke_token_with_auth_service(st.secrets["AUTH_SERVICE_DOMAIN"], agent_config["api_key"])
+            shutdown_thread.join(timeout=5)
     st.session_state.clear()
     st.query_params.clear()
     st.session_state["_signed_out"] = True
@@ -111,13 +129,11 @@ st.session_state.ip_log = st.session_state.ip_log[-100:]  # cap growth
 if "_local_agent_config" not in st.session_state:
     local_agent_url = st.query_params.get("local_agent_url", "")
     local_agent_token = st.query_params.get("local_agent_token", "")
-    local_agent_port = st.query_params.get("local_agent_port", "")
     local_agent_workspace = st.query_params.get("local_agent_workspace", "")
     st.session_state["_local_agent_config"] = (
         {
             "url": local_agent_url.rstrip("/"),
             "api_key": local_agent_token,
-            "port": local_agent_port,
             "workspace": local_agent_workspace,
         }
         if local_agent_url and local_agent_token
@@ -125,52 +141,14 @@ if "_local_agent_config" not in st.session_state:
     )
 local_agent_config = st.session_state["_local_agent_config"]
 
-# Background reconnect: if Casper gets fully quit and relaunched while this
-# tab is still open, its tunnel dies with it, and a new one opens for the
-# fresh run -- rather than leaving this tab dead (and a second tab getting
-# opened for that new run), poll Casper directly on localhost (same
-# machine, not through the tunnel) for its current tunnel URL, and if it's
-# different from this tab's, navigate this same tab to it. Requires the
-# port Casper's own server is bound to, which older links (from before this
-# feature) won't carry -- skip silently if so.
-if local_agent_config and local_agent_config.get("port"):
-    reconnect_nav_js = click_anchor_js(
-        'window.parent.location.pathname + "?" + params.toString()'
-    )
-    st.iframe(
-        f"""<script>
-(function() {{
-    var port = {json.dumps(local_agent_config["port"])};
-    var token = {json.dumps(local_agent_config["api_key"])};
-    var currentUrl = {json.dumps(local_agent_config["url"])};
-    function poll() {{
-        fetch("http://localhost:" + port + "/api/session-info", {{headers: {{"X-API-Key": token}}}})
-            .then(function(r) {{ return r.ok ? r.json() : null; }})
-            .then(function(data) {{
-                if (data && data.tunnel_url && data.tunnel_url !== currentUrl) {{
-                    var params = new URLSearchParams();
-                    params.set("local_agent_url", data.tunnel_url);
-                    params.set("local_agent_token", token);
-                    params.set("local_agent_port", port);
-                    {reconnect_nav_js}
-                }}
-            }})
-            .catch(function() {{}});
-    }}
-    setInterval(poll, 5000);
-}})();
-</script>""",
-        height=1,
-    )
-
 # Cosmetic: once the query params have been read (above), drop them from
 # the visible URL so the address bar just shows .../chat. This only
 # rewrites what's displayed (history.replaceState doesn't fire a
 # navigation or a popstate event), so it doesn't affect the already-cached
 # session_state values above or trigger a rerun. Runs in the *parent* page
 # (window.parent), since the script itself executes inside st.iframe's own
-# iframe -- see the note on the sign-out modal above for why st.iframe
-# instead of st.markdown(unsafe_allow_html=True).
+# iframe -- st.iframe (not st.markdown(unsafe_allow_html=True)) is what
+# actually gets a script to run at all here.
 if "_url_cleaned" not in st.session_state:
     st.iframe(
         "<script>window.parent.history.replaceState(null, '', window.parent.location.pathname);</script>",
@@ -189,7 +167,7 @@ def _start_sign_out():
 
 
 with st.sidebar:
-    st.button("Sign out", on_click=_start_sign_out)
+    st.button("Sign out", key="sign_out_button", on_click=_start_sign_out)
     st.caption(f"Signed in as {username}")
 
     st.divider()

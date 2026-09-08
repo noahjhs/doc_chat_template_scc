@@ -1,12 +1,13 @@
 import json
+import time
 
 import streamlit as st
 
 from utils.auth import build_pairing_redirect_url, login_with_auth_service
 from utils.browser_nav import autofocus_input_js, click_anchor_js
 
-# Same reasoning as casper_app.py's set_page_config -- keeps the tab title
-# searchable by casper_tool.py's bring-tab-into-view AppleScript.
+# Same reasoning as casper_app.py's set_page_config -- a consistent tab
+# identity across the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
 
 st.title("Sign in")
@@ -32,8 +33,8 @@ auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
 # is still waiting to use.
 if "_login_redirect_url" not in st.session_state:
     with st.form("signin_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        username = st.text_input("Username", autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="current-password")
         submitted = st.form_submit_button("Sign in", type="primary")
 
     # Ready to type into without an extra click.
@@ -46,7 +47,18 @@ if "_login_redirect_url" not in st.session_state:
     )
 
     if submitted:
-        result = login_with_auth_service(auth_domain, username, password)
+        # The spinner is the fix for a real reported bug: a repeated
+        # wrong-password submission renders the exact same st.error() text
+        # in the exact same spot, so nothing on screen visibly changes and
+        # the user can't tell the click even registered. The auth service
+        # sits behind a fast local tunnel though (well under half a second
+        # round trip), so on its own the spinner flashes too briefly to
+        # actually see -- padding to a minimum visible duration is what
+        # makes it register as a real, perceptible transition.
+        start = time.monotonic()
+        with st.spinner("Signing in..."):
+            result = login_with_auth_service(auth_domain, username, password)
+            time.sleep(max(0.0, 0.5 - (time.monotonic() - start)))
         if "error" in result:
             st.error(result["error"])
         else:

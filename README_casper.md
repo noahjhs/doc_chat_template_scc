@@ -20,11 +20,6 @@ tab, straight to the chat app.
 No API key to copy-paste, no manual setup: once signed in, it takes you to
 the chat app, already connected to this machine.
 
-If you quit Casper and relaunch it while its chat tab is still open, that
-tab reconnects itself to the new run in the background — no new tab opens
-for it. Since Streamlit doesn't carry state across that kind of reconnect,
-it starts as a fresh conversation rather than resuming the old one.
-
 The web app domain it opens is baked in from `app_server.txt` (repo root) at
 build time — just the bare domain, e.g. `my-app.streamlit.app`, no
 `https://` and no path (`/chat` is appended automatically). The auth

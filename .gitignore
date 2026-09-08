@@ -4,27 +4,28 @@ api_key.txt
 command_log.txt
 app_server.txt
 auth_server.txt
+relay_server.txt
 session.json
 
 # Auth service's local SQLite store -- never committed, deploy-time only.
 auth_service/users.db*
 
+# Server-side named Cloudflare Tunnel config for the Mac mini deploy --
+# cert.pem, <uuid>.json credentials, and config.yml are all secret/instance-
+# specific. Unrelated to vendor/cloudflared/ below (that's the client binary
+# baked into casper_tool.py for end users' own local-agent tunnels).
+cloudflared/
+
 # Control Tool packaging: fetched binaries and build output, not source.
 vendor/cloudflared/*
 !vendor/cloudflared/.gitkeep
-# The staged Casper/ subdirectory (which also picks up runtime files like
-# session.json/command_log.txt from a local test run) stays ignored -- only
-# the actual distributable zips are tracked (via Git LFS -- see
-# .gitattributes), since casper_app.py's download page serves them straight
-# from this path on the deployed app. This tracking is deliberately main-only
-# (dev's own .gitignore still excludes the zip entirely): dev keeps a
-# granular commit history with no binary churn, and main only ever gets one
-# release binary per squash-merged deployment.
-dist/*
-!dist/*.zip
+dist/
 build/pyinstaller_work/
 build/pyinstaller_dist/
 build/*.spec
+build/go_macos_dist/
+build/Casper.icns
+build/Casper.iconset/
 
 
 # Byte-compiled / optimized / DLL files
@@ -38,6 +39,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 develop-eggs/
+dist/
 downloads/
 eggs/
 .eggs/
