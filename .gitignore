@@ -5,6 +5,9 @@ command_log.txt
 app_server.txt
 auth_server.txt
 relay_server.txt
+app_server.dev.txt
+auth_server.dev.txt
+relay_server.dev.txt
 session.json
 
 # Auth service's local SQLite store -- never committed, deploy-time only.
