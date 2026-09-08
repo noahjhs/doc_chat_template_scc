@@ -36,7 +36,30 @@ def page_header(size=32):
     target="_blank" regardless of the URL, and a link that always points at
     a relative "/" is always same-subdomain navigation, which should never
     open a new tab (see casper_app.py's other links for the same rule
-    applied to cross-subdomain links, which -- correctly -- do open one)."""
+    applied to cross-subdomain links, which -- correctly -- do open one).
+
+    Also hides Streamlit's own header bar and three-dot menu (this logo
+    link is our own replacement for that navigation surface, so Streamlit's
+    isn't needed) and pulls the main content block's default top/left
+    padding in, so the logo actually sits flush in the page's top-left
+    corner instead of visibly inset from it. Both target-testid selectors
+    (older `.block-container` class and the newer `stMainBlockContainer`
+    testid) are set for the same rule, since which one is authoritative
+    varies by Streamlit version -- belt and suspenders."""
+    st.markdown(
+        """
+        <style>
+        [data-testid="stHeader"], [data-testid="stMainMenu"], [data-testid="stToolbar"] {
+            display: none !important;
+        }
+        div.block-container, [data-testid="stMainBlockContainer"] {
+            padding-top: 0.5rem !important;
+            padding-left: 0.5rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.markdown(
         f'<a href="/" target="_self" style="text-decoration:none;color:inherit;'
         f'display:inline-flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">'

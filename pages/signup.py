@@ -70,14 +70,19 @@ if "_signup_token" in st.session_state:
         f'<a id="continue-link" href="{chat_url}" target="_self">Continue if nothing happens</a>',
         unsafe_allow_html=True,
     )
-    # Fires the casper://pair hand-off first (a custom-scheme anchor click
+    # window.parent.focus() first: sign-up now happens on the app subdomain,
+    # reached via a new tab from the www landing page (see casper_app.py) --
+    # this tab should already be focused from that click, but this makes
+    # sure it stays/becomes the foreground tab once /chat loads, rather than
+    # silently landing in a background tab the user doesn't notice. Then
+    # fires the casper://pair hand-off (a custom-scheme anchor click
     # dispatches to the OS without navigating the tab away -- unlike an
-    # http(s) URL), then redirects this same tab to /chat. Both in one
-    # script so the pairing dispatch has definitely started before the /chat
+    # http(s) URL), then redirects this same tab to /chat. All in one script
+    # so the pairing dispatch has definitely started before the /chat
     # navigation unloads the page. See click_anchor_js's docstring for why a
     # direct window.parent.location assignment doesn't reliably work from
     # inside st.iframe's sandbox.
     st.iframe(
-        f"<script>{click_anchor_js(json.dumps(pair_url))}{click_anchor_js(json.dumps(chat_url))}</script>",
+        f"<script>window.parent.focus();{click_anchor_js(json.dumps(pair_url))}{click_anchor_js(json.dumps(chat_url))}</script>",
         height=1,
     )
