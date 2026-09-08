@@ -68,19 +68,25 @@ if "_login_token" in st.session_state:
         f'<a id="continue-link" href="{chat_url}" target="_self">Continue if nothing happens</a>',
         unsafe_allow_html=True,
     )
-    # window.parent.focus() first: sign-in now happens on the app subdomain,
-    # reached via a new tab from the www landing page (see casper_app.py) --
-    # this tab should already be focused from that click, but this makes
-    # sure it stays/becomes the foreground tab once /chat loads, rather than
-    # silently landing in a background tab the user doesn't notice. Then
-    # fires the casper://pair hand-off (a custom-scheme anchor click
+    # Fires the casper://pair hand-off first (a custom-scheme anchor click
     # dispatches to the OS without navigating the tab away -- unlike an
-    # http(s) URL), then redirects this same tab to /chat. All in one script
-    # so the pairing dispatch has definitely started before the /chat
-    # navigation unloads the page. See click_anchor_js's docstring for why a
-    # direct window.parent.location assignment doesn't reliably work from
-    # inside st.iframe's sandbox.
+    # http(s) URL). window.parent.focus() comes *after* that, not before --
+    # sign-in happens in a new tab from the www landing page (see
+    # casper_app.py), which should already be focused from that click, but
+    # dispatching casper:// likely shifts OS-level focus toward the daemon
+    # (or Chrome's own "Open Casper?" permission prompt) for a moment; an
+    # earlier attempt called focus() before the dispatch and didn't fix a
+    # reported case of the tab losing focus, which is consistent with that
+    # -- focusing *after* the dispatch, right before the /chat navigation,
+    # is the more likely-correct ordering, though this is a best-effort fix
+    # without a way to directly test browser/OS focus behavior. See
+    # pages/chat.py's own focus() call on load for a second attempt, in
+    # case this one still doesn't stick. All in one script so the pairing
+    # dispatch has definitely started before the /chat navigation unloads
+    # the page. See click_anchor_js's docstring for why a direct
+    # window.parent.location assignment doesn't reliably work from inside
+    # st.iframe's sandbox.
     st.iframe(
-        f"<script>window.parent.focus();{click_anchor_js(json.dumps(pair_url))}{click_anchor_js(json.dumps(chat_url))}</script>",
+        f"<script>{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(chat_url))}</script>",
         height=1,
     )

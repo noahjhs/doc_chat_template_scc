@@ -28,41 +28,63 @@ def ghost_svg(size=120):
     return GHOST_SVG.format(size=size)
 
 
-def page_header(size=32):
-    """The clickable brand+logo every page shows in the upper-left, linking
-    back to the home page -- so no page ever needs its own "back home" link.
-    A real <a> tag with target="_self" (not st.markdown's `[text](url)`
-    syntax) is deliberate: st.markdown's markdown-syntax links default to
-    target="_blank" regardless of the URL, and a link that always points at
-    a relative "/" is always same-subdomain navigation, which should never
-    open a new tab (see casper_app.py's other links for the same rule
-    applied to cross-subdomain links, which -- correctly -- do open one).
-
-    Also hides Streamlit's own header bar and three-dot menu (this logo
-    link is our own replacement for that navigation surface, so Streamlit's
-    isn't needed) and pulls the main content block's default top/left
-    padding in, so the logo actually sits flush in the page's top-left
-    corner instead of visibly inset from it. Both target-testid selectors
-    (older `.block-container` class and the newer `stMainBlockContainer`
-    testid) are set for the same rule, since which one is authoritative
-    varies by Streamlit version -- belt and suspenders."""
+def hide_streamlit_chrome():
+    """Hides Streamlit's own header bar and three-dot menu (home_link_html()
+    is our own replacement for that navigation surface, so Streamlit's isn't
+    needed) and pulls the main content block's default padding way in, so
+    content -- in particular the home link -- sits flush against the page's
+    edges instead of visibly inset from them. Call on every page, exactly
+    once. Several selectors targeted redundantly (older `.block-container`
+    class, newer `stMainBlockContainer`/`stAppViewContainer` testids, and
+    the vertical-block wrapper Streamlit actually renders top-level content
+    into) since which one carries the real padding varies by Streamlit
+    version and turned out not to be fully covered by `.block-container`
+    alone -- confirmed directly (a first attempt at just that selector left
+    visible left-padding)."""
     st.markdown(
         """
         <style>
         [data-testid="stHeader"], [data-testid="stMainMenu"], [data-testid="stToolbar"] {
             display: none !important;
         }
-        div.block-container, [data-testid="stMainBlockContainer"] {
-            padding-top: 0.5rem !important;
-            padding-left: 0.5rem !important;
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMainBlockContainer"],
+        div.block-container,
+        [data-testid="stMainBlockContainer"] > div,
+        [data-testid="stVerticalBlock"] {
+            padding-top: 0 !important;
+            padding-left: 0 !important;
+            margin-left: 0 !important;
+            max-width: 100% !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(
+
+
+def home_link_html(size=32):
+    """HTML for the clickable brand+logo linking back to the home page --
+    shared by page_header() (rendered inline, in the main content area) and
+    pages/chat.py (rendered in the sidebar instead -- see its own call
+    site). A real <a> tag with target="_self" (not st.markdown's
+    `[text](url)` syntax) is deliberate: st.markdown's markdown-syntax
+    links default to target="_blank" regardless of the URL, and a link
+    that always points at a relative "/" is always same-subdomain
+    navigation, which should never open a new tab (see casper_app.py's
+    other links for the same rule applied to cross-subdomain links, which
+    -- correctly -- do open one)."""
+    return (
         f'<a href="/" target="_self" style="text-decoration:none;color:inherit;'
-        f'display:inline-flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">'
-        f'{ghost_svg(size)}<span style="font-size:{round(size * 0.6)}px;font-weight:700;">{NAME}</span></a>',
-        unsafe_allow_html=True,
+        f'display:inline-flex;align-items:center;gap:0.5rem;margin:0 0 1rem 0.25rem;">'
+        f'{ghost_svg(size)}<span style="font-size:{round(size * 0.6)}px;font-weight:700;">{NAME}</span></a>'
     )
+
+
+def page_header(size=32):
+    """hide_streamlit_chrome() + the home link rendered inline in the main
+    content area -- what every page except pages/chat.py wants (chat.py
+    puts the link in its sidebar instead, so it calls hide_streamlit_chrome()
+    and home_link_html() directly rather than this)."""
+    hide_streamlit_chrome()
+    st.markdown(home_link_html(size), unsafe_allow_html=True)

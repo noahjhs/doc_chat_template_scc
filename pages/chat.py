@@ -2,7 +2,6 @@ import base64
 import json
 import threading
 import time
-from datetime import datetime
 
 import requests
 import streamlit as st
@@ -15,7 +14,7 @@ from utils.auth import (
     require_agent_session,
     revoke_token_with_auth_service,
 )
-from utils.branding import NAME, page_header
+from utils.branding import NAME, hide_streamlit_chrome, home_link_html
 from utils.browser_nav import click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
@@ -74,7 +73,12 @@ if st.session_state.get("_signing_out"):
 username = require_agent_session()
 client = get_client()
 
-page_header(size=48)
+# Chrome hidden on every page (see utils/branding.py), but the home link
+# itself lives in the sidebar here instead of the main content area --
+# unlike every other page, chat.py's sidebar is already real, persistent
+# UI (sign-out, connection status), so the link belongs there rather than
+# floating above the conversation.
+hide_streamlit_chrome()
 
 # Mirrors casper_tool.py's COMMAND_CATEGORIES — the two run as separate
 # processes on separate machines, so this list is duplicated rather than
@@ -86,16 +90,6 @@ COMMAND_CATEGORIES = {
     "Viewing & Searching": ["cat", "less", "head", "tail", "grep", "find"],
 }
 GIT_ACTIONS = set(COMMAND_CATEGORIES["Git"])
-
-# One entry per request: each script rerun (page load, widget change, chat
-# message) is a fresh request from the browser. Streamlit reports None for
-# localhost connections specifically (see st.context.ip_address docs) —
-# show that plainly rather than the literal string "None".
-if "ip_log" not in st.session_state:
-    st.session_state.ip_log = []
-ip = st.context.ip_address or "localhost"
-st.session_state.ip_log.append(f"{datetime.now().strftime('%H:%M:%S')}  {ip}")
-st.session_state.ip_log = st.session_state.ip_log[-100:]  # cap growth
 
 # Looked up once (cached in session_state) rather than carried via query
 # params -- the daemon no longer redirects a browser tab itself (see
@@ -145,6 +139,15 @@ if "_url_cleaned" not in st.session_state:
     )
     st.session_state["_url_cleaned"] = True
 
+# A second, defensive attempt at bringing this tab into focus on its very
+# first load after sign-in (see pages/signin.py's own focus() call, right
+# before it redirects here, for the first attempt and why this exists at
+# all -- a reported case of the tab not ending up focused after sign-in).
+# Only once per session, same reasoning as _url_cleaned above.
+if "_focus_attempted" not in st.session_state:
+    st.iframe("<script>window.parent.focus();</script>", height=1)
+    st.session_state["_focus_attempted"] = True
+
 def _start_sign_out():
     # on_click (not "if st.button(...):") so this runs as part of Streamlit's
     # own click-handling, before the rerun it then triggers automatically --
@@ -163,18 +166,9 @@ def _recheck_local_agent_config():
 
 
 with st.sidebar:
+    st.markdown(home_link_html(size=32), unsafe_allow_html=True)
     st.button("Sign out", key="sign_out_button", on_click=_start_sign_out)
     st.caption(f"Signed in as {username}")
-
-    st.divider()
-    st.subheader("Request IP log")
-    st.text_area(
-        "Request IP log",
-        value="\n".join(reversed(st.session_state.ip_log)),
-        height=150,
-        disabled=True,
-        label_visibility="collapsed",
-    )
 
     st.divider()
     st.subheader("Local commands")
