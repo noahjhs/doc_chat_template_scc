@@ -1,3 +1,5 @@
+import streamlit as st
+
 NAME = "Casper"
 TAGLINE = "your friendly ghost."
 
@@ -24,3 +26,20 @@ GHOST_SVG = """
 
 def ghost_svg(size=120):
     return GHOST_SVG.format(size=size)
+
+
+def page_header(size=32):
+    """The clickable brand+logo every page shows in the upper-left, linking
+    back to the home page -- so no page ever needs its own "back home" link.
+    A real <a> tag with target="_self" (not st.markdown's `[text](url)`
+    syntax) is deliberate: st.markdown's markdown-syntax links default to
+    target="_blank" regardless of the URL, and a link that always points at
+    a relative "/" is always same-subdomain navigation, which should never
+    open a new tab (see casper_app.py's other links for the same rule
+    applied to cross-subdomain links, which -- correctly -- do open one)."""
+    st.markdown(
+        f'<a href="/" target="_self" style="text-decoration:none;color:inherit;'
+        f'display:inline-flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">'
+        f'{ghost_svg(size)}<span style="font-size:{round(size * 0.6)}px;font-weight:700;">{NAME}</span></a>',
+        unsafe_allow_html=True,
+    )
