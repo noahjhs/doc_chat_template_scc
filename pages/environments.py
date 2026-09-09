@@ -37,8 +37,12 @@ if "_environments" not in st.session_state:
 
 
 def _refresh():
+    # Called only right after a change actually succeeded (every call site
+    # is inside the non-error branch of a mutation) -- so it doubles as the
+    # signal for the "Update saved" message at the bottom of the page.
     st.session_state.pop("_hosts", None)
     st.session_state.pop("_environments", None)
+    st.session_state["_just_saved"] = True
 
 
 hosts = st.session_state["_hosts"]
@@ -160,3 +164,9 @@ for env in environments:
                         st.rerun()
         else:
             st.caption("No hosts to add yet.")
+
+if st.session_state.pop("_just_saved", False):
+    st.success("Update saved")
+
+st.divider()
+st.button("← Back to chat", on_click=lambda: st.switch_page("pages/chat.py"))
