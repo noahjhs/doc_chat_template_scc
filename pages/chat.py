@@ -77,6 +77,37 @@ client = get_client()
 # floating above the conversation.
 hide_streamlit_chrome()
 
+# The Environment-management gear and the workspace refresh icon (both
+# below) are meant to read as small, secondary glyphs next to their
+# labels, not full buttons -- strips Streamlit's default bordered-button
+# chrome (border, background, shadow) down to just the icon, in every
+# interaction state (hover/focus/active too, so nothing picks up the
+# theme's accent color on interaction -- "monochromatic" per the ask).
+# Targeted by key via Streamlit's own .st-key-<key> convention rather than
+# a page-wide selector, so no other button on this page is affected.
+st.html(
+    """
+    <style>
+    .st-key-env_gear_button button, .st-key-refresh_workspace button {
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        padding: 0.1rem 0.35rem !important;
+        min-height: 0 !important;
+        color: inherit !important;
+    }
+    .st-key-env_gear_button button:hover, .st-key-refresh_workspace button:hover,
+    .st-key-env_gear_button button:focus, .st-key-refresh_workspace button:focus,
+    .st-key-env_gear_button button:active, .st-key-refresh_workspace button:active {
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        color: inherit !important;
+    }
+    </style>
+    """
+)
+
 # Mirrors casper_tool.py's COMMAND_CATEGORIES — the two run as separate
 # processes on separate machines, so this list is duplicated rather than
 # imported. Keep them in sync by hand.
@@ -302,7 +333,12 @@ with st.sidebar:
     with env_label_col:
         st.markdown("**Environment**")
     with env_gear_col:
-        st.page_link("pages/environments.py", label="⚙️", help="Manage hosts & Environments")
+        st.button(
+            "⚙️",
+            key="env_gear_button",
+            help="Manage hosts & Environments",
+            on_click=lambda: st.switch_page("pages/environments.py"),
+        )
     if environments:
         env_ids = [e["id"] for e in environments]
         st.selectbox(

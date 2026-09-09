@@ -252,12 +252,16 @@ def require_agent_session():
     token = st.query_params.get("local_agent_token", "")
     if not token:
         st.info(f"Sign in to use {NAME}.")
-        # st.page_link, not a markdown [text](url) link -- this codebase's
-        # markdown renderer opens those in a new tab regardless of the URL
-        # (see casper_app.py's own note on this), which is wrong for a
-        # same-subdomain destination; page_link does a proper same-tab,
-        # client-side navigation to another page in this app.
-        st.page_link("pages/signin.py", label="Sign in")
+        # st.button + st.switch_page, not st.page_link or a markdown
+        # [text](url) link -- this codebase's markdown renderer opens
+        # those in a new tab regardless of the URL (see casper_app.py's
+        # own note on this), which is wrong for a same-subdomain
+        # destination; page_link does a proper same-tab navigation but
+        # renders as a plain text link with no visible outline, whereas a
+        # button gets Streamlit's normal bordered button styling for free
+        # -- wanted here specifically, since this is the one actionable
+        # thing on an otherwise-empty gate page.
+        st.button("Sign in", on_click=lambda: st.switch_page("pages/signin.py"))
         st.stop()
 
     result = verify_token_with_auth_service(_auth_domain(), token)
@@ -266,7 +270,7 @@ def require_agent_session():
         st.stop()
     if not result.get("valid"):
         st.error("This sign-in link is no longer valid.")
-        st.page_link("pages/signin.py", label="Sign in again to get a fresh one.")
+        st.button("Sign in again to get a fresh one", on_click=lambda: st.switch_page("pages/signin.py"))
         st.stop()
 
     st.session_state["_authenticated_username"] = result["username"]
