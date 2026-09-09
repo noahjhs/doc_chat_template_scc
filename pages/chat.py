@@ -205,7 +205,18 @@ elif "_local_routing_key_probed" not in st.session_state:
         (function() {
             var controller = new AbortController();
             var timeoutId = setTimeout(function() { controller.abort(); }, 800);
-            fetch('http://localhost:8000/api/whoami', {signal: controller.signal})
+            // window.parent.fetch, not this iframe's own bare fetch(...) --
+            // confirmed directly (Chrome devtools console) that a plain
+            // fetch() here gets blocked as mixed content: this script runs
+            // inside an about:srcdoc frame (how st.iframe gets a <script>
+            // to execute at all -- see the file-level note above), and
+            // Chrome evaluates that frame's mixed-content policy more
+            // strictly than a normal top-level https:// page, where
+            // http://localhost is correctly exempted. Invoking fetch as a
+            // method borrowed from the parent window attributes the
+            // request to the parent's own (correctly-exempted) security
+            // context instead.
+            window.parent.fetch('http://localhost:8000/api/whoami', {signal: controller.signal})
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     clearTimeout(timeoutId);
