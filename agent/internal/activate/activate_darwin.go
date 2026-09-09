@@ -66,6 +66,21 @@ func defaultBrowserAppName() string {
 // signed in using their default browser, which isn't always true (no
 // signal is available to know which browser actually has the relevant
 // tab), so it can end up activating the wrong application if not.
+//
+// Uses System Events' "set frontmost" (Accessibility API) rather than
+// `tell application ... to activate` (a plain Apple Event) -- confirmed
+// directly that the plain-activate version produces a real, distinct bug:
+// the target app's window becomes frontmost/"active" (correctly shown as
+// such in its own Window menu) without becoming the *key* window that
+// actually receives mouse/keyboard events, leaving every hover state and
+// the first click dead until a second, fully-manual click re-establishes
+// key status. Reproduced identically in both Chrome and Safari, which
+// rules out a browser-specific bug and points at the activation mechanism
+// itself -- a background (LSUIElement) process activating another app via
+// a bare Apple Event, with none of the "real interactive user action"
+// signal that normally comes with it. System Events' frontmost-setting
+// goes through a different OS path and may restore true key-window status
+// where the plain activate didn't -- this is what's being tried next.
 func DefaultBrowser() {
 	appName := defaultBrowserAppName()
 	if appName == "" {
@@ -74,5 +89,8 @@ func DefaultBrowser() {
 	// appName only ever comes from the fixed map above, never from
 	// arbitrary/external input, so no AppleScript-string escaping is needed
 	// here (unlike internal/dialog's messages, which do carry arbitrary text).
-	_ = exec.Command("osascript", "-e", `tell application "`+appName+`" to activate`).Run()
+	_ = exec.Command(
+		"osascript", "-e",
+		`tell application "System Events" to tell process "`+appName+`" to set frontmost to true`,
+	).Run()
 }
