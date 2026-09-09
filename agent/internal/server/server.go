@@ -25,6 +25,11 @@ type Server struct {
 	Logger       *log.Logger
 	OnSignOut    func()
 	ClearSession func()
+	// RoutingKey and AllowedOrigin back /api/whoami (see handleWhoami) --
+	// fixed for the process's whole lifetime, set once by cmd/casper/main.go
+	// right after construction, so (unlike apiKey) they need no mutex.
+	RoutingKey    string
+	AllowedOrigin string
 
 	mu         sync.RWMutex
 	apiKey     string
@@ -75,6 +80,27 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// handleWhoami is the one deliberately unauthenticated endpoint -- it lets
+// a browser tab ask whether a Casper daemon is running on the SAME
+// physical machine it's loaded on (see pages/chat.py's local-host
+// detection, used to default an unspecified "which machine" tool
+// argument to wherever the chat session itself is happening), which by
+// definition has to work without a credential the browser doesn't have
+// yet. routing_key isn't a secret -- see routingkey.go's own doc comment:
+// it's just a relay-addressing path segment, already visible in every
+// connected host's local_agent_url anyway -- so returning it here doesn't
+// expose anything a signed-in user's own browser couldn't already see.
+// CORS is restricted to this deployment's own configured app origin
+// (never "*"), set via AllowedOrigin, so an unrelated website's JS can't
+// use this to fingerprint which local port happens to have a Casper
+// daemon on it.
+func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
+	if s.AllowedOrigin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", s.AllowedOrigin)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"routing_key": s.RoutingKey})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +183,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/whoami", s.handleWhoami)
 	mux.HandleFunc("/api/shutdown", s.handleShutdown)
 	mux.HandleFunc("/api/command", s.handleCommand)
 	return mux

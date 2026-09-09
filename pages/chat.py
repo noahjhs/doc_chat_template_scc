@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import threading
 import time
 
@@ -129,6 +130,19 @@ connected_active_hosts = [
 ]
 
 
+def _routing_key_from_url(url):
+    """Pulls the routing_key back out of a relay URL (".../agent/<key>") --
+    every connected host's local_agent_url already has this in it (see
+    agent/internal/tunnel/tunnel.go's Start()), so this is enough to
+    correlate the local-daemon probe below against one of these configs
+    without needing auth_service to expose routing_key separately (it's
+    not a secret, but there's no other use for it server-side yet)."""
+    if not url:
+        return None
+    m = re.search(r"/agent/([^/]+)/?$", url)
+    return m.group(1) if m else None
+
+
 def _build_local_agent_configs(connected_hosts):
     """Keys each connected host by a de-duplicated label -- its own label in
     the common case, with its host_id appended only when two hosts in the
@@ -143,6 +157,7 @@ def _build_local_agent_configs(connected_hosts):
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
             "workspace": h.get("workspace", ""),
+            "routing_key": _routing_key_from_url(h["local_agent_url"]),
         }
     return configs
 
@@ -163,6 +178,54 @@ if "_url_cleaned" not in st.session_state:
         height=1,
     )
     st.session_state["_url_cleaned"] = True
+
+# Detects whether a Casper daemon is running on the SAME physical machine
+# as this browser tab -- distinct from (and not derivable from) the
+# "connected hosts" list above, which could all be entirely different,
+# remote machines. Server-side code has no way to know this on its own, so
+# client-side JS probes the daemon's well-known local port directly: only
+# reachable at all if actually co-located (see agent/internal/server's
+# handleWhoami -- deliberately unauthenticated, CORS-restricted to this
+# app's own origin). One-shot per browser session: on success, the probe
+# script triggers a single page reload carrying the result as a query
+# param, the same way local_agent_token itself already arrives -- kept
+# consistent with every other JS-to-Python hand-off in this file rather
+# than reaching for a custom bidirectional Streamlit component.
+if "local_routing_key" in st.query_params:
+    st.session_state["_local_routing_key"] = st.query_params["local_routing_key"]
+    st.iframe(
+        "<script>window.parent.history.replaceState(null, '', window.parent.location.pathname);</script>",
+        height=1,
+    )
+elif "_local_routing_key_probed" not in st.session_state:
+    st.session_state["_local_routing_key_probed"] = True
+    st.iframe(
+        """
+        <script>
+        (function() {
+            var controller = new AbortController();
+            var timeoutId = setTimeout(function() { controller.abort(); }, 800);
+            fetch('http://localhost:8000/api/whoami', {signal: controller.signal})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    clearTimeout(timeoutId);
+                    if (data && data.routing_key) {
+                        var url = new URL(window.parent.location.href);
+                        url.searchParams.set('local_routing_key', data.routing_key);
+                        window.parent.location.href = url.toString();
+                    }
+                })
+                .catch(function() { /* no daemon on this machine, or it's on a non-default port -- fine, no default host to offer */ });
+        })();
+        </script>
+        """,
+        height=1,
+    )
+local_routing_key = st.session_state.get("_local_routing_key")
+local_host = next(
+    (label for label, cfg in local_agent_configs.items() if cfg.get("routing_key") == local_routing_key),
+    None,
+)
 
 # A second, defensive attempt at bringing this tab into focus on its very
 # first load after sign-in (see pages/signin.py's own focus() call, right
@@ -219,8 +282,18 @@ with st.sidebar:
                 host = hosts_by_id.get(host_id)
                 if host is None:
                     continue
-                icon = "🔧" if host.get("connected") else "⚪"
-                st.caption(f"{icon} {host['label']}")
+                if host.get("connected"):
+                    icon, status = "🔧", "active"
+                else:
+                    icon, status = "⚪", "inactive"
+                # 📍 marks whichever host this specific browser tab was
+                # detected running on (see the local-daemon probe above) --
+                # matched by routing_key, not label, since two hosts could
+                # share a label and de-duplication only happens inside
+                # local_agent_configs' own keys, not here.
+                here = local_routing_key and _routing_key_from_url(host.get("local_agent_url")) == local_routing_key
+                marker = " 📍" if here else ""
+                st.caption(f"{icon} {host['label']} ({status}){marker}")
             if not active_environment["host_ids"]:
                 st.caption("No hosts in this Environment yet.")
     else:
@@ -316,10 +389,13 @@ LOCAL_AGENT_TOOL = {
                 "type": "string",
                 "enum": list(local_agent_configs.keys()),
                 "description": (
-                    "Which connected machine to run this on. Only needed "
-                    "when more than one is available in the active "
-                    "Environment -- ask the user to clarify if it's "
-                    "ambiguous."
+                    "Which connected machine to run this on. Usually fine "
+                    "to omit -- if the user is talking about a specific "
+                    "one ('on the mini', 'my laptop'), name it explicitly, "
+                    "but otherwise it defaults to whichever machine the "
+                    "user is currently chatting from (or the only "
+                    "connected one). Ask the user to clarify only if the "
+                    "system reports it's still ambiguous."
                 ),
             },
         },
@@ -346,18 +422,23 @@ if "previous_response_id" not in st.session_state:
     st.session_state.previous_response_id = None
 
 
-def call_local_agent(local_agent_configs, action, host=None, **kwargs):
+def call_local_agent(local_agent_configs, action, host=None, default_host=None, **kwargs):
     """Call one of the user's connected local agent servers; never raises,
     so a connection failure (or an ambiguous/unknown host) just gets
     reported back to the model as text. host selection isn't in the tool
     schema's "required" list (there's no way to say "required only when
     there's more than one option" in JSON Schema), so ambiguity is enforced
-    here instead."""
+    here instead. default_host is the machine this browser tab was itself
+    detected running on (see the local-daemon probe above) -- preferred
+    over asking the model to guess or forcing the user to clarify, since
+    "run this" with no machine named almost always means "here"."""
     if not local_agent_configs:
         return "Local agent error: no connected machines available."
     if host is None:
         if len(local_agent_configs) == 1:
             host = next(iter(local_agent_configs))
+        elif default_host in local_agent_configs:
+            host = default_host
         else:
             available = ", ".join(local_agent_configs)
             return f"Local agent error: multiple machines connected ({available}) -- specify which one via 'host'."
@@ -533,6 +614,7 @@ if prompt := st.chat_input("Chat"):
                             local_agent_configs,
                             action,
                             host=args.get("host"),
+                            default_host=local_host,
                             path=args.get("path"),
                             destination=args.get("destination"),
                             pattern=args.get("pattern"),
