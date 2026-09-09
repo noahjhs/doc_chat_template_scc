@@ -39,6 +39,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.warning(
+    f"**macOS will refuse to open {NAME} the first time**, with a message like "
+    '"Apple could not verify Casper.app is free of malware." This is expected -- '
+    f"{NAME} isn't yet notarized by Apple (a paid process we haven't done), and "
+    "there's no \"Open Anyway\" button for this particular warning on current "
+    "macOS versions. To open it anyway:\n"
+    "1. Open **Terminal** (Spotlight search for it).\n"
+    "2. Type `xattr -cr ` (note the trailing space), then drag `Casper.app` from "
+    "Finder into the Terminal window -- this fills in its path -- and press Return.\n"
+    f"3. Open {NAME} again; it'll launch normally from now on."
+)
+
 for label, path in DOWNLOADS.items():
     if os.path.exists(path):
         with open(path, "rb") as f:
