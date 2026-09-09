@@ -87,7 +87,20 @@ if "_login_token" in st.session_state:
     # the page. See click_anchor_js's docstring for why a direct
     # window.parent.location assignment doesn't reliably work from inside
     # st.iframe's sandbox.
+    # window.parent.localStorage.setItem(...) -- not a plain localStorage
+    # call -- stamps *this browser's* own persistent storage with when it
+    # last fired a casper://pair dispatch. There's no way for the browser
+    # to directly confirm which physical machine actually received that
+    # dispatch (a background fetch to the local daemon is blocked outright
+    # by browsers' mixed-content policy -- confirmed the hard way against
+    # a real deployment: an https page can never fetch a plain http://
+    # resource, even localhost, regardless of CORS), so pages/chat.py
+    # instead correlates this timestamp against auth_service's own
+    # first_paired_at for whichever host shows up shortly afterward --
+    # good enough to default "which machine" to "this one" without ever
+    # needing the browser to talk to localhost at all.
     st.iframe(
-        f"<script>{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(chat_url))}</script>",
+        f"<script>window.parent.localStorage.setItem('casper_last_paired_at', Date.now());"
+        f"{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(chat_url))}</script>",
         height=1,
     )

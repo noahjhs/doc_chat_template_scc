@@ -56,6 +56,7 @@ class HostInfo(BaseModel):
     workspace: str | None = None
     command_key: str | None = None
     environment_ids: list[int] = []
+    first_paired_at: str = ""
 
 
 class HostListResponse(BaseModel):

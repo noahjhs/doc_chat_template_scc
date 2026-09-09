@@ -353,7 +353,7 @@ def list_hosts(authorization: str = Header(default="")):
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         rows = db.execute(
             """
-            SELECT h.id, h.routing_key, h.hostname, uh.label
+            SELECT h.id, h.routing_key, h.hostname, uh.label, uh.first_paired_at
             FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
             WHERE uh.user_id = ? ORDER BY uh.label COLLATE NOCASE
             """,
@@ -383,6 +383,7 @@ def list_hosts(authorization: str = Header(default="")):
                 workspace=att["workspace"] if connected else None,
                 command_key=att["command_key"] if mine else None,
                 environment_ids=envs_by_host.get(r["id"], []),
+                first_paired_at=r["first_paired_at"],
             )
         )
     return HostListResponse(hosts=hosts_out)

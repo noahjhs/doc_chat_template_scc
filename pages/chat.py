@@ -1,8 +1,8 @@
 import base64
 import json
-import re
 import threading
 import time
+from datetime import datetime, timezone
 
 import requests
 import streamlit as st
@@ -130,19 +130,6 @@ connected_active_hosts = [
 ]
 
 
-def _routing_key_from_url(url):
-    """Pulls the routing_key back out of a relay URL (".../agent/<key>") --
-    every connected host's local_agent_url already has this in it (see
-    agent/internal/tunnel/tunnel.go's Start()), so this is enough to
-    correlate the local-daemon probe below against one of these configs
-    without needing auth_service to expose routing_key separately (it's
-    not a secret, but there's no other use for it server-side yet)."""
-    if not url:
-        return None
-    m = re.search(r"/agent/([^/]+)/?$", url)
-    return m.group(1) if m else None
-
-
 def _build_local_agent_configs(connected_hosts):
     """Keys each connected host by a de-duplicated label -- its own label in
     the common case, with its host_id appended only when two hosts in the
@@ -154,10 +141,10 @@ def _build_local_agent_configs(connected_hosts):
     for h in connected_hosts:
         key = h["label"] if label_counts[h["label"]] == 1 else f"{h['label']} ({h['host_id']})"
         configs[key] = {
+            "host_id": h["host_id"],
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
             "workspace": h.get("workspace", ""),
-            "routing_key": _routing_key_from_url(h["local_agent_url"]),
         }
     return configs
 
@@ -179,63 +166,86 @@ if "_url_cleaned" not in st.session_state:
     )
     st.session_state["_url_cleaned"] = True
 
-# Detects whether a Casper daemon is running on the SAME physical machine
-# as this browser tab -- distinct from (and not derivable from) the
-# "connected hosts" list above, which could all be entirely different,
-# remote machines. Server-side code has no way to know this on its own, so
-# client-side JS probes the daemon's well-known local port directly: only
-# reachable at all if actually co-located (see agent/internal/server's
-# handleWhoami -- deliberately unauthenticated, CORS-restricted to this
-# app's own origin). One-shot per browser session: on success, the probe
-# script triggers a single page reload carrying the result as a query
-# param, the same way local_agent_token itself already arrives -- kept
-# consistent with every other JS-to-Python hand-off in this file rather
-# than reaching for a custom bidirectional Streamlit component.
-if "local_routing_key" in st.query_params:
-    st.session_state["_local_routing_key"] = st.query_params["local_routing_key"]
+
+def _epoch_millis(sqlite_timestamp):
+    """Parses auth_service's CURRENT_TIMESTAMP format ("YYYY-MM-DD
+    HH:MM:SS", implicitly UTC) into epoch milliseconds, comparable against
+    a browser's own Date.now(). None for anything that doesn't parse (a
+    missing value, or a server-side format change)."""
+    if not sqlite_timestamp:
+        return None
+    try:
+        dt = datetime.strptime(sqlite_timestamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def _find_local_host_id(hosts, local_paired_at):
+    """Correlates this browser's own casper_last_paired_at stamp (set by
+    pages/signin.py the moment it fires a casper://pair dispatch) against
+    each known host's first_paired_at, treating whichever host got paired
+    shortly *after* that stamp as this browser's own machine. A fuzzy,
+    one-time-historical match rather than a live check -- there's no way
+    for the browser to directly confirm which physical machine actually
+    received a given pairing dispatch, since a background fetch to the
+    local daemon is blocked outright by browsers' mixed-content policy
+    (confirmed the hard way: an https page can never fetch a plain
+    http:// resource, even localhost, regardless of CORS/Private Network
+    Access headers). But since both timestamps are fixed once set, this
+    stays correct on every future visit, not just right after pairing.
+    -5s of slack covers the browser's clock running slightly ahead of
+    auth_service's; 120s covers how long pairing can realistically take
+    (Gatekeeper prompts, etc.) before it stops being a plausible match."""
+    if local_paired_at is None:
+        return None
+    best_id, best_gap = None, None
+    for h in hosts:
+        paired_at = _epoch_millis(h.get("first_paired_at"))
+        if paired_at is None:
+            continue
+        gap = paired_at - local_paired_at
+        if -5_000 <= gap <= 120_000 and (best_gap is None or gap < best_gap):
+            best_id, best_gap = h["host_id"], gap
+    return best_id
+
+
+# Reads back this browser's own casper_last_paired_at localStorage stamp
+# (see pages/signin.py and the Reconnect link below for where it's set) --
+# pure same-origin storage access, no mixed-content issue at all, unlike
+# an earlier version of this that tried to have the browser directly probe
+# the local daemon. One-shot per browser session, same reload-carries-a-
+# query-param pattern used throughout this file for JS-to-Python hand-offs.
+if "local_paired_at" in st.query_params:
+    st.session_state["_local_paired_at"] = st.query_params["local_paired_at"]
     st.iframe(
         "<script>window.parent.history.replaceState(null, '', window.parent.location.pathname);</script>",
         height=1,
     )
-elif "_local_routing_key_probed" not in st.session_state:
-    st.session_state["_local_routing_key_probed"] = True
+elif "_local_paired_at_read" not in st.session_state:
+    st.session_state["_local_paired_at_read"] = True
     st.iframe(
         """
         <script>
         (function() {
-            var controller = new AbortController();
-            var timeoutId = setTimeout(function() { controller.abort(); }, 800);
-            // window.parent.fetch, not this iframe's own bare fetch(...) --
-            // confirmed directly (Chrome devtools console) that a plain
-            // fetch() here gets blocked as mixed content: this script runs
-            // inside an about:srcdoc frame (how st.iframe gets a <script>
-            // to execute at all -- see the file-level note above), and
-            // Chrome evaluates that frame's mixed-content policy more
-            // strictly than a normal top-level https:// page, where
-            // http://localhost is correctly exempted. Invoking fetch as a
-            // method borrowed from the parent window attributes the
-            // request to the parent's own (correctly-exempted) security
-            // context instead.
-            window.parent.fetch('http://localhost:8000/api/whoami', {signal: controller.signal})
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    clearTimeout(timeoutId);
-                    if (data && data.routing_key) {
-                        var url = new URL(window.parent.location.href);
-                        url.searchParams.set('local_routing_key', data.routing_key);
-                        window.parent.location.href = url.toString();
-                    }
-                })
-                .catch(function() { /* no daemon on this machine, or it's on a non-default port -- fine, no default host to offer */ });
+            var stamp = window.parent.localStorage.getItem('casper_last_paired_at');
+            if (stamp) {
+                var url = new URL(window.parent.location.href);
+                url.searchParams.set('local_paired_at', stamp);
+                window.parent.location.href = url.toString();
+            }
         })();
         </script>
         """,
         height=1,
     )
-local_routing_key = st.session_state.get("_local_routing_key")
+try:
+    local_paired_at = int(st.session_state.get("_local_paired_at") or "")
+except ValueError:
+    local_paired_at = None
+local_host_id = _find_local_host_id(hosts, local_paired_at)
 local_host = next(
-    (label for label, cfg in local_agent_configs.items() if cfg.get("routing_key") == local_routing_key),
-    None,
+    (label for label, cfg in local_agent_configs.items() if cfg.get("host_id") == local_host_id), None
 )
 
 # A second, defensive attempt at bringing this tab into focus on its very
@@ -267,8 +277,8 @@ def _recheck_hosts():
     st.session_state.pop("_hosts", None)
     st.session_state.pop("_environments", None)
     st.session_state.pop("_active_environment_id", None)
-    st.session_state.pop("_local_routing_key_probed", None)
-    st.session_state.pop("_local_routing_key", None)
+    st.session_state.pop("_local_paired_at_read", None)
+    st.session_state.pop("_local_paired_at", None)
 
 
 def _switch_environment():
@@ -303,14 +313,12 @@ with st.sidebar:
                 else:
                     icon, status = "⚪", "inactive"
                 # Marks whichever host this specific browser tab was
-                # detected running on (see the local-daemon probe above) --
-                # matched by routing_key, not label, since two hosts could
-                # share a label and de-duplication only happens inside
-                # local_agent_configs' own keys, not here. A plain word
-                # rather than an emoji/icon -- less likely to go unnoticed
-                # or fail to render depending on the system's emoji font.
-                here = local_routing_key and _routing_key_from_url(host.get("local_agent_url")) == local_routing_key
-                marker = ", this machine" if here else ""
+                # correlated to this machine (see _find_local_host_id
+                # above) -- matched by host_id, not label, since two hosts
+                # could share a label. A plain word rather than an emoji/
+                # icon -- less likely to go unnoticed or fail to render
+                # depending on the system's emoji font.
+                marker = ", this machine" if host["host_id"] == local_host_id else ""
                 st.caption(f"{icon} {host['label']} ({status}{marker})")
             if not active_environment["host_ids"]:
                 st.caption("No hosts in this Environment yet.")
@@ -331,9 +339,17 @@ with st.sidebar:
         # "Reconnect" re-fires the casper://pair hand-off (for when it
         # truly never reached this machine's daemon -- wasn't running yet,
         # missed the event), confirmed via a real click-through test in the
-        # original single-host version.
+        # original single-host version. onclick (not window.parent.-
+        # prefixed -- this markdown is already rendered directly in the
+        # top-level page, not nested in an st.iframe) stamps the same
+        # casper_last_paired_at localStorage marker pages/signin.py sets,
+        # so a reconnect-driven re-pairing gets local-host correlation too.
         reconnect_url = build_pair_url(current_token(), username)
-        st.markdown(f'Running {NAME} on this machine? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
+        st.markdown(
+            f'Running {NAME} on this machine? <a href="{reconnect_url}" '
+            f"onclick=\"localStorage.setItem('casper_last_paired_at', Date.now())\">Reconnect</a>",
+            unsafe_allow_html=True,
+        )
     if not local_host:
         # Covers two distinct cases with one button: no connected machines
         # yet (re-runs the host lookup above, for when pairing *did*

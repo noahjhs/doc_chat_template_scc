@@ -99,14 +99,6 @@ func main() {
 	cmdHandler := commands.New(workspaceDir)
 	srv := server.New("", cmdHandler, logger)
 	srv.ClearSession = func() { config.ClearSession(logf) }
-	srv.RoutingKey = routingKey
-	// AllowedOrigin gates /api/whoami's CORS header -- left unset (no
-	// header sent, browser fetches from any origin get silently blocked
-	// from reading the response) if this build has no app domain
-	// configured, matching LoadAppDomain's own "not fatal" posture.
-	if appDomain := config.LoadAppDomain(); appDomain != "" {
-		srv.AllowedOrigin = config.BaseURL(appDomain)
-	}
 
 	state := newDaemonState(srv, relayDomain, authDomain, routingKey, port, workspaceDir, logf)
 	srv.OnSignOut = state.onSignOut
