@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"net/url"
 	"sync"
 	"time"
 
 	"casper-agent/internal/activate"
 	"casper-agent/internal/config"
+	"casper-agent/internal/dialog"
 	"casper-agent/internal/server"
 	"casper-agent/internal/tunnel"
 
@@ -29,12 +31,16 @@ type daemonState struct {
 	mu      sync.Mutex
 	tun     *tunnel.Tunnel
 	enabled bool
-	// The daemon's own copy of the current session token -- kept alongside
-	// (not read back from) session.json, so sign-out can still clear
-	// presence server-side using it even after server.go's handleShutdown
-	// has already deleted that file (ClearSession runs synchronously,
-	// before OnSignOut fires -- see server.go's doc comment).
-	token string
+	// The daemon's own copy of its current host credentials -- kept
+	// alongside (not read back from) session.json, so sign-out can still
+	// clear presence/unpair server-side using them even after server.go's
+	// handleShutdown has already deleted that file (ClearSession runs
+	// synchronously, before OnSignOut fires -- see server.go's doc
+	// comment). deviceToken authenticates to the auth service (presence,
+	// verify, unpair); commandKey authenticates the browser to this
+	// daemon's own /api/command -- see internal/config/hostpair.go.
+	deviceToken string
+	commandKey  string
 
 	// Set once onReady runs; nil until then. A casper:// pairing event can
 	// arrive before the menu exists (confirmed via a cold-launch spike: the
@@ -89,16 +95,17 @@ func (d *daemonState) tunnelURL() string {
 	return d.tun.URL
 }
 
-func (d *daemonState) setToken(token string) {
+func (d *daemonState) setCredentials(deviceToken, commandKey string) {
 	d.mu.Lock()
-	d.token = token
+	d.deviceToken = deviceToken
+	d.commandKey = commandKey
 	d.mu.Unlock()
 }
 
-func (d *daemonState) getToken() string {
+func (d *daemonState) getDeviceToken() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.token
+	return d.deviceToken
 }
 
 // setEnabled flips and persists the on/off toggle, starting or stopping the
@@ -111,13 +118,13 @@ func (d *daemonState) setEnabled(enabled bool) {
 	config.SaveEnabled(enabled)
 	if enabled {
 		d.ensureTunnel()
-		if token := d.getToken(); token != "" {
-			go d.reportPresence(token)
+		if deviceToken := d.getDeviceToken(); deviceToken != "" {
+			go d.reportPresence(deviceToken)
 		}
 	} else {
 		d.stopTunnel()
-		if token := d.getToken(); token != "" {
-			go config.ClearPresence(d.authDomain, token)
+		if deviceToken := d.getDeviceToken(); deviceToken != "" {
+			go config.ClearPresence(d.authDomain, deviceToken)
 		}
 	}
 	d.applyState()
@@ -133,6 +140,9 @@ func (d *daemonState) isEnabled() bool {
 // hand-off -- the sole pairing/re-pairing mechanism now that the daemon
 // never opens a browser tab itself. No browser interaction, no localhost
 // listener: this fully replaces the old loopback-callback pairing dance.
+// The URL's token is now explicitly a one-time bootstrap value -- see
+// internal/config/hostpair.go -- exchanged here for this installation's own
+// independent device_token/command_key before anything else happens.
 func (d *daemonState) handlePairURL(rawURL string) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -143,17 +153,27 @@ func (d *daemonState) handlePairURL(rawURL string) {
 		d.logf("casper:// URL: unrecognized action %q", u.Host)
 		return
 	}
-	token := u.Query().Get("token")
+	bootstrapToken := u.Query().Get("token")
 	username := u.Query().Get("username")
-	if token == "" || username == "" {
+	if bootstrapToken == "" || username == "" {
 		d.logf("casper:// pair URL missing token/username")
 		return
 	}
-	if err := config.SaveSession(username, token); err != nil {
+	deviceToken, commandKey, _, err := config.ExchangePairingToken(d.authDomain, bootstrapToken, d.routingKey)
+	if err != nil {
+		if errors.Is(err, config.ErrHostConflict) {
+			d.logf("casper:// pair: this host is already attached to another account")
+			dialog.ShowError("This machine is already attached to another Casper account. Sign out there first, or pair a different machine.")
+		} else {
+			d.logf("casper:// pair: couldn't exchange pairing token: %s", err)
+		}
+		return
+	}
+	if err := config.SaveSession(username, deviceToken, commandKey); err != nil {
 		d.logf("casper:// pair: couldn't save session: %s", err)
 	}
-	d.setToken(token)
-	d.srv.SetAPIKey(token)
+	d.setCredentials(deviceToken, commandKey)
+	d.srv.SetAPIKey(commandKey)
 	d.logf("Paired as %s", username)
 	// Re-pairing always turns the daemon back on -- a user who just went
 	// through the sign-in flow expects to end up connected, regardless of
@@ -173,54 +193,69 @@ func (d *daemonState) handlePairURL(rawURL string) {
 }
 
 // resumeSession is called at startup for a still-valid cached session (see
-// main.go) -- sets the in-memory token/API key and re-applies the persisted
-// toggle, but (unlike handlePairURL) doesn't force it back on: resuming an
-// existing session should honor whatever the user last left the toggle at.
-func (d *daemonState) resumeSession(token string) {
-	d.setToken(token)
-	d.srv.SetAPIKey(token)
+// main.go) -- sets the in-memory credentials/API key and re-applies the
+// persisted toggle, but (unlike handlePairURL) doesn't force it back on:
+// resuming an existing session should honor whatever the user last left the
+// toggle at.
+func (d *daemonState) resumeSession(deviceToken, commandKey string) {
+	d.setCredentials(deviceToken, commandKey)
+	d.srv.SetAPIKey(commandKey)
 	d.setEnabled(d.isEnabled())
 }
 
 // onSignOut is wired as the HTTP server's OnSignOut -- called after
 // handleShutdown has already cleared session.json and responded to the
-// browser. Clears presence using the daemon's own cached token (session.json
-// is already gone by this point) and stops the tunnel; the web app's
-// sign-out flow revokes the token with the auth service itself, separately.
+// browser. Clears presence using the daemon's own cached device_token
+// (session.json is already gone by this point) and stops the tunnel; the
+// web app's sign-out flow unpairs the host with the auth service itself,
+// separately (see auth_service's /hosts/signout-all).
 func (d *daemonState) onSignOut() {
-	token := d.getToken()
+	deviceToken := d.getDeviceToken()
 	d.stopTunnel()
 	d.srv.SetAPIKey("")
-	d.setToken("")
-	if token != "" {
-		go config.ClearPresence(d.authDomain, token)
+	d.setCredentials("", "")
+	if deviceToken != "" {
+		go config.ClearPresence(d.authDomain, deviceToken)
 	}
 	d.applyState()
 }
 
 // signOutFromTray mirrors onSignOut but is triggered locally (the status-bar
-// "Sign out" item), where there's no web app in the loop to revoke the
-// token server-side -- so this does that part itself, using the daemon's
-// cached token before clearing it.
+// "Sign out" item), where there's no web app in the loop to unpair the host
+// server-side -- so this does that part itself, using the daemon's cached
+// device_token before clearing it.
 func (d *daemonState) signOutFromTray() {
-	token := d.getToken()
+	deviceToken := d.getDeviceToken()
 	d.stopTunnel()
 	d.srv.SetAPIKey("")
-	d.setToken("")
+	d.setCredentials("", "")
 	config.ClearSession(d.logf)
-	if token != "" {
-		go config.ClearPresence(d.authDomain, token)
-		go config.RevokeSession(d.authDomain, token)
+	if deviceToken != "" {
+		go config.ClearPresence(d.authDomain, deviceToken)
+		go config.UnpairHost(d.authDomain, deviceToken)
 	}
 	d.applyState()
 }
 
-func (d *daemonState) reportPresence(token string) {
+// reportPresence self-heals on a 401: the auth service no longer
+// recognizing this device_token (a remote sign-out, or an auth_service
+// restart clearing its in-memory attachment map -- see
+// auth_service/main.py's _attached) means this daemon's session is
+// unrecoverable, so it clears its own state and goes idle rather than
+// retrying forever against a dead credential.
+func (d *daemonState) reportPresence(deviceToken string) {
 	tunURL := d.tunnelURL()
 	if tunURL == "" {
 		return
 	}
-	config.ReportPresence(d.authDomain, token, tunURL, d.workspaceDir)
+	if unauthorized := config.ReportPresence(d.authDomain, deviceToken, tunURL, d.workspaceDir); unauthorized {
+		d.logf("Device session no longer recognized by the auth service -- signing out locally")
+		d.stopTunnel()
+		d.srv.SetAPIKey("")
+		d.setCredentials("", "")
+		config.ClearSession(d.logf)
+		d.applyState()
+	}
 }
 
 // applyState brings the status-bar icon/menu in line with the current

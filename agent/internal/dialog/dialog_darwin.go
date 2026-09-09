@@ -78,3 +78,16 @@ func ShowFatalError(message string) {
 	)
 	_ = exec.Command("osascript", "-e", script).Run()
 }
+
+// ShowError displays a native informational modal for a non-fatal error
+// that would otherwise be invisible (no console once the binary runs
+// directly) -- e.g. a pairing attempt rejected because the host is already
+// attached to another account. Unlike ShowFatalError, the caller keeps
+// running afterward.
+func ShowError(message string) {
+	script := fmt.Sprintf(
+		`display dialog "%s" with title "Casper" buttons {"OK"} default button "OK" with icon caution`,
+		escapeForAppleScript(message),
+	)
+	_ = exec.Command("osascript", "-e", script).Run()
+}

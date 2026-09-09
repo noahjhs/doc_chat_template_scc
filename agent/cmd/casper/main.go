@@ -116,9 +116,13 @@ func main() {
 	}()
 
 	// A non-interactive run (dev/CI): use the key directly, skip the
-	// session file/casper:// pairing entirely.
+	// session file/casper:// pairing entirely. There's no separate
+	// command_key to distinguish here -- both the device_token (unused,
+	// since presence reporting isn't exercised in this mode) and the
+	// command_key (what actually gates /api/command) are set to the same
+	// literal env value.
 	if envKey := os.Getenv("CONTROL_TOOL_KEY"); envKey != "" {
-		state.setToken(envKey)
+		state.setCredentials(envKey, envKey)
 		srv.SetAPIKey(envKey)
 		state.setEnabled(true)
 	} else {
@@ -131,7 +135,7 @@ func main() {
 			if err != nil || session == nil {
 				return
 			}
-			result := config.VerifySession(authDomain, session.Token)
+			result := config.VerifyHostSession(authDomain, session.DeviceToken)
 			if result == config.VerifyInvalid {
 				config.ClearSession(logf)
 				logf("Saved session is no longer valid -- waiting to be paired again.")
@@ -141,7 +145,7 @@ func main() {
 				logf("Couldn't verify saved session (offline?) -- using it anyway.")
 			}
 			logf("Resuming session for %s", session.Username)
-			state.resumeSession(session.Token)
+			state.resumeSession(session.DeviceToken, session.CommandKey)
 		}()
 	}
 

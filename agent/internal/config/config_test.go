@@ -28,14 +28,14 @@ func TestSessionRoundTrip(t *testing.T) {
 		t.Fatalf("expected no session initially, got s=%v err=%v", s, err)
 	}
 
-	if err := SaveSession("alice", "tok123"); err != nil {
+	if err := SaveSession("alice", "devtok123", "cmdkey456"); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 	s, err := LoadSession()
 	if err != nil || s == nil {
 		t.Fatalf("expected a session after save, got s=%v err=%v", s, err)
 	}
-	if s.Username != "alice" || s.Token != "tok123" {
+	if s.Username != "alice" || s.DeviceToken != "devtok123" || s.CommandKey != "cmdkey456" {
 		t.Fatalf("unexpected session contents: %+v", s)
 	}
 

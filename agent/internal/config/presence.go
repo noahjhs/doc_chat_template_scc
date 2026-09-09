@@ -7,46 +7,51 @@ import (
 	"time"
 )
 
-// ReportPresence POSTs to the auth service's /presence endpoint, telling it
-// where this daemon is currently reachable (its relay URL) and which
-// workspace it's confined to. The deployed web app looks this up (GET
-// /presence) instead of learning it via query params now that the daemon
-// never redirects a browser tab itself. Best-effort: never returns an error
-// the caller needs to act on (mirrors RevokeSession's posture) -- a failed
-// report just means the web app sees "not connected" until the next one.
-func ReportPresence(authDomain, token, localAgentURL, workspace string) {
+// ReportPresence POSTs to the auth service's /hosts/presence endpoint,
+// telling it where this daemon is currently reachable (its relay URL) and
+// which workspace it's confined to, authenticated with this installation's
+// own device_token. Returns unauthorized=true when the auth service no
+// longer recognizes that token (e.g. after a remote bulk sign-out, or an
+// auth_service restart -- its attachment tracking is in-memory, see
+// auth_service/main.py's _attached) so the caller can self-heal (clear its
+// local session, go idle) instead of retrying forever against a dead
+// credential. Otherwise best-effort: a network failure just means the web
+// app sees "not connected" until the next successful report.
+func ReportPresence(authDomain, deviceToken, localAgentURL, workspace string) (unauthorized bool) {
 	body, err := json.Marshal(map[string]string{
 		"local_agent_url": localAgentURL,
 		"workspace":       workspace,
 	})
 	if err != nil {
-		return
+		return false
 	}
-	req, err := http.NewRequest(http.MethodPost, BaseURL(authDomain)+"/presence", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, BaseURL(authDomain)+"/hosts/presence", bytes.NewReader(body))
 	if err != nil {
-		return
+		return false
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	if err != nil {
+		return false
 	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusUnauthorized
 }
 
-// ClearPresence DELETEs the /presence row -- called on toggle-off and on
-// sign-out, using the still-valid token, before it's revoked server-side. A
-// race against a caller's own independent /revoke call is possible (whoever
-// gets there first), but benign: a lost race just leaves the row to go
-// stale until the next pairing overwrites it, or to be read as
-// unreachable once the tunnel drops regardless.
-func ClearPresence(authDomain, token string) {
-	req, err := http.NewRequest(http.MethodDelete, BaseURL(authDomain)+"/presence", nil)
+// ClearPresence DELETEs the /hosts/presence row -- called on toggle-off and
+// on sign-out, using the still-valid device_token, before it's unpaired
+// server-side. A race against a caller's own independent /hosts/unpair call
+// is possible (whoever gets there first), but benign: a lost race just
+// leaves the row to go stale until the next presence report overwrites it,
+// or to be read as unreachable once the tunnel drops regardless.
+func ClearPresence(authDomain, deviceToken string) {
+	req, err := http.NewRequest(http.MethodDelete, BaseURL(authDomain)+"/hosts/presence", nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err == nil {

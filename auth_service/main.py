@@ -1,3 +1,4 @@
+import concurrent.futures
 import hashlib
 import secrets
 import threading
@@ -5,14 +6,25 @@ import time
 from datetime import datetime, timezone
 
 import bcrypt
+import requests
 from db import get_db, init_db
 from fastapi import FastAPI, Header, HTTPException, Request
 from models import (
     AuthResponse,
+    EnvironmentCreateRequest,
+    EnvironmentInfo,
+    EnvironmentListResponse,
+    EnvironmentRenameRequest,
+    HostInfo,
+    HostListResponse,
+    HostPairRequest,
+    HostPairResponse,
+    HostPresenceReport,
+    HostRenameRequest,
+    HostVerifyResponse,
     LoginRequest,
-    PresenceReport,
-    PresenceResponse,
     RevokeResponse,
+    SignOutAllResponse,
     SignupRequest,
     VerifyResponse,
 )
@@ -125,10 +137,10 @@ def revoke(authorization: str = Header(default="")):
 
 
 def _resolve_user_id(db, authorization: str) -> int | None:
-    """Bearer token -> user id, or None if missing/invalid -- the same
-    resolution /verify does inline, factored out here (not shared with
-    /verify itself) so /presence's endpoints can reuse it without touching
-    /verify's response shape or behavior."""
+    """Bearer (browser session) token -> user id, or None if missing/invalid
+    -- the same resolution /verify does inline, factored out here (not
+    shared with /verify itself) so other endpoints can reuse it without
+    touching /verify's response shape or behavior."""
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
         return None
@@ -136,50 +148,404 @@ def _resolve_user_id(db, authorization: str) -> int | None:
     return row["id"] if row else None
 
 
-# Presence: where a signed-in user's Casper daemon is currently reachable.
-# Separate from /verify (whose response shape has exact-match test coverage
-# in tests/test_auth_service.py) rather than an extension of it. Not
-# rate-limited, consistent with /verify and /revoke -- Bearer-gated, not
-# brute-forceable the way /login is.
-@app.post("/presence", response_model=PresenceResponse)
-def report_presence(body: PresenceReport, authorization: str = Header(default="")):
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        db.execute(
-            """
-            INSERT INTO agent_presence (user_id, local_agent_url, workspace, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                local_agent_url = excluded.local_agent_url,
-                workspace = excluded.workspace,
-                updated_at = excluded.updated_at
-            """,
-            (user_id, body.local_agent_url, body.workspace, datetime.now(timezone.utc).isoformat()),
-        )
-        return PresenceResponse(connected=True, local_agent_url=body.local_agent_url, workspace=body.workspace)
+# --- Host attachment (runtime state, deliberately not persisted) ---------
+# routing_key -> {user_id, host_id, device_token_hash, command_key,
+#                 local_agent_url, workspace}
+# Who is *currently* attached to a host, with what live credentials, and
+# where it's currently reachable -- kept here rather than in SQLite for the
+# same reason the rate limiter above is: fine at this service's scale, and
+# the SQLite-on-a-single-disk constraint already rules out running more
+# than one instance, so there's no multi-process state-sharing problem to
+# solve. Keeping "who's attached" and "what's the live credential" in the
+# same place also means they can never drift out of sync with each other.
+# A server restart clears every attachment; each affected daemon 401s on
+# its next presence report and self-heals to idle, waiting to be re-paired
+# (see agent/internal/config/presence.go's ReportPresence) -- a reconnect,
+# not a correctness problem.
+_attached: dict[str, dict] = {}
+_attached_lock = threading.Lock()
 
 
-@app.get("/presence", response_model=PresenceResponse)
-def get_presence(authorization: str = Header(default="")):
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        row = db.execute(
-            "SELECT local_agent_url, workspace FROM agent_presence WHERE user_id = ?", (user_id,)
+class HostAlreadyAttachedError(Exception):
+    """Raised by _pair_host when routing_key is currently attached to a
+    different user -- reject, never preempt (a host being in active use by
+    someone else should never be silently disrupted by another account's
+    pairing attempt)."""
+
+
+def _resolve_attached(authorization: str) -> dict | None:
+    """Bearer device_token -> its live attachment record (plus routing_key),
+    or None. Linear scan under the lock -- matches the rate limiter's own
+    unindexed-dict posture at this scale."""
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return None
+    token_hash = hash_token(token)
+    with _attached_lock:
+        for routing_key, info in _attached.items():
+            if info["device_token_hash"] == token_hash:
+                return {"routing_key": routing_key, **info}
+    return None
+
+
+def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, requested_label: str | None):
+    """Idempotent for the *same* user re-pairing the *same* routing_key
+    (e.g. reconnecting after a restart) -- rotates credentials in place,
+    no duplicate rows, existing label untouched. Raises
+    HostAlreadyAttachedError if routing_key is currently attached to a
+    different user. Returns (host_id, device_token, command_key, label,
+    is_new_to_this_user)."""
+    with _attached_lock:
+        existing = _attached.get(routing_key)
+        if existing and existing["user_id"] != user_id:
+            raise HostAlreadyAttachedError()
+
+        row = db.execute("SELECT id FROM hosts WHERE routing_key = ?", (routing_key,)).fetchone()
+        if row is None:
+            host_id = db.execute(
+                "INSERT INTO hosts (routing_key, hostname) VALUES (?, ?)", (routing_key, hostname)
+            ).lastrowid
+        else:
+            host_id = row["id"]
+            if hostname:
+                db.execute("UPDATE hosts SET hostname = ? WHERE id = ?", (hostname, host_id))
+
+        existing_uh = db.execute(
+            "SELECT label FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, host_id)
         ).fetchone()
-        if not row:
-            return PresenceResponse(connected=False)
-        return PresenceResponse(connected=True, local_agent_url=row["local_agent_url"], workspace=row["workspace"])
+        is_new = existing_uh is None
+        label = existing_uh["label"] if existing_uh else (requested_label or hostname or "Unnamed host")
+        if is_new:
+            db.execute(
+                "INSERT INTO user_hosts (user_id, host_id, label) VALUES (?, ?, ?)", (user_id, host_id, label)
+            )
+
+        device_token = secrets.token_urlsafe(32)
+        command_key = secrets.token_urlsafe(32)
+        _attached[routing_key] = {
+            "user_id": user_id,
+            "host_id": host_id,
+            "device_token_hash": hash_token(device_token),
+            "command_key": command_key,
+            "local_agent_url": None,
+            "workspace": None,
+        }
+    return host_id, device_token, command_key, label, is_new
 
 
-@app.delete("/presence", response_model=PresenceResponse)
-def clear_presence(authorization: str = Header(default="")):
+def _assign_default_environment(db, user_id: int, host_id: int):
+    """Called only for a host the user has never paired before. Zero
+    existing Environments -> create "Default" and add it. Exactly one ->
+    add it there too (extends the zero-click case to the common
+    single-Environment user). Two or more -> leave unassigned; guessing
+    which of several user-organized Environments a brand-new host belongs
+    in seems worse than one explicit click on the Environments page."""
+    envs = db.execute("SELECT id FROM environments WHERE user_id = ?", (user_id,)).fetchall()
+    if not envs:
+        target_env_id = db.execute(
+            "INSERT INTO environments (user_id, name) VALUES (?, ?)", (user_id, "Default")
+        ).lastrowid
+    elif len(envs) == 1:
+        target_env_id = envs[0]["id"]
+    else:
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO environment_hosts (environment_id, host_id) VALUES (?, ?)",
+        (target_env_id, host_id),
+    )
+
+
+def _user_owns_host(db, user_id: int, host_id: int) -> bool:
+    return (
+        db.execute("SELECT 1 FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, host_id)).fetchone()
+        is not None
+    )
+
+
+def _user_owns_environment(db, user_id: int, environment_id: int) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM environments WHERE id = ? AND user_id = ?", (environment_id, user_id)
+        ).fetchone()
+        is not None
+    )
+
+
+def _environment_info(db, environment_id: int, name: str) -> EnvironmentInfo:
+    host_ids = [
+        r["host_id"]
+        for r in db.execute(
+            "SELECT host_id FROM environment_hosts WHERE environment_id = ?", (environment_id,)
+        ).fetchall()
+    ]
+    return EnvironmentInfo(id=environment_id, name=name, host_ids=host_ids)
+
+
+# --- Host pairing / presence (daemon-initiated, device_token-gated) ------
+@app.post("/hosts/pair", response_model=HostPairResponse, status_code=201)
+def pair_host(body: HostPairRequest, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        db.execute("DELETE FROM agent_presence WHERE user_id = ?", (user_id,))
-        return PresenceResponse(connected=False)
+        try:
+            host_id, device_token, command_key, label, is_new = _pair_host(
+                db, user_id, body.routing_key, body.hostname, body.label
+            )
+        except HostAlreadyAttachedError:
+            raise HTTPException(status_code=409, detail="This host is currently attached to another account.")
+        if is_new:
+            _assign_default_environment(db, user_id, host_id)
+        return HostPairResponse(host_id=host_id, device_token=device_token, command_key=command_key, label=label)
+
+
+@app.post("/hosts/verify", response_model=HostVerifyResponse)
+def verify_host(authorization: str = Header(default="")):
+    return HostVerifyResponse(valid=_resolve_attached(authorization) is not None)
+
+
+@app.post("/hosts/unpair", response_model=RevokeResponse)
+def unpair_host(authorization: str = Header(default="")):
+    """Self-service: a daemon deregisters itself (tray "Sign out"). Only
+    clears the in-memory attachment -- user_hosts/environment_hosts are
+    untouched, so the host stays remembered and re-pairing it later won't
+    re-prompt for a label."""
+    attached = _resolve_attached(authorization)
+    if attached is not None:
+        with _attached_lock:
+            _attached.pop(attached["routing_key"], None)
+    return RevokeResponse(revoked=True)
+
+
+@app.post("/hosts/presence", response_model=HostInfo)
+def report_host_presence(body: HostPresenceReport, authorization: str = Header(default="")):
+    attached = _resolve_attached(authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    with _attached_lock:
+        _attached[attached["routing_key"]]["local_agent_url"] = body.local_agent_url
+        _attached[attached["routing_key"]]["workspace"] = body.workspace
+    return HostInfo(
+        host_id=attached["host_id"], label="", connected=True,
+        local_agent_url=body.local_agent_url, workspace=body.workspace,
+    )
+
+
+@app.delete("/hosts/presence", response_model=HostInfo)
+def clear_host_presence(authorization: str = Header(default="")):
+    """Toggling the relay off is not signing out -- clears only reachability,
+    the attachment (and its credentials) stays valid."""
+    attached = _resolve_attached(authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    with _attached_lock:
+        _attached[attached["routing_key"]]["local_agent_url"] = None
+        _attached[attached["routing_key"]]["workspace"] = None
+    return HostInfo(host_id=attached["host_id"], label="", connected=False)
+
+
+# --- Host/Environment management (browser-initiated, session-token-gated) -
+@app.get("/hosts", response_model=HostListResponse)
+def list_hosts(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        rows = db.execute(
+            """
+            SELECT h.id, h.routing_key, h.hostname, uh.label
+            FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
+            WHERE uh.user_id = ? ORDER BY uh.label COLLATE NOCASE
+            """,
+            (user_id,),
+        ).fetchall()
+        env_rows = db.execute(
+            """
+            SELECT eh.host_id, eh.environment_id FROM environment_hosts eh
+            JOIN environments e ON e.id = eh.environment_id WHERE e.user_id = ?
+            """,
+            (user_id,),
+        ).fetchall()
+    envs_by_host: dict[int, list[int]] = {}
+    for r in env_rows:
+        envs_by_host.setdefault(r["host_id"], []).append(r["environment_id"])
+    with _attached_lock:
+        attached_snapshot = {k: dict(v) for k, v in _attached.items()}
+    hosts_out = []
+    for r in rows:
+        att = attached_snapshot.get(r["routing_key"])
+        mine = att is not None and att["user_id"] == user_id
+        connected = mine and att["local_agent_url"] is not None
+        hosts_out.append(
+            HostInfo(
+                host_id=r["id"], label=r["label"], hostname=r["hostname"], connected=connected,
+                local_agent_url=att["local_agent_url"] if connected else None,
+                workspace=att["workspace"] if connected else None,
+                command_key=att["command_key"] if mine else None,
+                environment_ids=envs_by_host.get(r["id"], []),
+            )
+        )
+    return HostListResponse(hosts=hosts_out)
+
+
+@app.patch("/hosts/{host_id}", response_model=RevokeResponse)
+def rename_host(host_id: int, body: HostRenameRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_host(db, user_id, host_id):
+            raise HTTPException(status_code=404, detail="Host not found.")
+        db.execute(
+            "UPDATE user_hosts SET label = ? WHERE user_id = ? AND host_id = ?", (body.label, user_id, host_id)
+        )
+    return RevokeResponse(revoked=True)
+
+
+@app.delete("/hosts/{host_id}", response_model=RevokeResponse)
+def forget_host(host_id: int, authorization: str = Header(default="")):
+    """Removes this host from the caller's own remembered list and every
+    Environment it belonged to. If currently attached to this same caller,
+    also detaches it (forgetting a host you're using ends the session) --
+    never touches another user's attachment to the same physical host."""
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_host(db, user_id, host_id):
+            raise HTTPException(status_code=404, detail="Host not found.")
+        row = db.execute("SELECT routing_key FROM hosts WHERE id = ?", (host_id,)).fetchone()
+        db.execute(
+            "DELETE FROM environment_hosts WHERE host_id = ? AND environment_id IN "
+            "(SELECT id FROM environments WHERE user_id = ?)",
+            (host_id, user_id),
+        )
+        db.execute("DELETE FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, host_id))
+    if row is not None:
+        with _attached_lock:
+            attached = _attached.get(row["routing_key"])
+            if attached and attached["user_id"] == user_id:
+                _attached.pop(row["routing_key"], None)
+    return RevokeResponse(revoked=True)
+
+
+@app.get("/environments", response_model=EnvironmentListResponse)
+def list_environments(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        rows = db.execute(
+            "SELECT id, name FROM environments WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,)
+        ).fetchall()
+        return EnvironmentListResponse(environments=[_environment_info(db, r["id"], r["name"]) for r in rows])
+
+
+@app.post("/environments", response_model=EnvironmentInfo, status_code=201)
+def create_environment(body: EnvironmentCreateRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        existing = db.execute(
+            "SELECT id FROM environments WHERE user_id = ? AND name = ? COLLATE NOCASE", (user_id, body.name)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="An Environment with that name already exists.")
+        environment_id = db.execute(
+            "INSERT INTO environments (user_id, name) VALUES (?, ?)", (user_id, body.name)
+        ).lastrowid
+        return _environment_info(db, environment_id, body.name)
+
+
+@app.patch("/environments/{environment_id}", response_model=EnvironmentInfo)
+def rename_environment(environment_id: int, body: EnvironmentRenameRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_environment(db, user_id, environment_id):
+            raise HTTPException(status_code=404, detail="Environment not found.")
+        db.execute("UPDATE environments SET name = ? WHERE id = ?", (body.name, environment_id))
+        return _environment_info(db, environment_id, body.name)
+
+
+@app.delete("/environments/{environment_id}", response_model=RevokeResponse)
+def delete_environment(environment_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_environment(db, user_id, environment_id):
+            raise HTTPException(status_code=404, detail="Environment not found.")
+        db.execute("DELETE FROM environment_hosts WHERE environment_id = ?", (environment_id,))
+        db.execute("DELETE FROM environments WHERE id = ?", (environment_id,))
+    return RevokeResponse(revoked=True)
+
+
+@app.put("/environments/{environment_id}/hosts/{host_id}", response_model=EnvironmentInfo)
+def add_host_to_environment(environment_id: int, host_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        env = db.execute(
+            "SELECT id, name FROM environments WHERE id = ? AND user_id = ?", (environment_id, user_id)
+        ).fetchone()
+        if env is None or not _user_owns_host(db, user_id, host_id):
+            raise HTTPException(status_code=404, detail="Environment or host not found.")
+        db.execute(
+            "INSERT OR IGNORE INTO environment_hosts (environment_id, host_id) VALUES (?, ?)",
+            (environment_id, host_id),
+        )
+        return _environment_info(db, environment_id, env["name"])
+
+
+@app.delete("/environments/{environment_id}/hosts/{host_id}", response_model=EnvironmentInfo)
+def remove_host_from_environment(environment_id: int, host_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        env = db.execute(
+            "SELECT id, name FROM environments WHERE id = ? AND user_id = ?", (environment_id, user_id)
+        ).fetchone()
+        if env is None:
+            raise HTTPException(status_code=404, detail="Environment not found.")
+        db.execute(
+            "DELETE FROM environment_hosts WHERE environment_id = ? AND host_id = ?", (environment_id, host_id)
+        )
+        return _environment_info(db, environment_id, env["name"])
+
+
+def _shutdown_hosts_best_effort(targets: list[tuple[str, str]]):
+    def _one(url: str, command_key: str):
+        try:
+            requests.post(f"{url.rstrip('/')}/api/shutdown", headers={"X-API-Key": command_key}, timeout=5)
+        except requests.RequestException:
+            pass  # best-effort -- the daemon may already be unreachable
+
+    if not targets:
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda t: _one(*t), targets))
+
+
+@app.post("/hosts/signout-all", response_model=SignOutAllResponse)
+def signout_all_hosts(authorization: str = Header(default="")):
+    """The website's "Sign out" button. Best-effort pushes /api/shutdown to
+    every host currently attached to this user, then detaches all of them.
+    user_hosts/environment_hosts are untouched -- signing out of the website
+    detaches sessions, it does not make the user forget their hosts or
+    Environments."""
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    with _attached_lock:
+        mine = [(rk, info) for rk, info in _attached.items() if info["user_id"] == user_id]
+        for routing_key, _ in mine:
+            _attached.pop(routing_key, None)
+    targets = [(info["local_agent_url"], info["command_key"]) for _, info in mine if info["local_agent_url"]]
+    _shutdown_hosts_best_effort(targets)
+    return SignOutAllResponse(signed_out_hosts=len(mine))

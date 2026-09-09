@@ -10,10 +10,12 @@ from openai import OpenAI
 from utils.auth import (
     build_pair_url,
     current_token,
-    get_presence,
+    list_environments,
+    list_hosts,
     require_agent_session,
     require_app_subdomain,
     revoke_token_with_auth_service,
+    signout_all_hosts,
 )
 from utils.branding import NAME, hide_streamlit_chrome, home_link_html
 from utils.browser_nav import click_anchor_js
@@ -38,30 +40,21 @@ if st.session_state.get("_signing_out"):
     # one, aborting these calls mid-flight. Setting a flag and rerunning
     # first means the click itself is answered instantly, and this
     # (visibly, via the spinner) runs on its own dedicated rerun instead.
-    agent_config = st.session_state.get("_local_agent_config")
     with st.spinner("Signing out..."):
-        if agent_config:
-            # Was sequential (up to 5s + 5s) -- run the shutdown call on a
-            # background thread so it overlaps with the revoke call instead
-            # of adding to it, since both are independent, best-effort, and
-            # already individually timeout-bounded. Unlike the old one-shot
-            # agent, /api/shutdown no longer ends the daemon's process -- it
-            # just clears its session and leaves it running, idle, waiting
-            # to be paired again.
-            def _shutdown_local_agent():
-                try:
-                    requests.post(
-                        f"{agent_config['url']}/api/shutdown",
-                        headers={"X-API-Key": agent_config["api_key"]},
-                        timeout=5,
-                    )
-                except requests.RequestException:
-                    pass  # best-effort -- the local daemon may be unreachable
+        # signout_all_hosts (best-effort /api/shutdown fanned out to every
+        # attached daemon, then detach them all) and revoking this browser's
+        # own login token are independent auth_service state now -- host
+        # attachment vs. users.token_hash, see the credential-split note in
+        # auth_service/main.py -- so run them in parallel rather than
+        # sequentially, same reasoning the old single-host version had for
+        # overlapping its own shutdown/revoke calls.
+        def _signout_all_hosts():
+            signout_all_hosts(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
 
-            shutdown_thread = threading.Thread(target=_shutdown_local_agent)
-            shutdown_thread.start()
-            revoke_token_with_auth_service(st.secrets["AUTH_SERVICE_DOMAIN"], agent_config["api_key"])
-            shutdown_thread.join(timeout=5)
+        hosts_thread = threading.Thread(target=_signout_all_hosts)
+        hosts_thread.start()
+        revoke_token_with_auth_service(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
+        hosts_thread.join(timeout=10)
     st.session_state.clear()
     st.query_params.clear()
     # Signing out no longer means this tab's job is done (the daemon behind
@@ -96,10 +89,11 @@ GIT_ACTIONS = set(COMMAND_CATEGORIES["Git"])
 # Looked up once (cached in session_state) rather than carried via query
 # params -- the daemon no longer redirects a browser tab itself (see
 # pages/signin.py), so it can't hand local_agent_url/workspace along that
-# way anymore. Instead it reports them to the auth service on pairing/
-# toggle (see agent/internal/config/presence.go), and this looks that up by
-# the same token require_agent_session() already verified.
-if "_local_agent_config" not in st.session_state:
+# way anymore. Instead each attached daemon reports its own reachability to
+# the auth service on pairing/toggle (see agent/internal/config/presence.go),
+# and this looks the whole set up by the same token require_agent_session()
+# already verified.
+if "_hosts" not in st.session_state:
     # Retried briefly rather than checked once: landing here right after
     # sign-in (the common case) races the casper://pair hand-off, which
     # typically finishes a beat after this page has already loaded --
@@ -107,24 +101,53 @@ if "_local_agent_config" not in st.session_state:
     # first load, then the daemon's pairing log line appeared a moment
     # later). Same reasoning as the old pairing spinner's poll loop: a
     # single check is too eager, but this shouldn't retry forever either,
-    # so it gives up (leaving local_agent_config None) after a few seconds.
-    presence = None
+    # so it gives up after a few seconds, leaving whatever's connected by
+    # then (possibly nothing).
+    hosts_result = None
     for attempt in range(6):
-        presence = get_presence(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
-        if presence and presence.get("connected") and presence.get("local_agent_url"):
+        hosts_result = list_hosts(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
+        if hosts_result and any(h.get("connected") for h in hosts_result.get("hosts", [])):
             break
         if attempt < 5:
             time.sleep(0.5)
-    st.session_state["_local_agent_config"] = (
-        {
-            "url": presence["local_agent_url"].rstrip("/"),
-            "api_key": current_token(),
-            "workspace": presence.get("workspace", ""),
+    st.session_state["_hosts"] = (hosts_result or {}).get("hosts", [])
+    st.session_state["_environments"] = (
+        list_environments(st.secrets["AUTH_SERVICE_DOMAIN"], current_token()) or {}
+    ).get("environments", [])
+hosts = st.session_state["_hosts"]
+environments = st.session_state["_environments"]
+
+if "_active_environment_id" not in st.session_state:
+    st.session_state["_active_environment_id"] = environments[0]["id"] if environments else None
+active_environment = next(
+    (e for e in environments if e["id"] == st.session_state["_active_environment_id"]), None
+)
+active_host_ids = set(active_environment["host_ids"]) if active_environment else set()
+hosts_by_id = {h["host_id"]: h for h in hosts}
+connected_active_hosts = [
+    h for h in hosts if h["host_id"] in active_host_ids and h.get("connected") and h.get("local_agent_url")
+]
+
+
+def _build_local_agent_configs(connected_hosts):
+    """Keys each connected host by a de-duplicated label -- its own label in
+    the common case, with its host_id appended only when two hosts in the
+    active Environment happen to share a label."""
+    label_counts = {}
+    for h in connected_hosts:
+        label_counts[h["label"]] = label_counts.get(h["label"], 0) + 1
+    configs = {}
+    for h in connected_hosts:
+        key = h["label"] if label_counts[h["label"]] == 1 else f"{h['label']} ({h['host_id']})"
+        configs[key] = {
+            "url": h["local_agent_url"].rstrip("/"),
+            "api_key": h["command_key"],
+            "workspace": h.get("workspace", ""),
         }
-        if presence and presence.get("connected") and presence.get("local_agent_url")
-        else None
-    )
-local_agent_config = st.session_state["_local_agent_config"]
+    return configs
+
+
+local_agent_configs = _build_local_agent_configs(connected_active_hosts)
 
 # Cosmetic: once the query params have been read (above), drop them from
 # the visible URL so the address bar just shows .../chat. This only
@@ -160,11 +183,17 @@ def _start_sign_out():
     st.session_state["_signing_out"] = True
 
 
-def _recheck_local_agent_config():
-    # Drops the cached (possibly stale) connection state so the retry loop
-    # above runs again on the rerun this triggers -- see the "Check again"
-    # button below.
-    st.session_state.pop("_local_agent_config", None)
+def _recheck_hosts():
+    # Drops the cached (possibly stale) host/Environment state so the retry
+    # loop above runs again on the rerun this triggers -- see the "Check
+    # again" button below.
+    st.session_state.pop("_hosts", None)
+    st.session_state.pop("_environments", None)
+    st.session_state.pop("_active_environment_id", None)
+
+
+def _switch_environment():
+    st.session_state["_active_environment_id"] = st.session_state["_environment_selector"]
 
 
 with st.sidebar:
@@ -173,27 +202,53 @@ with st.sidebar:
     st.caption(f"Signed in as {username}")
 
     st.divider()
+    if environments:
+        env_ids = [e["id"] for e in environments]
+        st.selectbox(
+            "Environment",
+            options=env_ids,
+            format_func=lambda eid: next(e["name"] for e in environments if e["id"] == eid),
+            index=env_ids.index(st.session_state["_active_environment_id"])
+            if st.session_state["_active_environment_id"] in env_ids
+            else 0,
+            key="_environment_selector",
+            on_change=_switch_environment,
+        )
+        if active_environment:
+            for host_id in active_environment["host_ids"]:
+                host = hosts_by_id.get(host_id)
+                if host is None:
+                    continue
+                icon = "🔧" if host.get("connected") else "⚪"
+                st.caption(f"{icon} {host['label']}")
+            if not active_environment["host_ids"]:
+                st.caption("No hosts in this Environment yet.")
+    else:
+        st.caption("No Environments yet.")
+    st.page_link("pages/environments.py", label="Manage hosts & Environments")
+
+    st.divider()
     st.subheader("Local commands")
     for category, commands in COMMAND_CATEGORIES.items():
         with st.expander(category):
             st.markdown("\n".join(f"- `{cmd}`" for cmd in commands))
-    st.caption(f"Confined to the directory tree {NAME} runs in.")
-    if local_agent_config:
-        st.caption(f"🔧 {NAME} connected and ready to run.")
-    else:
-        st.caption(f"Not connected. Download {NAME} from the home page and run it on your own machine.")
-        # Two distinct manual fallbacks for two distinct failure modes, both
-        # confirmed via a real click-through test: "Reconnect" re-fires the
-        # casper://pair hand-off (for when it truly never reached the
-        # daemon -- wasn't running yet, missed the event); "Check again"
-        # just re-runs the presence lookup above (for when pairing *did*
-        # succeed, only moments after this page's one-shot check already
-        # gave up and cached "not connected" -- the retry loop above covers
-        # the common case, but a slow click through Chrome's "Open
-        # Casper?" prompt can still outlast it).
-        reconnect_url = build_pair_url(current_token(), username)
-        st.markdown(f'Already running {NAME}? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
-        st.button("Check again", on_click=_recheck_local_agent_config)
+    st.caption(f"Confined to the directory tree {NAME} runs in, on each machine.")
+    if not local_agent_configs:
+        st.caption(f"No connected machines in this Environment. Download {NAME} from the home page to add one.")
+    # Manual fallbacks for the machine this browser tab is itself running
+    # on, distinct from the "connected machines" tracked above (which may
+    # be entirely different physical hosts, already paired elsewhere): two
+    # distinct failure modes, both confirmed via a real click-through test
+    # in the original single-host version -- "Reconnect" re-fires the
+    # casper://pair hand-off (for when it truly never reached this
+    # machine's daemon -- wasn't running yet, missed the event); "Check
+    # again" just re-runs the host lookup above (for when pairing *did*
+    # succeed, only moments after this page's one-shot check already gave
+    # up -- the retry loop above covers the common case, but a slow click
+    # through Chrome's "Open Casper?" prompt can still outlast it).
+    reconnect_url = build_pair_url(current_token(), username)
+    st.markdown(f'Running {NAME} on this machine? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
+    st.button("Check again", on_click=_recheck_hosts)
 
 # All the built-in Responses API tools that don't need extra setup (unlike
 # file_search, which needs a vector store), plus the local git tool if
@@ -254,18 +309,33 @@ LOCAL_AGENT_TOOL = {
                     "'grep'/'find' (default 5)."
                 ),
             },
+            "host": {
+                "type": "string",
+                "enum": list(local_agent_configs.keys()),
+                "description": (
+                    "Which connected machine to run this on. Only needed "
+                    "when more than one is available in the active "
+                    "Environment -- ask the user to clarify if it's "
+                    "ambiguous."
+                ),
+            },
         },
         "required": ["action"],
     },
 }
-active_tools = TOOLS + ([LOCAL_AGENT_TOOL] if local_agent_config else [])
+active_tools = TOOLS + ([LOCAL_AGENT_TOOL] if local_agent_configs else [])
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-    if local_agent_config and local_agent_config.get("workspace"):
-        st.session_state.messages.append(
-            {"role": "assistant", "content": f"Your workspace is {local_agent_config['workspace']}"}
-        )
+    # Only worth a proactive welcome message when there's exactly one
+    # connected machine to name -- with several, "your workspace is X"
+    # would just be misleading about which one.
+    if len(local_agent_configs) == 1:
+        (only_config,) = local_agent_configs.values()
+        if only_config.get("workspace"):
+            st.session_state.messages.append(
+                {"role": "assistant", "content": f"Your workspace is {only_config['workspace']}"}
+            )
 
 # The Responses API tracks conversation history server-side, keyed off the
 # previous turn's response id.
@@ -273,14 +343,30 @@ if "previous_response_id" not in st.session_state:
     st.session_state.previous_response_id = None
 
 
-def call_local_agent(local_agent_config, action, **kwargs):
-    """Call the user's local agent server; never raises, so a connection
-    failure just gets reported back to the model as text."""
+def call_local_agent(local_agent_configs, action, host=None, **kwargs):
+    """Call one of the user's connected local agent servers; never raises,
+    so a connection failure (or an ambiguous/unknown host) just gets
+    reported back to the model as text. host selection isn't in the tool
+    schema's "required" list (there's no way to say "required only when
+    there's more than one option" in JSON Schema), so ambiguity is enforced
+    here instead."""
+    if not local_agent_configs:
+        return "Local agent error: no connected machines available."
+    if host is None:
+        if len(local_agent_configs) == 1:
+            host = next(iter(local_agent_configs))
+        else:
+            available = ", ".join(local_agent_configs)
+            return f"Local agent error: multiple machines connected ({available}) -- specify which one via 'host'."
+    config = local_agent_configs.get(host)
+    if config is None:
+        available = ", ".join(local_agent_configs)
+        return f"Local agent error: unknown host {host!r}. Available: {available}."
     try:
         response = requests.post(
-            f"{local_agent_config['url']}/api/command",
+            f"{config['url']}/api/command",
             json={"action": action, **kwargs},
-            headers={"X-API-Key": local_agent_config["api_key"]},
+            headers={"X-API-Key": config["api_key"]},
             timeout=15,
         )
         if response.status_code == 401:
@@ -441,8 +527,9 @@ if prompt := st.chat_input("Chat"):
                     label = f"🔧 {describe_local_command(action, args)}"
                     with st.status(label):
                         output = call_local_agent(
-                            local_agent_config,
+                            local_agent_configs,
                             action,
+                            host=args.get("host"),
                             path=args.get("path"),
                             destination=args.get("destination"),
                             pattern=args.get("pattern"),

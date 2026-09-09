@@ -1,17 +1,22 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 )
 
+// Session holds this installation's own independent host credentials --
+// minted once via ExchangePairingToken (see hostpair.go) and never derived
+// from the browser's rotating login token again after that. DeviceToken
+// authenticates this daemon to the auth service (presence, self-verify,
+// self-unpair); CommandKey authenticates the browser to this daemon's local
+// /api/command -- see hostpair.go's doc comment for the full split
+// rationale.
 type Session struct {
-	Username string `json:"username"`
-	Token    string `json:"token"`
+	Username    string `json:"username"`
+	DeviceToken string `json:"device_token"`
+	CommandKey  string `json:"command_key"`
 }
 
 func sessionFilePath() (string, error) {
@@ -37,18 +42,18 @@ func LoadSession() (*Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, nil //nolint:nilerr // corrupt file is treated the same as no session
 	}
-	if s.Username == "" || s.Token == "" {
+	if s.Username == "" || s.DeviceToken == "" || s.CommandKey == "" {
 		return nil, nil
 	}
 	return &s, nil
 }
 
-func SaveSession(username, token string) error {
+func SaveSession(username, deviceToken, commandKey string) error {
 	path, err := sessionFilePath()
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(Session{Username: username, Token: token})
+	data, err := json.Marshal(Session{Username: username, DeviceToken: deviceToken, CommandKey: commandKey})
 	if err != nil {
 		return err
 	}
@@ -84,46 +89,3 @@ const (
 	VerifyValid
 	VerifyUnknown // couldn't reach the auth service -- callers should trust a cached token rather than force a re-login
 )
-
-// VerifySession POSTs to the auth service's /verify endpoint.
-func VerifySession(authDomain, token string) VerifyResult {
-	req, err := http.NewRequest(http.MethodPost, BaseURL(authDomain)+"/verify", nil)
-	if err != nil {
-		return VerifyUnknown
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return VerifyUnknown
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return VerifyUnknown
-	}
-	var body struct {
-		Valid bool `json:"valid"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return VerifyUnknown
-	}
-	if body.Valid {
-		return VerifyValid
-	}
-	return VerifyInvalid
-}
-
-// RevokeSession POSTs to the auth service's /revoke endpoint. Best-effort --
-// never returns an error the caller needs to act on.
-func RevokeSession(authDomain, token string) {
-	req, err := http.NewRequest(http.MethodPost, BaseURL(authDomain)+"/revoke", bytes.NewReader(nil))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
-	}
-}

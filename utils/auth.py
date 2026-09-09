@@ -138,20 +138,87 @@ def build_pair_url(token, username):
     return f"casper://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"
 
 
-def get_presence(auth_domain, token):
-    """GET /presence. Returns {"connected": bool, "local_agent_url":
-    str|None, "workspace": str|None}, or None on network failure -- callers
-    must handle both, same posture as verify_token_with_auth_service."""
+def _auth_get(auth_domain, token, path):
     try:
         response = requests.get(
-            f"{_base_url(auth_domain)}/presence",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
+            f"{_base_url(auth_domain)}{path}", headers={"Authorization": f"Bearer {token}"}, timeout=10
         )
         response.raise_for_status()
         return response.json()
     except requests.RequestException:
         return None
+
+
+def _auth_write(method, auth_domain, token, path, json_body=None):
+    try:
+        response = requests.request(
+            method,
+            f"{_base_url(auth_domain)}{path}",
+            json=json_body,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            return {"error": _error_detail(response, "Request failed.")}
+        return response.json()
+    except requests.RequestException as e:
+        return {"error": f"Couldn't reach the auth service: {e}"}
+
+
+def list_hosts(auth_domain, token):
+    """GET /hosts. Returns {"hosts": [...]}, or None on network failure --
+    every host the user has ever paired, connected or not (see auth_service's
+    HostInfo), same optional-None posture as verify_token_with_auth_service."""
+    return _auth_get(auth_domain, token, "/hosts")
+
+
+def list_environments(auth_domain, token):
+    """GET /environments. Returns {"environments": [...]}, or None on
+    network failure."""
+    return _auth_get(auth_domain, token, "/environments")
+
+
+def create_environment(auth_domain, token, name):
+    """POST /environments. Returns the new EnvironmentInfo, or {"error": str}."""
+    return _auth_write("POST", auth_domain, token, "/environments", {"name": name})
+
+
+def rename_environment(auth_domain, token, environment_id, name):
+    """PATCH /environments/{id}. Returns the updated EnvironmentInfo, or {"error": str}."""
+    return _auth_write("PATCH", auth_domain, token, f"/environments/{environment_id}", {"name": name})
+
+
+def delete_environment(auth_domain, token, environment_id):
+    """DELETE /environments/{id}. Returns {"revoked": True}, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/environments/{environment_id}")
+
+
+def add_host_to_environment(auth_domain, token, environment_id, host_id):
+    """PUT /environments/{id}/hosts/{host_id}. Returns the updated EnvironmentInfo, or {"error": str}."""
+    return _auth_write("PUT", auth_domain, token, f"/environments/{environment_id}/hosts/{host_id}")
+
+
+def remove_host_from_environment(auth_domain, token, environment_id, host_id):
+    """DELETE /environments/{id}/hosts/{host_id}. Returns the updated EnvironmentInfo, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/environments/{environment_id}/hosts/{host_id}")
+
+
+def rename_host(auth_domain, token, host_id, label):
+    """PATCH /hosts/{id}. Returns {"revoked": True}, or {"error": str}."""
+    return _auth_write("PATCH", auth_domain, token, f"/hosts/{host_id}", {"label": label})
+
+
+def forget_host(auth_domain, token, host_id):
+    """DELETE /hosts/{id}. Returns {"revoked": True}, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/hosts/{host_id}")
+
+
+def signout_all_hosts(auth_domain, token):
+    """POST /hosts/signout-all. Best-effort push of /api/shutdown to every
+    host currently attached to this user, then detaches all of them --
+    doesn't touch remembered hosts/Environments. Returns
+    {"signed_out_hosts": int}, or {"error": str}."""
+    return _auth_write("POST", auth_domain, token, "/hosts/signout-all")
 
 
 def revoke_token_with_auth_service(auth_domain, token):

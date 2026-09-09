@@ -34,3 +34,16 @@ func ShowFatalError(message string) {
 	)
 	_ = exec.Command("powershell", "-NoProfile", "-Command", script).Run()
 }
+
+// ShowError displays a native informational message box for a non-fatal
+// error -- see the darwin implementation's docs for why this exists at all.
+// Unlike ShowFatalError, the caller keeps running afterward.
+func ShowError(message string) {
+	script := fmt.Sprintf(
+		"Add-Type -AssemblyName System.Windows.Forms | Out-Null; "+
+			"[System.Windows.Forms.MessageBox]::Show('%s', 'Casper', "+
+			"[System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)",
+		escapeForPowerShellSingleQuoted(message),
+	)
+	_ = exec.Command("powershell", "-NoProfile", "-Command", script).Run()
+}

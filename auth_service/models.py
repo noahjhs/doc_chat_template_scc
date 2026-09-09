@@ -25,12 +25,64 @@ class RevokeResponse(BaseModel):
     revoked: bool
 
 
-class PresenceReport(BaseModel):
+class HostPairRequest(BaseModel):
+    routing_key: str
+    hostname: str | None = None
+    label: str | None = None
+
+
+class HostPairResponse(BaseModel):
+    host_id: int
+    device_token: str
+    command_key: str
+    label: str
+
+
+class HostVerifyResponse(BaseModel):
+    valid: bool
+
+
+class HostPresenceReport(BaseModel):
     local_agent_url: str
     workspace: str
 
 
-class PresenceResponse(BaseModel):
+class HostInfo(BaseModel):
+    host_id: int
+    label: str
+    hostname: str | None = None
     connected: bool
     local_agent_url: str | None = None
     workspace: str | None = None
+    command_key: str | None = None
+    environment_ids: list[int] = []
+
+
+class HostListResponse(BaseModel):
+    hosts: list[HostInfo]
+
+
+class HostRenameRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=64)
+
+
+class EnvironmentCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class EnvironmentRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class EnvironmentInfo(BaseModel):
+    id: int
+    name: str
+    host_ids: list[int] = []
+
+
+class EnvironmentListResponse(BaseModel):
+    environments: list[EnvironmentInfo]
+
+
+class SignOutAllResponse(BaseModel):
+    signed_out_hosts: int

@@ -92,87 +92,200 @@ def test_rate_limit(client):
     assert r.status_code == 429
 
 
-def test_presence_requires_a_valid_token(client):
-    r = client.get("/presence", headers={"Authorization": "Bearer not-a-real-token"})
-    assert r.status_code == 401
-    assert client.post(
-        "/presence",
-        json={"local_agent_url": "https://relay.example/agent/x", "workspace": "/tmp/ws"},
-        headers={"Authorization": "Bearer not-a-real-token"},
-    ).status_code == 401
-    assert client.delete("/presence", headers={"Authorization": "Bearer not-a-real-token"}).status_code == 401
+def _signup(client, username):
+    return client.post("/signup", json={"username": username, "password": "correct-horse"}).json()
 
 
-def test_presence_report_then_lookup(client):
-    signup = client.post("/signup", json={"username": "erin", "password": "correct-horse"}).json()
-    token = signup["token"]
-    headers = {"Authorization": f"Bearer {token}"}
+def test_pair_then_list(client):
+    signup = _signup(client, "erin")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
 
-    # nothing reported yet
-    assert client.get("/presence", headers=headers).json() == {
-        "connected": False,
-        "local_agent_url": None,
-        "workspace": None,
-    }
-
-    report = client.post(
-        "/presence",
-        json={"local_agent_url": "https://relay.example/agent/abc123", "workspace": "/Users/erin/project"},
+    pair = client.post(
+        "/hosts/pair",
+        json={"routing_key": "rk-erin-1", "hostname": "erins-mac", "label": "Erin's Mac"},
         headers=headers,
     )
-    assert report.status_code == 200
-    assert report.json() == {
-        "connected": True,
-        "local_agent_url": "https://relay.example/agent/abc123",
-        "workspace": "/Users/erin/project",
-    }
+    assert pair.status_code == 201
+    body = pair.json()
+    assert body["label"] == "Erin's Mac"
+    assert body["device_token"] and body["command_key"]
 
-    lookup = client.get("/presence", headers=headers)
-    assert lookup.json() == report.json()
+    # not yet reported reachable -- listed, but disconnected
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert len(hosts) == 1
+    assert hosts[0]["label"] == "Erin's Mac"
+    assert hosts[0]["connected"] is False
 
-    # a second report overwrites, not duplicates, the row (one per user)
-    client.post(
-        "/presence",
-        json={"local_agent_url": "https://relay.example/agent/xyz789", "workspace": "/Users/erin/other"},
-        headers=headers,
+    device_headers = {"Authorization": f"Bearer {body['device_token']}"}
+    assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": True}
+
+    presence = client.post(
+        "/hosts/presence",
+        json={"local_agent_url": "https://relay.example/agent/erin", "workspace": "/Users/erin/project"},
+        headers=device_headers,
     )
-    assert client.get("/presence", headers=headers).json()["local_agent_url"] == "https://relay.example/agent/xyz789"
+    assert presence.status_code == 200
+
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert hosts[0]["connected"] is True
+    assert hosts[0]["local_agent_url"] == "https://relay.example/agent/erin"
+    assert hosts[0]["command_key"] == body["command_key"]
 
 
-def test_presence_clear(client):
-    signup = client.post("/signup", json={"username": "frank", "password": "correct-horse"}).json()
-    token = signup["token"]
-    headers = {"Authorization": f"Bearer {token}"}
+def test_pair_is_idempotent_for_the_same_user(client):
+    signup = _signup(client, "frank")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
 
-    client.post(
-        "/presence",
-        json={"local_agent_url": "https://relay.example/agent/x", "workspace": "/tmp/ws"},
+    first = client.post(
+        "/hosts/pair", json={"routing_key": "rk-frank-1", "hostname": "franks-pc", "label": "Frank's PC"},
         headers=headers,
-    )
-    assert client.get("/presence", headers=headers).json()["connected"] is True
+    ).json()
+    second = client.post(
+        "/hosts/pair", json={"routing_key": "rk-frank-1", "hostname": "franks-pc"}, headers=headers
+    ).json()
 
-    cleared = client.delete("/presence", headers=headers)
-    assert cleared.status_code == 200
-    assert cleared.json() == {"connected": False, "local_agent_url": None, "workspace": None}
-    assert client.get("/presence", headers=headers).json()["connected"] is False
+    assert second["host_id"] == first["host_id"]
+    assert second["label"] == "Frank's PC"  # existing label untouched, not re-prompted
+    assert second["device_token"] != first["device_token"]  # credentials rotated
 
-    # idempotent
-    assert client.delete("/presence", headers=headers).status_code == 200
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert len(hosts) == 1  # no duplicate row
 
 
-def test_presence_is_per_user(client):
-    a = client.post("/signup", json={"username": "gina", "password": "correct-horse"}).json()
-    b = client.post("/signup", json={"username": "hank", "password": "correct-horse"}).json()
+def test_second_user_pairing_a_taken_host_gets_409(client):
+    a = _signup(client, "gina")
+    b = _signup(client, "hank")
 
-    client.post(
-        "/presence",
-        json={"local_agent_url": "https://relay.example/agent/gina", "workspace": "/tmp/gina"},
+    pair_a = client.post(
+        "/hosts/pair", json={"routing_key": "rk-shared", "hostname": "shared-box"},
         headers={"Authorization": f"Bearer {a['token']}"},
+    ).json()
+
+    conflict = client.post(
+        "/hosts/pair", json={"routing_key": "rk-shared", "hostname": "shared-box"},
+        headers={"Authorization": f"Bearer {b['token']}"},
+    )
+    assert conflict.status_code == 409
+
+    # a's session is undisturbed
+    device_headers = {"Authorization": f"Bearer {pair_a['device_token']}"}
+    assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": True}
+
+
+def test_unpair_preserves_user_hosts(client):
+    signup = _signup(client, "ivy")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-ivy-1", "hostname": "ivys-mac"}, headers=headers
+    ).json()
+    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
+
+    unpair = client.post("/hosts/unpair", headers=device_headers)
+    assert unpair.status_code == 200
+    assert unpair.json() == {"revoked": True}
+
+    # device_token is dead now
+    assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": False}
+
+    # but the host itself is still remembered, just disconnected
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert len(hosts) == 1
+    assert hosts[0]["connected"] is False
+
+
+def test_signout_all_clears_attachment_not_history(client):
+    signup = _signup(client, "jack")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-jack-1", "hostname": "jacks-mac"}, headers=headers
+    ).json()
+    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
+    client.post(
+        "/hosts/presence",
+        json={"local_agent_url": "https://relay.example/agent/jack", "workspace": "/tmp/ws"},
+        headers=device_headers,
     )
 
-    # b has never reported presence -- must not see a's row
-    assert client.get("/presence", headers={"Authorization": f"Bearer {b['token']}"}).json()["connected"] is False
-    assert (
-        client.get("/presence", headers={"Authorization": f"Bearer {a['token']}"}).json()["local_agent_url"]
-        == "https://relay.example/agent/gina"
+    signout = client.post("/hosts/signout-all", headers=headers)
+    assert signout.status_code == 200
+    assert signout.json() == {"signed_out_hosts": 1}
+
+    assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": False}
+
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert len(hosts) == 1
+    assert hosts[0]["connected"] is False
+
+
+def test_default_environment_assignment_with_zero_existing(client):
+    signup = _signup(client, "karen")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-karen-1", "hostname": "karens-mac"}, headers=headers
+    ).json()
+
+    envs = client.get("/environments", headers=headers).json()["environments"]
+    assert len(envs) == 1
+    assert envs[0]["name"] == "Default"
+    assert envs[0]["host_ids"] == [pair["host_id"]]
+
+
+def test_default_environment_assignment_with_one_existing(client):
+    signup = _signup(client, "larry")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    env = client.post("/environments", json={"name": "Home"}, headers=headers).json()
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-larry-1", "hostname": "larrys-mac"}, headers=headers
+    ).json()
+
+    envs = client.get("/environments", headers=headers).json()["environments"]
+    assert len(envs) == 1
+    assert envs[0]["id"] == env["id"]
+    assert envs[0]["host_ids"] == [pair["host_id"]]
+
+
+def test_default_environment_assignment_with_multiple_existing(client):
+    signup = _signup(client, "mona")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    client.post("/environments", json={"name": "Home"}, headers=headers)
+    client.post("/environments", json={"name": "Work"}, headers=headers)
+    client.post(
+        "/hosts/pair", json={"routing_key": "rk-mona-1", "hostname": "monas-mac"}, headers=headers
     )
+
+    envs = client.get("/environments", headers=headers).json()["environments"]
+    assert all(e["host_ids"] == [] for e in envs)  # left unassigned, ambiguous
+
+
+def test_environment_crud(client):
+    signup = _signup(client, "nate")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-nate-1", "hostname": "nates-mac"}, headers=headers
+    ).json()
+    env = client.post("/environments", json={"name": "Staging"}, headers=headers).json()
+    assert env["name"] == "Staging"
+    assert env["host_ids"] == []
+
+    dup = client.post("/environments", json={"name": "staging"}, headers=headers)  # case-insensitive
+    assert dup.status_code == 409
+
+    added = client.put(f"/environments/{env['id']}/hosts/{pair['host_id']}", headers=headers).json()
+    assert added["host_ids"] == [pair["host_id"]]
+
+    renamed = client.patch(f"/environments/{env['id']}", json={"name": "Prod"}, headers=headers).json()
+    assert renamed["name"] == "Prod"
+
+    removed = client.delete(f"/environments/{env['id']}/hosts/{pair['host_id']}", headers=headers).json()
+    assert removed["host_ids"] == []
+
+    deleted = client.delete(f"/environments/{env['id']}", headers=headers)
+    assert deleted.status_code == 200
+    remaining = [e["id"] for e in client.get("/environments", headers=headers).json()["environments"]]
+    assert env["id"] not in remaining

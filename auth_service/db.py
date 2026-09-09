@@ -15,19 +15,51 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
 
--- Where a user's Casper daemon is currently reachable, so the web app can
--- learn its relay URL/workspace without the daemon redirecting a browser
--- tab itself (the old callback_port/nonce pairing flow this replaces --
--- see pages/signin.py). One row per user, matching the one-active-token
--- model /login already enforces. A new table rather than new columns on
--- users -- there's no migration mechanism here (init_db() is purely
--- additive), so extending an already-live table isn't safe.
-CREATE TABLE IF NOT EXISTS agent_presence (
-    user_id INTEGER PRIMARY KEY REFERENCES users(id),
-    local_agent_url TEXT NOT NULL,
-    workspace TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+-- Identity only -- one row per physical Casper daemon installation
+-- (keyed by its stable, self-persisted routing_key -- see
+-- agent/internal/config/routingkey.go), never tied to a user. Multiple
+-- users can each know/use the same host over time (see user_hosts below);
+-- who's *currently* attached is runtime state, deliberately not persisted
+-- here -- see auth_service/main.py's _attached in-memory map and its
+-- docstring for why.
+CREATE TABLE IF NOT EXISTS hosts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    routing_key TEXT NOT NULL UNIQUE,
+    hostname TEXT
 );
+
+-- A user's permanent, remembered relationship to a host -- independent of
+-- whether it's currently attached (to this user, to someone else, or to
+-- no one), and independent of any other user's own separate relationship
+-- to the same physical host. Per-user label, since two users sharing a
+-- host might reasonably call it different things.
+CREATE TABLE IF NOT EXISTS user_hosts (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    label TEXT NOT NULL,
+    first_paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, host_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_hosts_host_id ON user_hosts(host_id);
+
+-- User-defined named groupings of their known hosts -- which hosts are
+-- "in play" for the assistant during a given chat session.
+CREATE TABLE IF NOT EXISTS environments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, name COLLATE NOCASE)
+);
+CREATE INDEX IF NOT EXISTS idx_environments_user_id ON environments(user_id);
+
+-- Many-to-many: a host can belong to more than one of a user's Environments.
+CREATE TABLE IF NOT EXISTS environment_hosts (
+    environment_id INTEGER NOT NULL REFERENCES environments(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    PRIMARY KEY (environment_id, host_id)
+);
+CREATE INDEX IF NOT EXISTS idx_environment_hosts_host_id ON environment_hosts(host_id);
 """
 
 
