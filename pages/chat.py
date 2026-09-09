@@ -269,7 +269,14 @@ def _render_tree(nodes, depth=0):
     entries) means hundreds of sidebar widgets even though the underlying
     fetch is a single cached request. Deeper levels just show a count
     instead of recursing further; per-directory entries are similarly
-    capped so one huge flat folder can't blow up the sidebar on its own."""
+    capped so one huge flat folder can't blow up the sidebar on its own.
+    Directories sort before files (a stable sort -- each group keeps the
+    daemon's own alphabetical order), matching the usual file-browser
+    convention rather than the daemon's plain alphabetical `tree` output;
+    the entry cap above applies after this sort, so a folder with more
+    than 50 entries shows its subdirectories first before truncating into
+    its files."""
+    nodes = sorted(nodes, key=lambda n: not n["is_dir"])
     for node in nodes[:MAX_TREE_ENTRIES_PER_DIR]:
         if node["is_dir"]:
             with st.expander(f"📁 {node['name']}"):
@@ -291,6 +298,11 @@ with st.sidebar:
     st.caption(f"Signed in as {username}")
 
     st.divider()
+    env_label_col, env_gear_col = st.columns([5, 1])
+    with env_label_col:
+        st.markdown("**Environment**")
+    with env_gear_col:
+        st.page_link("pages/environments.py", label="⚙️", help="Manage hosts & Environments")
     if environments:
         env_ids = [e["id"] for e in environments]
         st.selectbox(
@@ -302,6 +314,7 @@ with st.sidebar:
             else 0,
             key="_environment_selector",
             on_change=_switch_environment,
+            label_visibility="collapsed",
         )
         env_host_ids = active_environment["host_ids"] if active_environment else []
         if env_host_ids:
@@ -344,11 +357,23 @@ with st.sidebar:
         (label for label, cfg in local_agent_configs.items() if cfg.get("host_id") == selected_host_id), None
     )
     selected_config = local_agent_configs.get(selected_host_label)
-    st.subheader("Workspace")
+    directories = (selected_config.get("workspace") or []) if selected_config else []
+
+    workspace_label_col, workspace_refresh_col = st.columns([5, 1])
+    with workspace_label_col:
+        st.subheader("Workspace")
+    with workspace_refresh_col:
+        # Next to the active host's directory list, not a standalone
+        # button at the bottom of it -- same label-plus-icon treatment as
+        # the Environment gear above.
+        if selected_config is not None and st.button("🔄", key="refresh_workspace", help="Refresh directories"):
+            for directory in directories:
+                st.session_state.pop(f"_tree_{selected_host_id}_{directory}", None)
+            st.rerun()
+
     if selected_config is None:
         st.caption("Select a connected host above to browse its directories.")
     else:
-        directories = selected_config.get("workspace") or []
 
         def _start_add_directory():
             # Fast, fire-and-forget -- the daemon opens the native picker
@@ -424,12 +449,6 @@ with st.sidebar:
                         _render_tree(_parse_tree_output(tree_result.get("stdout", "")))
                     else:
                         st.caption(f"Couldn't load: {tree_result.get('stderr') or 'unknown error'}")
-            if st.button("Refresh directories", key="refresh_workspace"):
-                for directory in directories:
-                    st.session_state.pop(f"_tree_{selected_host_id}_{directory}", None)
-                st.rerun()
-
-    st.page_link("pages/environments.py", label="Manage hosts & Environments")
 
     st.divider()
     st.subheader("Local commands")
