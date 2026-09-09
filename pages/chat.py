@@ -24,7 +24,7 @@ from utils.browser_nav import click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
 # identity across the whole flow.
-st.set_page_config(page_title="Casper - Chat", page_icon="👻")
+st.set_page_config(page_title="Casper - Chat", page_icon="👻", initial_sidebar_state="expanded")
 require_app_subdomain()
 
 
@@ -64,7 +64,15 @@ if st.session_state.get("_signing_out"):
     # a dead-end "you may close this tab" page, so starting a new session is
     # just clicking "Sign in" again.
     st.success("Signed out.")
-    st.iframe(f"<script>{click_anchor_js(json.dumps('/signin'))}</script>", height=1)
+    # Also clears the token utils/auth.py's require_agent_session() stashes
+    # in localStorage for refresh recovery -- otherwise a signed-out
+    # browser could still get silently re-authenticated by that recovery
+    # path on its next visit (harmless in practice, since a revoked token
+    # fails verification anyway, but there's no reason to leave it there).
+    st.iframe(
+        f"<script>window.parent.localStorage.removeItem('casper_auth_token');{click_anchor_js(json.dumps('/signin'))}</script>",
+        height=1,
+    )
     st.stop()
 
 username = require_agent_session()
@@ -76,6 +84,35 @@ client = get_client()
 # UI (sign-out, connection status), so the link belongs there rather than
 # floating above the conversation.
 hide_streamlit_chrome()
+
+# hide_streamlit_chrome() fully hides Streamlit's own header bar
+# ([data-testid="stHeader"], display: none) on every page -- but the
+# control that reopens the sidebar once it's been collapsed lives inside
+# that same header (it has to: it's outside the sidebar itself, since a
+# collapsed sidebar can't hold the only way to un-collapse it). Hiding the
+# whole header therefore leaves no way back once you collapse the sidebar
+# here -- re-shown page-locally (not in branding.py's shared function),
+# since only this page actually has sidebar content worth reopening; every
+# other page keeps the header fully hidden. Layered after
+# hide_streamlit_chrome()'s own <style> tag, so this wins the cascade for
+# equally-specific, both-!important rules on the same selector. The
+# menu/toolbar (the parts of the header actually worth hiding) stay hidden
+# regardless.
+st.html(
+    """
+    <style>
+    [data-testid="stHeader"] {
+        display: block !important;
+        background: transparent !important;
+        height: auto !important;
+        min-height: 0 !important;
+    }
+    [data-testid="stMainMenu"], [data-testid="stToolbar"] {
+        display: none !important;
+    }
+    </style>
+    """
+)
 
 # The Environment-management gear and the workspace refresh icon (both
 # below) are meant to read as small, secondary glyphs next to their
@@ -405,10 +442,21 @@ with st.sidebar:
         if selected_config is not None and st.button("🔄", key="refresh_workspace", help="Refresh directories"):
             for directory in directories:
                 st.session_state.pop(f"_tree_{selected_host_id}_{directory}", None)
+            st.session_state["_workspace_refreshing"] = True
             st.rerun()
 
     if selected_config is None:
         st.caption("Select a connected host above to browse its directories.")
+    elif st.session_state.pop("_workspace_refreshing", False):
+        # Deliberately renders nothing here for one rerun cycle, then
+        # reruns again to show the (freshly re-fetched, since the cache
+        # was already cleared above) directory list -- visible "gone,
+        # then back" feedback that the click actually did something,
+        # since an unchanged directory list would otherwise just silently
+        # redraw looking identical to before.
+        with st.spinner("Refreshing..."):
+            time.sleep(0.4)
+        st.rerun()
     else:
 
         def _start_add_directory():

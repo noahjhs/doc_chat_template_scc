@@ -22,7 +22,6 @@ username = require_agent_session()
 page_header()
 
 st.title("Hosts & Environments")
-st.page_link("pages/chat.py", label="← Back to chat")
 
 AUTH_DOMAIN = st.secrets["AUTH_SERVICE_DOMAIN"]
 TOKEN = current_token()

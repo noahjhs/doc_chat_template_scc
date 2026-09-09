@@ -1,9 +1,8 @@
+import json
 from urllib.parse import quote
 
 import requests
 import streamlit as st
-
-from utils.branding import NAME
 
 
 def _base_url(domain):
@@ -241,40 +240,83 @@ def require_agent_session():
     visible URL after reading it, so on later reruns it may no longer be
     present in st.query_params at all; checking session_state first,
     independent of what the current query params say, is what keeps that
-    safe. st.stop()s with a 'sign in' message if there's no token, it's
-    invalid, or the auth service is unreachable. Returns the signed-in
-    username; the verified token itself is cached separately in
-    session_state["_authenticated_token"] (see current_token()) for callers
-    that need it -- e.g. pages/chat.py's presence lookup."""
+    safe.
+
+    Not signed in at all (no query param, nothing cached) silently lands
+    on /signin -- no "you're not signed in" interstitial. A hard refresh
+    that lost session_state (Streamlit's own server-side state is tied to
+    a process/session that a restart wipes entirely) gets one recovery
+    attempt first, reading a token this function itself stashes in
+    localStorage on every successful verification -- so a plain refresh of
+    an otherwise still-valid session just re-verifies and reloads *this*
+    page, rather than bouncing to sign-in only because the in-memory
+    session_state didn't survive. Returns the signed-in username; the
+    verified token itself is cached separately in
+    session_state["_authenticated_token"] (see current_token()) for
+    callers that need it -- e.g. pages/chat.py's presence lookup."""
     if st.session_state.get("_authenticated_username"):
         return st.session_state["_authenticated_username"]
 
     token = st.query_params.get("local_agent_token", "")
     if not token:
-        st.info(f"Sign in to use {NAME}.")
-        # st.button + st.switch_page, not st.page_link or a markdown
-        # [text](url) link -- this codebase's markdown renderer opens
-        # those in a new tab regardless of the URL (see casper_app.py's
-        # own note on this), which is wrong for a same-subdomain
-        # destination; page_link does a proper same-tab navigation but
-        # renders as a plain text link with no visible outline, whereas a
-        # button gets Streamlit's normal bordered button styling for free
-        # -- wanted here specifically, since this is the one actionable
-        # thing on an otherwise-empty gate page.
-        st.button("Sign in", on_click=lambda: st.switch_page("pages/signin.py"))
-        st.stop()
+        if "_token_recovery_attempted" not in st.session_state:
+            st.session_state["_token_recovery_attempted"] = True
+            # One-shot per browser session: if this browser has a token
+            # stashed from a previous successful sign-in, reload with it
+            # attached so the verify branch below runs for real; otherwise
+            # there was never a session to recover, so go straight to
+            # /signin. Either way this is a JS-driven navigation (not
+            # st.switch_page), so it can run synchronously inside the same
+            # injected script rather than racing a separate Python-side
+            # page change.
+            st.iframe(
+                """
+                <script>
+                (function() {
+                    var stored = window.parent.localStorage.getItem('casper_auth_token');
+                    if (stored) {
+                        var url = new URL(window.parent.location.href);
+                        url.searchParams.set('local_agent_token', stored);
+                        window.parent.location.href = url.toString();
+                    } else {
+                        window.parent.location.href = '/signin';
+                    }
+                })();
+                </script>
+                """,
+                height=1,
+            )
+            st.stop()
+        # The injected script above should always navigate away on its own
+        # (recovered token -> reload; nothing stashed -> /signin) -- this
+        # is a defensive fallback only, for the unlikely case that script
+        # never ran (e.g. localStorage blocked entirely).
+        st.switch_page("pages/signin.py")
 
     result = verify_token_with_auth_service(_auth_domain(), token)
     if result is None:
         st.error("Couldn't reach the auth service right now. Try again shortly.")
         st.stop()
     if not result.get("valid"):
-        st.error("This sign-in link is no longer valid.")
-        st.button("Sign in again to get a fresh one", on_click=lambda: st.switch_page("pages/signin.py"))
+        # Clears the now-known-bad stashed token too, so a future reload
+        # doesn't keep recovering and re-verifying it.
+        st.iframe(
+            """
+            <script>
+            window.parent.localStorage.removeItem('casper_auth_token');
+            window.parent.location.href = '/signin';
+            </script>
+            """,
+            height=1,
+        )
         st.stop()
 
     st.session_state["_authenticated_username"] = result["username"]
     st.session_state["_authenticated_token"] = token
+    st.iframe(
+        f"<script>window.parent.localStorage.setItem('casper_auth_token', {json.dumps(token)});</script>",
+        height=1,
+    )
     return result["username"]
 
 
