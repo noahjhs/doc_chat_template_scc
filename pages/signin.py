@@ -10,7 +10,7 @@ from utils.browser_nav import autofocus_input_js, click_anchor_js
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
 # identity across the whole flow.
-st.set_page_config(page_title="Casper", page_icon="👻")
+st.set_page_config(page_title="Casper - Sign in", page_icon="👻")
 require_app_subdomain()
 
 page_header()

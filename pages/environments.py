@@ -16,7 +16,7 @@ from utils.auth import (
 )
 from utils.branding import NAME, page_header
 
-st.set_page_config(page_title="Casper", page_icon="👻")
+st.set_page_config(page_title="Casper - Hosts & Environments", page_icon="👻")
 require_app_subdomain()
 username = require_agent_session()
 page_header()

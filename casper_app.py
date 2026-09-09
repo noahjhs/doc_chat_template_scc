@@ -6,7 +6,7 @@ from utils.branding import NAME, TAGLINE, page_header
 # The browser tab's actual title (not just the on-page st.title() heading) --
 # every Casper page sets this the same way for a consistent identity across
 # the whole flow.
-st.set_page_config(page_title="Casper", page_icon="👻")
+st.set_page_config(page_title="Casper - Home", page_icon="👻")
 require_www_subdomain()
 
 page_header(size=100)

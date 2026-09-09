@@ -252,6 +252,12 @@ def require_agent_session():
     token = st.query_params.get("local_agent_token", "")
     if not token:
         st.info(f"Sign in to use {NAME}.")
+        # st.page_link, not a markdown [text](url) link -- this codebase's
+        # markdown renderer opens those in a new tab regardless of the URL
+        # (see casper_app.py's own note on this), which is wrong for a
+        # same-subdomain destination; page_link does a proper same-tab,
+        # client-side navigation to another page in this app.
+        st.page_link("pages/signin.py", label="Sign in")
         st.stop()
 
     result = verify_token_with_auth_service(_auth_domain(), token)
@@ -259,7 +265,8 @@ def require_agent_session():
         st.error("Couldn't reach the auth service right now. Try again shortly.")
         st.stop()
     if not result.get("valid"):
-        st.error("This sign-in link is no longer valid. Sign in again to get a fresh one.")
+        st.error("This sign-in link is no longer valid.")
+        st.page_link("pages/signin.py", label="Sign in again to get a fresh one.")
         st.stop()
 
     st.session_state["_authenticated_username"] = result["username"]
