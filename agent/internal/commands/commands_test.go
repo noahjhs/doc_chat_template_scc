@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,5 +147,67 @@ func TestDispatch_UnknownAction(t *testing.T) {
 	}
 	if ae, ok := err.(*ActionError); !ok || ae.Detail != "Action not authorized." {
 		t.Fatalf("expected 'Action not authorized.', got: %v", err)
+	}
+}
+
+func TestReadWriteFileRoundTrip(t *testing.T) {
+	h, root := newTestHandler(t)
+	// Includes a null byte -- confirms this is a real binary-safe
+	// round-trip, not just a text one that happens to work.
+	original := []byte{0x00, 0x01, 0xff, 'h', 'i'}
+	content := base64.StdEncoding.EncodeToString(original)
+
+	written, err := h.Dispatch(&Request{Action: "write_file", Path: "bin.dat", Content: content})
+	if err != nil || !written.Success {
+		t.Fatalf("write_file failed: result=%+v err=%v", written, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "bin.dat")); statErr != nil {
+		t.Fatalf("expected bin.dat to exist: %v", statErr)
+	}
+
+	read, err := h.Dispatch(&Request{Action: "read_file", Path: "bin.dat"})
+	if err != nil || !read.Success {
+		t.Fatalf("read_file failed: result=%+v err=%v", read, err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(read.Stdout)
+	if err != nil {
+		t.Fatalf("read_file returned invalid base64: %v", err)
+	}
+	if string(decoded) != string(original) {
+		t.Fatalf("round-trip mismatch: got %v, want %v", decoded, original)
+	}
+}
+
+func TestWriteFileRejectsOversizedContent(t *testing.T) {
+	h, _ := newTestHandler(t)
+	oversized := base64.StdEncoding.EncodeToString(make([]byte, maxTransferFileBytes+1))
+	_, err := h.Dispatch(&Request{Action: "write_file", Path: "huge.bin", Content: oversized})
+	if err == nil {
+		t.Fatal("expected an oversized write_file to be rejected")
+	}
+}
+
+func TestReadFileRejectsDirectory(t *testing.T) {
+	h, root := newTestHandler(t)
+	if err := os.Mkdir(filepath.Join(root, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Dispatch(&Request{Action: "read_file", Path: "adir"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Success {
+		t.Fatal("expected read_file on a directory to fail")
+	}
+}
+
+func TestWriteFileRejectsEscapingRoot(t *testing.T) {
+	h, _ := newTestHandler(t)
+	_, err := h.Dispatch(&Request{Action: "write_file", Path: "../outside.txt", Content: base64.StdEncoding.EncodeToString([]byte("x"))})
+	if err == nil {
+		t.Fatal("expected write_file to reject a path escaping RootDir")
+	}
+	if _, ok := err.(*ActionError); !ok {
+		t.Fatalf("expected an ActionError, got: %v", err)
 	}
 }

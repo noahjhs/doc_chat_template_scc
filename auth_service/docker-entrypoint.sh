@@ -6,4 +6,8 @@ set -euo pipefail
 # otherwise fail on first run with "unable to open database file".
 mkdir -p "$(dirname "${AUTH_DB_PATH:-/data/users.db}")"
 
+# Root of the per-user file storage (transfer feature) -- unlike
+# AUTH_DB_PATH (a file path), this is the directory itself.
+mkdir -p "${STORAGE_ROOT:-/data/storage}"
+
 exec "$@"

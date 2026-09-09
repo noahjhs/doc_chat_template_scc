@@ -7,6 +7,7 @@
 package commands
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,13 @@ type Request struct {
 	Pattern     string `json:"pattern,omitempty"`
 	Lines       int    `json:"lines,omitempty"`
 	Limit       int    `json:"limit,omitempty"`
+	// Content is base64-encoded file bytes -- only used by write_file (see
+	// runReadFile/runWriteFile below), which the web app's cross-host and
+	// host<->server-storage transfer tools drive. Base64 rather than raw
+	// text: unlike cat/head/tail (which assume and display text),
+	// transferred files need to survive round-tripping arbitrary binary
+	// content intact through JSON, which requires valid UTF-8.
+	Content string `json:"content,omitempty"`
 }
 
 // ApplyDefaults matches CommandRequest's Pydantic field defaults (lines=10,
@@ -482,6 +490,70 @@ func readText(path string) (string, error) {
 	return cap(string(data), 20000), nil
 }
 
+// --- File transfer: binary-safe, unlike cat/head/tail's text-only, ---------
+// truncated-for-display reads. Backs the web app's cross-host and
+// host<->server-storage transfer tools (see pages/chat.py's TRANSFER_TOOL).
+// Not reachable from the general run_local_command schema -- these move
+// whole files, a different (and larger-blast-radius) operation from every
+// other allowlisted command, so they get their own dedicated tool rather
+// than folding into run_local_command's action enum.
+
+const maxTransferFileBytes = 10 * 1024 * 1024 // 10MB -- base64+JSON+relay overhead considered; configs/scripts/small datasets, not media
+
+func (h *Handler) runReadFile(req *Request) (Result, error) {
+	path, err := require(req.Path, "path", "read_file")
+	if err != nil {
+		return Result{}, err
+	}
+	target, err := h.resolvePath(path, true, false)
+	if err != nil {
+		return Result{}, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return Result{}, err
+	}
+	if info.IsDir() {
+		return h.fail(fmt.Sprintf("Is a directory: %s", target)), nil
+	}
+	if info.Size() > maxTransferFileBytes {
+		return h.fail(fmt.Sprintf("File too large to transfer (%d bytes, max %d).", info.Size(), maxTransferFileBytes)), nil
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return Result{}, err
+	}
+	return h.ok(base64.StdEncoding.EncodeToString(data), ""), nil
+}
+
+func (h *Handler) runWriteFile(req *Request) (Result, error) {
+	path, err := require(req.Path, "path", "write_file")
+	if err != nil {
+		return Result{}, err
+	}
+	if req.Content == "" {
+		return Result{}, &ActionError{Detail: "'content' is required for the 'write_file' action."}
+	}
+	data, err := base64.StdEncoding.DecodeString(req.Content)
+	if err != nil {
+		return Result{}, &ActionError{Detail: "Invalid base64 content."}
+	}
+	if len(data) > maxTransferFileBytes {
+		return Result{}, &ActionError{Detail: fmt.Sprintf("File too large to transfer (%d bytes, max %d).", len(data), maxTransferFileBytes)}
+	}
+	// mustExist=false, mustBeDir=false -- like touch/cp's destination,
+	// write_file creates the file if it doesn't exist yet (and overwrites
+	// it if it does).
+	target, err := h.resolvePath(path, false, false)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := os.WriteFile(target, data, 0o644); err != nil {
+		return h.fail(err.Error()), nil
+	}
+	return h.ok(fmt.Sprintf("Wrote %d bytes to %s", len(data), target), ""), nil
+}
+
 func (h *Handler) runCat(req *Request) (Result, error) {
 	path, err := require(req.Path, "path", "cat")
 	if err != nil {
@@ -683,6 +755,10 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 		return h.runGrep(req)
 	case "find":
 		return h.runFind(req)
+	case "read_file":
+		return h.runReadFile(req)
+	case "write_file":
+		return h.runWriteFile(req)
 	default:
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

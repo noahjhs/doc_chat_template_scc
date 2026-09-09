@@ -279,3 +279,28 @@ def current_token():
     meaningful after that's already been called (and passed) earlier in the
     same script run."""
     return st.session_state.get("_authenticated_token", "")
+
+
+def list_storage(auth_domain, token):
+    """GET /storage. Returns {"files": [...], "total_bytes", "cap_bytes"},
+    or {"error": str} -- _auth_write (not _auth_get) for a consistent,
+    model-legible error shape, since this backs pages/chat.py's transfer
+    tool rather than a page-load lookup."""
+    return _auth_write("GET", auth_domain, token, "/storage")
+
+
+def upload_storage(auth_domain, token, filename, content_b64):
+    """POST /storage. Returns the new file's {"filename", "size",
+    "uploaded_at"}, or {"error": str} (e.g. over the per-user cap)."""
+    return _auth_write("POST", auth_domain, token, "/storage", {"filename": filename, "content": content_b64})
+
+
+def download_storage(auth_domain, token, filename):
+    """GET /storage/{filename}. Returns {"filename", "content"} (base64),
+    or {"error": str} (e.g. not found)."""
+    return _auth_write("GET", auth_domain, token, f"/storage/{quote(filename, safe='')}")
+
+
+def delete_storage(auth_domain, token, filename):
+    """DELETE /storage/{filename}. Returns {"deleted": True}, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/storage/{quote(filename, safe='')}")

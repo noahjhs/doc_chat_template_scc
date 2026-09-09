@@ -1,3 +1,4 @@
+import base64
 import os
 import sys
 import tempfile
@@ -15,6 +16,7 @@ def client():
     sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
+        os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
         for mod in ("main", "db", "models"):
             sys.modules.pop(mod, None)
         import main as auth_main
@@ -289,3 +291,95 @@ def test_environment_crud(client):
     assert deleted.status_code == 200
     remaining = [e["id"] for e in client.get("/environments", headers=headers).json()["environments"]]
     assert env["id"] not in remaining
+
+
+def _b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def test_storage_upload_list_download_delete(client):
+    signup = _signup(client, "olga")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    assert client.get("/storage", headers=headers).json() == {
+        "files": [], "total_bytes": 0, "cap_bytes": 1024 * 1024 * 1024,
+    }
+
+    uploaded = client.post(
+        "/storage", json={"filename": "notes.txt", "content": _b64("hello world")}, headers=headers
+    )
+    assert uploaded.status_code == 201
+    body = uploaded.json()
+    assert body["filename"] == "notes.txt"
+    assert body["size"] == len(b"hello world")
+
+    listing = client.get("/storage", headers=headers).json()
+    assert listing["total_bytes"] == len(b"hello world")
+    assert [f["filename"] for f in listing["files"]] == ["notes.txt"]
+
+    downloaded = client.get("/storage/notes.txt", headers=headers).json()
+    assert base64.b64decode(downloaded["content"]) == b"hello world"
+
+    # re-uploading the same filename overwrites, not duplicates
+    client.post("/storage", json={"filename": "notes.txt", "content": _b64("bye")}, headers=headers)
+    listing = client.get("/storage", headers=headers).json()
+    assert len(listing["files"]) == 1
+    assert listing["total_bytes"] == len(b"bye")
+
+    deleted = client.delete("/storage/notes.txt", headers=headers)
+    assert deleted.status_code == 200
+    assert client.get("/storage", headers=headers).json()["files"] == []
+
+    # idempotent
+    assert client.delete("/storage/notes.txt", headers=headers).status_code == 200
+
+    assert client.get("/storage/nope.txt", headers=headers).status_code == 404
+
+
+def test_storage_rejects_path_traversal(client):
+    signup = _signup(client, "pete")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    result = client.post(
+        "/storage", json={"filename": "../../etc/passwd", "content": _b64("x")}, headers=headers
+    )
+    assert result.status_code == 201  # basename() collapses it to a bare "passwd"
+    assert result.json()["filename"] == "passwd"
+    assert client.get("/storage", headers=headers).json()["files"][0]["filename"] == "passwd"
+
+
+def test_storage_rejects_invalid_base64(client):
+    signup = _signup(client, "quinn")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    result = client.post("/storage", json={"filename": "x.bin", "content": "not valid base64!!"}, headers=headers)
+    assert result.status_code == 400
+
+
+def test_storage_enforces_per_user_cap(client):
+    import main as auth_main  # already imported by the client fixture; shrink the cap rather than upload 1GB+
+
+    signup = _signup(client, "rosa")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    original_cap = auth_main.STORAGE_CAP_BYTES
+    auth_main.STORAGE_CAP_BYTES = 100
+    try:
+        ok = client.post("/storage", json={"filename": "small.bin", "content": _b64("x" * 50)}, headers=headers)
+        assert ok.status_code == 201
+        too_big = client.post(
+            "/storage", json={"filename": "big.bin", "content": _b64("x" * 100)}, headers=headers
+        )
+        assert too_big.status_code == 413
+        assert [f["filename"] for f in client.get("/storage", headers=headers).json()["files"]] == ["small.bin"]
+    finally:
+        auth_main.STORAGE_CAP_BYTES = original_cap
+
+
+def test_storage_is_per_user(client):
+    a = _signup(client, "sam")
+    b = _signup(client, "tina")
+    client.post(
+        "/storage", json={"filename": "a-only.txt", "content": _b64("secret")},
+        headers={"Authorization": f"Bearer {a['token']}"},
+    )
+    assert client.get("/storage", headers={"Authorization": f"Bearer {b['token']}"}).json()["files"] == []
+    assert client.get("/storage/a-only.txt", headers={"Authorization": f"Bearer {b['token']}"}).status_code == 404

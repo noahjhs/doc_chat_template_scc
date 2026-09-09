@@ -10,12 +10,14 @@ from openai import OpenAI
 from utils.auth import (
     build_pair_url,
     current_token,
+    download_storage,
     list_environments,
     list_hosts,
     require_agent_session,
     require_app_subdomain,
     revoke_token_with_auth_service,
     signout_all_hosts,
+    upload_storage,
 )
 from utils.branding import NAME, hide_streamlit_chrome, home_link_html
 from utils.browser_nav import click_anchor_js
@@ -461,7 +463,56 @@ LOCAL_AGENT_TOOL = {
         "required": ["action"],
     },
 }
-active_tools = TOOLS + ([LOCAL_AGENT_TOOL] if local_agent_configs else [])
+
+# "server storage" is the one location value that's never a key in
+# local_agent_configs -- a small, private, per-account file store on the
+# server itself (independent of any connected machine, capped at 1GB --
+# see auth_service/main.py's STORAGE_CAP_BYTES), useful as a hop between
+# two hosts that aren't both online at once, or just as scratch space.
+SERVER_STORAGE = "server storage"
+TRANSFER_TOOL = {
+    "type": "function",
+    "name": "transfer_file",
+    "description": (
+        "Move a file between a connected machine and another connected "
+        "machine, or between a connected machine and the user's own "
+        "server storage (a small, private file store independent of any "
+        "machine -- use the location 'server storage' for that side of "
+        "the transfer). Reads the file from the source and writes it at "
+        "the destination; the source file is left in place. Limited to "
+        "files up to 10MB each."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source": {
+                "type": "string",
+                "enum": list(local_agent_configs.keys()) + [SERVER_STORAGE],
+                "description": "Where to read the file from.",
+            },
+            "source_path": {
+                "type": "string",
+                "description": (
+                    "Path to the file on the source. For a machine, "
+                    "absolute or relative to its current directory. For "
+                    "server storage, just the filename."
+                ),
+            },
+            "destination": {
+                "type": "string",
+                "enum": list(local_agent_configs.keys()) + [SERVER_STORAGE],
+                "description": "Where to write the file to.",
+            },
+            "destination_path": {
+                "type": "string",
+                "description": "Target path on the destination -- same rules as source_path.",
+            },
+        },
+        "required": ["source", "source_path", "destination", "destination_path"],
+    },
+}
+
+active_tools = TOOLS + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs else [])
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -519,6 +570,51 @@ def call_local_agent(local_agent_configs, action, host=None, default_host=None, 
         return f"Local agent error: {e}"
 
 
+def call_transfer_file(local_agent_configs, source, source_path, destination, destination_path):
+    """Reads source_path from source (a connected host, or the user's own
+    server storage) and writes it to destination_path on destination.
+    read_file/write_file are binary-safe (base64 over the wire, decoded/
+    re-encoded nowhere in between -- the same base64 string just moves
+    from one side's response into the other side's request) and each
+    capped at 10MB server-side (agent/internal/commands/commands.go's
+    maxTransferFileBytes); auth_service separately enforces its own 1GB-
+    per-user *total* cap for server storage specifically. Never raises."""
+    auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
+
+    if source == SERVER_STORAGE:
+        result = download_storage(auth_domain, current_token(), source_path)
+        if "error" in result:
+            return f"Transfer error: couldn't read {source_path!r} from server storage: {result['error']}"
+        content = result["content"]
+    else:
+        config = local_agent_configs.get(source)
+        if config is None:
+            available = ", ".join(list(local_agent_configs) + [SERVER_STORAGE])
+            return f"Transfer error: unknown source {source!r}. Available: {available}."
+        read_result = _fetch_local_json(config, "read_file", path=source_path)
+        if not read_result.get("success"):
+            return f"Transfer error: couldn't read {source_path!r} from {source}: {read_result.get('stderr') or 'unknown error'}"
+        content = read_result.get("stdout", "")
+
+    if destination == SERVER_STORAGE:
+        # Server storage is flat (no subdirectories -- see auth_service's
+        # _safe_filename), so a destination_path with directory components
+        # just contributes its basename.
+        filename = destination_path.replace("\\", "/").rsplit("/", 1)[-1]
+        result = upload_storage(auth_domain, current_token(), filename, content)
+        if "error" in result:
+            return f"Transfer error: couldn't write {filename!r} to server storage: {result['error']}"
+        return f"Transferred {source_path!r} from {source} to server storage as {filename!r} ({result['size']} bytes)."
+    config = local_agent_configs.get(destination)
+    if config is None:
+        available = ", ".join(list(local_agent_configs) + [SERVER_STORAGE])
+        return f"Transfer error: unknown destination {destination!r}. Available: {available}."
+    write_result = _fetch_local_json(config, "write_file", path=destination_path, content=content)
+    if not write_result.get("success"):
+        return f"Transfer error: couldn't write {destination_path!r} to {destination}: {write_result.get('stderr') or 'unknown error'}"
+    return f"Transferred {source_path!r} from {source} to {destination_path!r} on {destination}."
+
+
 def describe_local_command(action, args):
     """A single source of truth for how a local command call is displayed,
     live and in history — used by both the tool-call status label and
@@ -571,6 +667,18 @@ def show_local_agent_calls(calls):
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
+def show_transfer_calls(calls):
+    """Render a demo-friendly summary of file transfers."""
+    if not calls:
+        return
+    label = f"📤 {len(calls)} file transfer{'s' if len(calls) != 1 else ''}"
+    with st.expander(label):
+        for entry in calls:
+            args = entry.get("args", {})
+            prefix = f"$ transfer {args.get('source_path')} ({args.get('source')} -> {args.get('destination')})"
+            st.code(f"{prefix}\n{entry['output']}", language="text")
+
+
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
@@ -579,6 +687,7 @@ for message in st.session_state.messages:
         show_web_search(message.get("searches"), message.get("sources", []))
         show_code_interpreter(message.get("code_blocks", []))
         show_local_agent_calls(message.get("local_agent_calls", []))
+        show_transfer_calls(message.get("transfer_calls", []))
 
 if prompt := st.chat_input("Chat"):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -625,6 +734,7 @@ if prompt := st.chat_input("Chat"):
         "sources": [],
         "code_blocks": [],
         "local_agent_calls": [],
+        "transfer_calls": [],
         "image": None,
     }
     turn_input = [{"role": "user", "content": prompt}]
@@ -683,6 +793,21 @@ if prompt := st.chat_input("Chat"):
                     aggregate["local_agent_calls"].append(
                         {"action": action, "args": args, "output": output}
                     )
+                elif call["name"] == "transfer_file":
+                    label = (
+                        f"📤 Transfer {args.get('source_path')} "
+                        f"({args.get('source')} → {args.get('destination')})"
+                    )
+                    with st.status(label):
+                        output = call_transfer_file(
+                            local_agent_configs,
+                            args.get("source"),
+                            args.get("source_path"),
+                            args.get("destination"),
+                            args.get("destination_path"),
+                        )
+                        st.code(output, language="text")
+                    aggregate["transfer_calls"].append({"args": args, "output": output})
                 else:
                     output = f"Unknown tool: {call['name']}"
                 turn_input.append(
@@ -698,6 +823,7 @@ if prompt := st.chat_input("Chat"):
         show_web_search(aggregate["searches"], aggregate["sources"])
         show_code_interpreter(aggregate["code_blocks"])
         show_local_agent_calls(aggregate["local_agent_calls"])
+        show_transfer_calls(aggregate["transfer_calls"])
 
     st.session_state.messages.append(
         {
@@ -708,5 +834,6 @@ if prompt := st.chat_input("Chat"):
             "sources": aggregate["sources"],
             "code_blocks": aggregate["code_blocks"],
             "local_agent_calls": aggregate["local_agent_calls"],
+            "transfer_calls": aggregate["transfer_calls"],
         }
     )

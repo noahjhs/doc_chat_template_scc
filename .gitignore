@@ -18,6 +18,10 @@ session.json
 # Auth service's local SQLite store -- never committed, deploy-time only.
 auth_service/users.db*
 
+# Auth service's per-user file storage (transfer feature) -- deploy-time
+# only, same reasoning as users.db above.
+auth_service/storage/
+
 # Server-side named Cloudflare Tunnel config for the Mac mini deploy --
 # cert.pem, <uuid>.json credentials, and config.yml are all secret/instance-
 # specific. Unrelated to vendor/cloudflared/ below (that's the client binary

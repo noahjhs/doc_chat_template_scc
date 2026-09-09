@@ -1,5 +1,8 @@
+import base64
+import binascii
 import concurrent.futures
 import hashlib
+import os
 import secrets
 import threading
 import time
@@ -26,6 +29,11 @@ from models import (
     RevokeResponse,
     SignOutAllResponse,
     SignupRequest,
+    StorageDeleteResponse,
+    StorageDownloadResponse,
+    StorageFileInfo,
+    StorageListResponse,
+    StorageUploadRequest,
     VerifyResponse,
 )
 
@@ -549,3 +557,114 @@ def signout_all_hosts(authorization: str = Header(default="")):
     targets = [(info["local_agent_url"], info["command_key"]) for _, info in mine if info["local_agent_url"]]
     _shutdown_hosts_best_effort(targets)
     return SignOutAllResponse(signed_out_hosts=len(mine))
+
+
+# --- Per-user file storage (transfer feature) -----------------------------
+# Filesystem-as-database, deliberately: no new SQL table, just files under
+# STORAGE_ROOT/<user_id>/<filename> -- size and upload time both already
+# come for free from a plain os.stat(), and there's no migration mechanism
+# in this codebase worth standing up a table for (see db.py's own note).
+# STORAGE_ROOT defaults to a local dev path; deployment sets it to a
+# subdirectory of the same persisted volume AUTH_DB_PATH already lives on
+# (see docker-entrypoint.sh / .env.example).
+STORAGE_ROOT = os.environ.get("STORAGE_ROOT", os.path.join(os.path.dirname(__file__), "storage"))
+STORAGE_CAP_BYTES = 1024 * 1024 * 1024  # 1GB per user
+
+
+def _user_storage_dir(user_id: int) -> str:
+    path = os.path.join(STORAGE_ROOT, str(user_id))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _safe_filename(filename: str) -> str:
+    """Only a bare filename is ever accepted -- os.path.basename strips any
+    directory components, so "../../etc/passwd" collapses to just
+    "passwd", the same confined-no-escape posture the local agent's own
+    RootDir confinement already applies to command paths."""
+    name = os.path.basename(filename.strip())
+    if not name or name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    return name
+
+
+def _dir_total_bytes(directory: str) -> int:
+    return sum(entry.stat().st_size for entry in os.scandir(directory) if entry.is_file())
+
+
+def _storage_file_info(entry_path: str, filename: str) -> StorageFileInfo:
+    stat = os.stat(entry_path)
+    return StorageFileInfo(
+        filename=filename,
+        size=stat.st_size,
+        uploaded_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    )
+
+
+@app.get("/storage", response_model=StorageListResponse)
+def list_storage(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    directory = _user_storage_dir(user_id)
+    files = [
+        _storage_file_info(entry.path, entry.name) for entry in os.scandir(directory) if entry.is_file()
+    ]
+    files.sort(key=lambda f: f.filename.lower())
+    return StorageListResponse(
+        files=files, total_bytes=sum(f.size for f in files), cap_bytes=STORAGE_CAP_BYTES
+    )
+
+
+@app.post("/storage", response_model=StorageFileInfo, status_code=201)
+def upload_storage(body: StorageUploadRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    filename = _safe_filename(body.filename)
+    try:
+        data = base64.b64decode(body.content, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid base64 content.")
+
+    directory = _user_storage_dir(user_id)
+    target = os.path.join(directory, filename)
+    existing_size = os.path.getsize(target) if os.path.exists(target) else 0
+    if _dir_total_bytes(directory) - existing_size + len(data) > STORAGE_CAP_BYTES:
+        raise HTTPException(
+            status_code=413, detail=f"Storage cap exceeded ({STORAGE_CAP_BYTES // (1024 * 1024)}MB per user)."
+        )
+
+    with open(target, "wb") as f:
+        f.write(data)
+    return _storage_file_info(target, filename)
+
+
+@app.get("/storage/{filename}", response_model=StorageDownloadResponse)
+def download_storage(filename: str, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    filename = _safe_filename(filename)
+    target = os.path.join(_user_storage_dir(user_id), filename)
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="File not found.")
+    with open(target, "rb") as f:
+        content = base64.b64encode(f.read()).decode()
+    return StorageDownloadResponse(filename=filename, content=content)
+
+
+@app.delete("/storage/{filename}", response_model=StorageDeleteResponse)
+def delete_storage(filename: str, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    filename = _safe_filename(filename)
+    target = os.path.join(_user_storage_dir(user_id), filename)
+    if os.path.isfile(target):
+        os.remove(target)
+    return StorageDeleteResponse(deleted=True)

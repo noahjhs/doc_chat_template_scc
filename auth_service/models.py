@@ -86,3 +86,29 @@ class EnvironmentListResponse(BaseModel):
 
 class SignOutAllResponse(BaseModel):
     signed_out_hosts: int
+
+
+class StorageFileInfo(BaseModel):
+    filename: str
+    size: int
+    uploaded_at: str
+
+
+class StorageListResponse(BaseModel):
+    files: list[StorageFileInfo]
+    total_bytes: int
+    cap_bytes: int
+
+
+class StorageUploadRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content: str  # base64
+
+
+class StorageDownloadResponse(BaseModel):
+    filename: str
+    content: str  # base64
+
+
+class StorageDeleteResponse(BaseModel):
+    deleted: bool
