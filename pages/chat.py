@@ -249,10 +249,15 @@ def _start_sign_out():
 def _recheck_hosts():
     # Drops the cached (possibly stale) host/Environment state so the retry
     # loop above runs again on the rerun this triggers -- see the "Check
-    # again" button below.
+    # again" button below. Also re-arms the local-host probe (otherwise a
+    # one-shot per browser session -- see its own comment above) so a
+    # daemon that came up, or got fixed/redeployed, after this tab's first
+    # (failed) attempt gets a fresh try instead of being stuck forever.
     st.session_state.pop("_hosts", None)
     st.session_state.pop("_environments", None)
     st.session_state.pop("_active_environment_id", None)
+    st.session_state.pop("_local_routing_key_probed", None)
+    st.session_state.pop("_local_routing_key", None)
 
 
 def _switch_environment():
@@ -286,14 +291,16 @@ with st.sidebar:
                     icon, status = "🔧", "active"
                 else:
                     icon, status = "⚪", "inactive"
-                # 📍 marks whichever host this specific browser tab was
+                # Marks whichever host this specific browser tab was
                 # detected running on (see the local-daemon probe above) --
                 # matched by routing_key, not label, since two hosts could
                 # share a label and de-duplication only happens inside
-                # local_agent_configs' own keys, not here.
+                # local_agent_configs' own keys, not here. A plain word
+                # rather than an emoji/icon -- less likely to go unnoticed
+                # or fail to render depending on the system's emoji font.
                 here = local_routing_key and _routing_key_from_url(host.get("local_agent_url")) == local_routing_key
-                marker = " 📍" if here else ""
-                st.caption(f"{icon} {host['label']} ({status}){marker}")
+                marker = ", this machine" if here else ""
+                st.caption(f"{icon} {host['label']} ({status}{marker})")
             if not active_environment["host_ids"]:
                 st.caption("No hosts in this Environment yet.")
     else:
@@ -310,20 +317,20 @@ with st.sidebar:
         st.caption(f"🔧 {NAME} connected and ready to run.")
     else:
         st.caption(f"No connected machines in this Environment. Download {NAME} from the home page to add one.")
-        # Manual fallbacks for the machine this browser tab is itself
-        # running on, distinct from the "connected machines" tracked above
-        # (which may be entirely different physical hosts, already paired
-        # elsewhere): two distinct failure modes, both confirmed via a real
-        # click-through test in the original single-host version --
         # "Reconnect" re-fires the casper://pair hand-off (for when it
         # truly never reached this machine's daemon -- wasn't running yet,
-        # missed the event); "Check again" just re-runs the host lookup
-        # above (for when pairing *did* succeed, only moments after this
-        # page's one-shot check already gave up -- the retry loop above
-        # covers the common case, but a slow click through Chrome's "Open
-        # Casper?" prompt can still outlast it).
+        # missed the event), confirmed via a real click-through test in the
+        # original single-host version.
         reconnect_url = build_pair_url(current_token(), username)
         st.markdown(f'Running {NAME} on this machine? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
+    if not local_host:
+        # Covers two distinct cases with one button: no connected machines
+        # yet (re-runs the host lookup above, for when pairing *did*
+        # succeed only moments after this page's one-shot check already
+        # gave up), and connected-but-not-detected-as-local (re-arms the
+        # local-host probe, for when this tab's own daemon came up, or got
+        # fixed/redeployed, after this tab's first attempt already failed
+        # and gave up -- see _recheck_hosts's own comment).
         st.button("Check again", on_click=_recheck_hosts)
 
 # All the built-in Responses API tools that don't need extra setup (unlike
