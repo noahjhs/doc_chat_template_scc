@@ -10,6 +10,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from models import (
     AuthResponse,
     LoginRequest,
+    PresenceReport,
+    PresenceResponse,
     RevokeResponse,
     SignupRequest,
     VerifyResponse,
@@ -120,3 +122,64 @@ def revoke(authorization: str = Header(default="")):
         with get_db() as db:
             db.execute("UPDATE users SET token_hash = NULL WHERE token_hash = ?", (hash_token(token),))
     return RevokeResponse(revoked=True)
+
+
+def _resolve_user_id(db, authorization: str) -> int | None:
+    """Bearer token -> user id, or None if missing/invalid -- the same
+    resolution /verify does inline, factored out here (not shared with
+    /verify itself) so /presence's endpoints can reuse it without touching
+    /verify's response shape or behavior."""
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return None
+    row = db.execute("SELECT id FROM users WHERE token_hash = ?", (hash_token(token),)).fetchone()
+    return row["id"] if row else None
+
+
+# Presence: where a signed-in user's Casper daemon is currently reachable.
+# Separate from /verify (whose response shape has exact-match test coverage
+# in tests/test_auth_service.py) rather than an extension of it. Not
+# rate-limited, consistent with /verify and /revoke -- Bearer-gated, not
+# brute-forceable the way /login is.
+@app.post("/presence", response_model=PresenceResponse)
+def report_presence(body: PresenceReport, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        db.execute(
+            """
+            INSERT INTO agent_presence (user_id, local_agent_url, workspace, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                local_agent_url = excluded.local_agent_url,
+                workspace = excluded.workspace,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, body.local_agent_url, body.workspace, datetime.now(timezone.utc).isoformat()),
+        )
+        return PresenceResponse(connected=True, local_agent_url=body.local_agent_url, workspace=body.workspace)
+
+
+@app.get("/presence", response_model=PresenceResponse)
+def get_presence(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        row = db.execute(
+            "SELECT local_agent_url, workspace FROM agent_presence WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if not row:
+            return PresenceResponse(connected=False)
+        return PresenceResponse(connected=True, local_agent_url=row["local_agent_url"], workspace=row["workspace"])
+
+
+@app.delete("/presence", response_model=PresenceResponse)
+def clear_presence(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        db.execute("DELETE FROM agent_presence WHERE user_id = ?", (user_id,))
+        return PresenceResponse(connected=False)

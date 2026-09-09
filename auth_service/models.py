@@ -23,3 +23,14 @@ class VerifyResponse(BaseModel):
 
 class RevokeResponse(BaseModel):
     revoked: bool
+
+
+class PresenceReport(BaseModel):
+    local_agent_url: str
+    workspace: str
+
+
+class PresenceResponse(BaseModel):
+    connected: bool
+    local_agent_url: str | None = None
+    workspace: str | None = None

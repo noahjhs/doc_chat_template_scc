@@ -5,7 +5,15 @@ command_log.txt
 app_server.txt
 auth_server.txt
 relay_server.txt
+app_server.dev.txt
+auth_server.dev.txt
+relay_server.dev.txt
 session.json
+
+# Runtime state for .claude/hooks/block-git-commit.sh -- mutable, toggled
+# per-commit by that hook and .git/hooks/post-commit, never meant to be
+# committed itself (the hook script alongside it is real tracked tooling).
+.claude/hooks/allow_git_commit.flag
 
 # Auth service's local SQLite store -- never committed, deploy-time only.
 auth_service/users.db*
