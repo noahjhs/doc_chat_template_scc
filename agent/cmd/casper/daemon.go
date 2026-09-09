@@ -3,7 +3,9 @@ package main
 import (
 	"net/url"
 	"sync"
+	"time"
 
+	"casper-agent/internal/activate"
 	"casper-agent/internal/config"
 	"casper-agent/internal/server"
 	"casper-agent/internal/tunnel"
@@ -157,6 +159,17 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	// through the sign-in flow expects to end up connected, regardless of
 	// whatever the toggle was left at before.
 	d.setEnabled(true)
+	// Re-foregrounds the browser -- see internal/activate's doc comment for
+	// why this exists (a JS-only fix from the browser side didn't hold up).
+	// A short delay first, off the goroutine handling this event, so it
+	// doesn't compete with whatever's still settling right after the OS
+	// just delivered this Apple Event (and so a slow/failing activation
+	// attempt can never block pairing itself).
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		activate.DefaultBrowser()
+		d.logf("Attempted to re-foreground the default browser")
+	}()
 }
 
 // resumeSession is called at startup for a still-valid cached session (see
