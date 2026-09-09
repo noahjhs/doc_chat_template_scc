@@ -12,6 +12,7 @@ from utils.auth import (
     current_token,
     get_presence,
     require_agent_session,
+    require_app_subdomain,
     revoke_token_with_auth_service,
 )
 from utils.branding import NAME, hide_streamlit_chrome, home_link_html
@@ -20,6 +21,7 @@ from utils.browser_nav import click_anchor_js
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
 # identity across the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
+require_app_subdomain()
 
 
 @st.cache_resource

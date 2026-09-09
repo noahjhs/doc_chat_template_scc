@@ -148,6 +148,28 @@ if [ -f build/Casper.icns ]; then
     cp build/Casper.icns "$APP_DIR/Contents/Resources/Casper.icns"
 fi
 
+# Ad-hoc code-sign the whole bundle -- confirmed directly this is a real,
+# necessary fix, not a nicety: Go's linker already ad-hoc-signs the raw
+# executable by itself at link time (a hard requirement for any code to
+# run at all on Apple Silicon), but that per-binary signature doesn't cover
+# the surrounding bundle (Resources/, Info.plist) added after linking.
+# `spctl`/Gatekeeper detects that mismatch on a quarantined (i.e.
+# downloaded) copy and rejects it outright as "damaged" -- an unrecoverable
+# dead end, not just a warning. Re-signing the *whole* bundle here (after
+# every other Contents/ file is in place -- signing has to be the last
+# step, since it seals whatever is present at the time) makes it internally
+# consistent again (`codesign --verify` passes), which downgrades Gatekeeper's
+# reaction to the standard "developer cannot be verified" prompt instead --
+# recoverable via right-click "Open" or a System Settings override, the same
+# experience most unsigned indie Mac apps already have. This does NOT make
+# Gatekeeper (or Chrome's own Safe Browsing download warning) go away
+# entirely -- an ad-hoc signature carries no real, Apple-verified identity.
+# The full fix (no prompts at all) needs a paid Apple Developer ID
+# certificate and notarization, which requires enrolling in Apple's
+# Developer Program -- a real account/cost decision, not something this
+# script can do on its own.
+codesign --force --deep --sign - "$APP_DIR"
+
 cp README_casper.md dist/CasperGo/README.md 2>/dev/null || true
 ZIP_NAME="Casper-macos-go${SUFFIX}.zip"
 rm -f "dist/$ZIP_NAME"

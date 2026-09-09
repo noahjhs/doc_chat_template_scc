@@ -26,6 +26,52 @@ def app_subdomain_url():
     return _base_url(st.secrets["APP_SUBDOMAIN_DOMAIN"])
 
 
+def _current_host():
+    """The Host header of the current request, hostname only (no port) --
+    both www.casperagent.dev/app.casperagent.dev and dev-www/dev-app resolve
+    to this exact same Streamlit deployment (see ~/casper-infra's Cloudflare
+    Tunnel ingress config, not tracked in this repo), so this is the only
+    way a page can tell which of the two it was actually reached through.
+    st.context.headers does case-insensitive lookups (confirmed directly --
+    the header arrives as "Host", not "host"), so .get("host") is safe."""
+    host = st.context.headers.get("host") or ""
+    return host.split(":")[0].strip().lower()
+
+
+def _is_local_host(host):
+    return host in ("", "localhost", "127.0.0.1")
+
+
+def require_www_subdomain():
+    """Gate a www-only page (the landing page, /download): st.stop()s with
+    a plain "not found" if reached via the app subdomain instead. A no-op
+    for localhost (so local dev/testing keeps every page reachable from one
+    plain `streamlit run` instance) and if APP_SUBDOMAIN_DOMAIN isn't
+    configured at all (fail open rather than block real traffic over a
+    config gap)."""
+    host = _current_host()
+    app_host = st.secrets.get("APP_SUBDOMAIN_DOMAIN", "")
+    if _is_local_host(host) or not app_host:
+        return
+    if host == app_host.split(":")[0].strip().lower():
+        st.write("Page not found.")
+        st.stop()
+
+
+def require_app_subdomain():
+    """Gate an app-only page (signin, signup, chat): st.stop()s with a
+    plain "not found" if reached via the www subdomain (or anything else)
+    instead. A no-op for localhost and if APP_SUBDOMAIN_DOMAIN isn't
+    configured -- same reasoning as require_www_subdomain()."""
+    host = _current_host()
+    app_host = st.secrets.get("APP_SUBDOMAIN_DOMAIN", "")
+    if _is_local_host(host) or not app_host:
+        return
+    if host != app_host.split(":")[0].strip().lower():
+        st.write("Page not found.")
+        st.stop()
+
+
 def signup_with_auth_service(auth_domain, username, password):
     """POST /signup. Returns {"username", "token"} on success, or
     {"error": str} -- a taken username, a validation failure, and a network

@@ -1,12 +1,13 @@
 import streamlit as st
 
-from utils.auth import app_subdomain_url
+from utils.auth import app_subdomain_url, require_www_subdomain
 from utils.branding import NAME, TAGLINE, page_header
 
 # The browser tab's actual title (not just the on-page st.title() heading) --
 # every Casper page sets this the same way for a consistent identity across
 # the whole flow.
 st.set_page_config(page_title="Casper", page_icon="👻")
+require_www_subdomain()
 
 page_header(size=100)
 st.caption(TAGLINE)
