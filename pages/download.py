@@ -2,10 +2,11 @@ import os
 
 import streamlit as st
 
-from utils.auth import app_subdomain_url
+from utils.auth import app_subdomain_url, require_www_subdomain
 from utils.branding import NAME, page_header
 
 st.set_page_config(page_title="Casper", page_icon="👻")
+require_www_subdomain()
 
 DIST_DIR = os.path.join(os.path.dirname(__file__), "..", "dist")
 DOWNLOADS = {
