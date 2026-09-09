@@ -44,7 +44,9 @@ class HostVerifyResponse(BaseModel):
 
 class HostPresenceReport(BaseModel):
     local_agent_url: str
-    workspace: str
+    # A set of addressable directories, not one fixed workspace -- may be
+    # empty (nothing added on that host yet).
+    workspace: list[str] = []
 
 
 class HostInfo(BaseModel):
@@ -53,7 +55,7 @@ class HostInfo(BaseModel):
     hostname: str | None = None
     connected: bool
     local_agent_url: str | None = None
-    workspace: str | None = None
+    workspace: list[str] = []
     command_key: str | None = None
     environment_ids: list[int] = []
 

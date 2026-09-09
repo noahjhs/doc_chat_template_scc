@@ -3,7 +3,10 @@
 // casper_tool.py's resolve_path()/ACTION_HANDLERS/run_*() functions. The
 // actual security boundary is resolvePath(): every command funnels through
 // it, and it rejects anything that would resolve (after following symlinks)
-// outside RootDir.
+// outside every one of the Handler's current roots (see AddRoot) -- plural,
+// since a single workspace directory chosen once at startup has given way
+// to a user-managed set of addressable directories, empty until the first
+// one is added.
 package commands
 
 import (
@@ -72,31 +75,109 @@ type ActionError struct {
 
 func (e *ActionError) Error() string { return e.Detail }
 
-// Handler holds the confined-workspace state (the tracked "current
-// directory" commands like cd/ls resolve relative paths against) -- one
-// instance per running agent, guarded by a mutex since the HTTP server
-// dispatches concurrently.
+// Handler holds the confined-workspace state (the set of directories
+// commands are allowed to touch at all, plus the tracked "current
+// directory" cd/relative paths resolve against) -- one instance per
+// running agent, guarded by a mutex since the HTTP server dispatches
+// concurrently. roots starts empty: there's no "choose a workspace folder
+// before the daemon can do anything" step at startup any more (see
+// cmd/casper/main.go) -- every command just fails with a clear "no
+// directories added yet" message until the user adds at least one via the
+// "+" button in the web app (see runAddDirectory), which is now the only
+// way roots ever grows.
 type Handler struct {
-	RootDir string
+	mu    sync.Mutex
+	roots []string
+	cwd   string
 
-	mu         sync.Mutex
-	currentDir string
+	// Both injected at construction (see cmd/casper/main.go) -- kept out of
+	// this package since they're daemon-orchestration concerns (an
+	// OS-specific native folder-picker dialog plus workspace.txt
+	// persistence, and telling the rest of the daemon a new root showed up
+	// so it can re-report presence promptly), not confined-execution ones.
+	// pickAndPersistDir nil (e.g. in tests) makes "add_directory" a clean
+	// "not supported" error rather than a nil-pointer panic.
+	pickAndPersistDir func() (string, error)
+	onRootAdded       func(dir string)
+
+	pickerMu      sync.Mutex
+	pickerPending bool
 }
 
-func New(rootDir string) *Handler {
-	return &Handler{RootDir: rootDir, currentDir: rootDir}
+func New(pickAndPersistDir func() (string, error), onRootAdded func(dir string)) *Handler {
+	return &Handler{pickAndPersistDir: pickAndPersistDir, onRootAdded: onRootAdded}
 }
 
 func (h *Handler) getCwd() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.currentDir
+	return h.cwd
 }
 
 func (h *Handler) setCwd(dir string) {
 	h.mu.Lock()
-	h.currentDir = dir
+	h.cwd = dir
 	h.mu.Unlock()
+}
+
+// Roots returns a snapshot of the currently confined directories.
+func (h *Handler) Roots() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.roots...)
+}
+
+// AddRoot registers dir (already resolved to an absolute, symlink-free,
+// existing-directory form -- see config.AddWorkspaceDir) as a new confined
+// root, and switches the current directory to it. Idempotent. Safe to call
+// directly (e.g. at startup, for each already-persisted directory) as well
+// as from runAddDirectory's background goroutine.
+func (h *Handler) AddRoot(dir string) {
+	h.mu.Lock()
+	for _, r := range h.roots {
+		if r == dir {
+			h.cwd = dir
+			h.mu.Unlock()
+			return
+		}
+	}
+	h.roots = append(h.roots, dir)
+	h.cwd = dir
+	h.mu.Unlock()
+	if h.onRootAdded != nil {
+		h.onRootAdded(dir)
+	}
+}
+
+// isConfined reports whether resolved is inside (or is exactly) one of the
+// current roots. With zero roots this is unconditionally false -- the
+// empty-roots case gets its own clearer error message in resolvePath.
+func (h *Handler) isConfined(resolved string) bool {
+	h.mu.Lock()
+	roots := h.roots
+	h.mu.Unlock()
+	for _, root := range roots {
+		if resolved == root || strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// relativeToRoot finds whichever root contains path and returns path
+// relative to it (for grep/find's match output) -- falls back to the
+// absolute path in the (should-be-unreachable, since every caller already
+// passed confinement) case that no root actually contains it.
+func (h *Handler) relativeToRoot(path string) string {
+	h.mu.Lock()
+	roots := append([]string(nil), h.roots...)
+	h.mu.Unlock()
+	for _, root := range roots {
+		if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	return path
 }
 
 func expandUser(path string) string {
@@ -156,7 +237,7 @@ func realpath(path string) (string, error) {
 
 // resolvePath is the security boundary every handler below funnels through.
 // Resolves path (absolute, or relative to the tracked current directory) and
-// confirms the result stays inside h.RootDir.
+// confirms the result stays inside one of the current roots.
 func (h *Handler) resolvePath(path string, mustExist, mustBeDir bool) (string, error) {
 	base := h.getCwd()
 	expanded := expandUser(path)
@@ -174,8 +255,12 @@ func (h *Handler) resolvePath(path string, mustExist, mustBeDir bool) (string, e
 		return "", &ActionError{Detail: fmt.Sprintf("No such file or directory: %s", joined)}
 	}
 
-	if resolved != h.RootDir && !strings.HasPrefix(resolved, h.RootDir+string(os.PathSeparator)) {
-		return "", &ActionError{Detail: fmt.Sprintf("Path is outside the allowed directory: %s", h.RootDir)}
+	if !h.isConfined(resolved) {
+		roots := h.Roots()
+		if len(roots) == 0 {
+			return "", &ActionError{Detail: "No directories added yet -- add one first (the \"+\" button in the workspace browser)."}
+		}
+		return "", &ActionError{Detail: fmt.Sprintf("Path is outside the allowed directories: %s", strings.Join(roots, ", "))}
 	}
 	if mustExist {
 		if _, err := os.Stat(resolved); err != nil {
@@ -254,7 +339,61 @@ func (h *Handler) runGit(req *Request) (Result, error) {
 // --- Navigation ------------------------------------------------------------
 
 func (h *Handler) runPwd(_ *Request) (Result, error) {
+	if len(h.Roots()) == 0 {
+		return h.fail("No directories added yet -- add one first (the \"+\" button in the workspace browser)."), nil
+	}
 	return h.ok(h.getCwd(), ""), nil
+}
+
+// runListDirectories reports every currently confined root -- how the
+// model (and the "+" button's poll loop, indirectly via presence
+// reporting -- see cmd/casper/daemon.go) can see what's actually
+// addressable right now, since there's no single fixed workspace any
+// more.
+func (h *Handler) runListDirectories(_ *Request) (Result, error) {
+	roots := h.Roots()
+	if len(roots) == 0 {
+		return h.ok("No directories added yet.", ""), nil
+	}
+	return h.ok(strings.Join(roots, "\n"), ""), nil
+}
+
+// runAddDirectory triggers the native folder-picker on the machine this
+// daemon runs on. Deliberately not part of run_local_command's action
+// enum (see COMMAND_CATEGORIES in pages/chat.py) -- the model shouldn't be
+// able to pop a dialog up on the user's screen unprompted; only the web
+// app's own "+" button calls this. Runs the (potentially long-lived --
+// however long the user takes to respond) picker in a background
+// goroutine rather than blocking the request/response: the relay times
+// out /api/command after 15s (see agent/internal/tunnel's timeoutFor),
+// which a human choosing a folder can easily exceed. The caller is
+// expected to poll (e.g. by re-checking presence/workspace state) rather
+// than wait on this response for the actual chosen directory.
+func (h *Handler) runAddDirectory(_ *Request) (Result, error) {
+	if h.pickAndPersistDir == nil {
+		return Result{}, &ActionError{Detail: "Adding directories isn't supported on this platform."}
+	}
+	h.pickerMu.Lock()
+	if h.pickerPending {
+		h.pickerMu.Unlock()
+		return h.fail("A folder picker is already open on this machine -- finish or cancel it first."), nil
+	}
+	h.pickerPending = true
+	h.pickerMu.Unlock()
+
+	go func() {
+		defer func() {
+			h.pickerMu.Lock()
+			h.pickerPending = false
+			h.pickerMu.Unlock()
+		}()
+		dir, err := h.pickAndPersistDir()
+		if err != nil || dir == "" {
+			return // cancelled, or a real error -- either way, nothing to add
+		}
+		h.AddRoot(dir)
+	}()
+	return h.ok("Folder picker opened on the local machine -- waiting for a folder to be chosen.", ""), nil
 }
 
 func (h *Handler) runCd(req *Request) (Result, error) {
@@ -340,7 +479,7 @@ func (h *Handler) runTree(req *Request) (Result, error) {
 
 // --- Management: intentionally no recursive delete -- "rm" only removes a
 // file, "rmdir" only an already-empty directory, same as the real shell
-// builtins. Combined with RootDir confinement, that caps the worst case to
+// builtins. Combined with root confinement, that caps the worst case to
 // "delete one file/empty dir inside the allowed tree", never a recursive
 // wipe. ----------------------------------------------------------------------
 
@@ -671,7 +810,7 @@ func (h *Handler) runGrep(req *Request) (Result, error) {
 		}
 		for lineno, line := range lines {
 			if regex.MatchString(line) {
-				rel, _ := filepath.Rel(h.RootDir, filePath)
+				rel := h.relativeToRoot(filePath)
 				matches = append(matches, fmt.Sprintf("%s:%d: %s", rel, lineno+1, strings.TrimRight(line, "\n")))
 				if len(matches) >= req.Limit {
 					break
@@ -705,8 +844,7 @@ func (h *Handler) runFind(req *Request) (Result, error) {
 			return filepath.SkipAll
 		}
 		if ok, _ := filepath.Match(pattern, info.Name()); ok {
-			rel, _ := filepath.Rel(h.RootDir, p)
-			matches = append(matches, rel)
+			matches = append(matches, h.relativeToRoot(p))
 		}
 		return nil
 	})
@@ -759,6 +897,10 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 		return h.runReadFile(req)
 	case "write_file":
 		return h.runWriteFile(req)
+	case "list_directories":
+		return h.runListDirectories(req)
+	case "add_directory":
+		return h.runAddDirectory(req)
 	default:
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"casper-agent/internal/activate"
+	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/server"
@@ -20,13 +21,13 @@ import (
 // relay tunnel down), signed in + on (tunnel up) -- and the menu items that
 // reflect them. One instance for the process's whole lifetime.
 type daemonState struct {
-	srv          *server.Server
-	relayDomain  string
-	authDomain   string
-	routingKey   string
-	port         int
-	workspaceDir string
-	logf         func(format string, args ...any)
+	srv         *server.Server
+	cmdHandler  *commands.Handler // for Roots() -- presence reports the *current* set, which can grow at runtime (see commands.Handler.AddRoot)
+	relayDomain string
+	authDomain  string
+	routingKey  string
+	port        int
+	logf        func(format string, args ...any)
 
 	mu      sync.Mutex
 	tun     *tunnel.Tunnel
@@ -50,16 +51,27 @@ type daemonState struct {
 	mSignOut *systray.MenuItem
 }
 
-func newDaemonState(srv *server.Server, relayDomain, authDomain, routingKey string, port int, workspaceDir string, logf func(format string, args ...any)) *daemonState {
+func newDaemonState(srv *server.Server, cmdHandler *commands.Handler, relayDomain, authDomain, routingKey string, port int, logf func(format string, args ...any)) *daemonState {
 	return &daemonState{
-		srv:          srv,
-		relayDomain:  relayDomain,
-		authDomain:   authDomain,
-		routingKey:   routingKey,
-		port:         port,
-		workspaceDir: workspaceDir,
-		logf:         logf,
-		enabled:      config.LoadEnabled(),
+		srv:         srv,
+		cmdHandler:  cmdHandler,
+		relayDomain: relayDomain,
+		authDomain:  authDomain,
+		routingKey:  routingKey,
+		port:        port,
+		logf:        logf,
+		enabled:     config.LoadEnabled(),
+	}
+}
+
+// reportPresenceNow is the on-demand counterpart to setEnabled's own
+// presence push -- called whenever the set of addressable directories
+// itself changes (see commands.Handler's onRootAdded, wired in main.go),
+// so the web app's workspace browser doesn't have to wait for some other
+// trigger to see a just-added directory. A no-op while signed out.
+func (d *daemonState) reportPresenceNow() {
+	if deviceToken := d.getDeviceToken(); deviceToken != "" {
+		go d.reportPresence(deviceToken)
 	}
 }
 
@@ -248,7 +260,7 @@ func (d *daemonState) reportPresence(deviceToken string) {
 	if tunURL == "" {
 		return
 	}
-	if unauthorized := config.ReportPresence(d.authDomain, deviceToken, tunURL, d.workspaceDir); unauthorized {
+	if unauthorized := config.ReportPresence(d.authDomain, deviceToken, tunURL, d.cmdHandler.Roots()); unauthorized {
 		d.logf("Device session no longer recognized by the auth service -- signing out locally")
 		d.stopTunnel()
 		d.srv.SetAPIKey("")

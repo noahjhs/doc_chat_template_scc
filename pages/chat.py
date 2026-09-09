@@ -82,7 +82,7 @@ hide_streamlit_chrome()
 # imported. Keep them in sync by hand.
 COMMAND_CATEGORIES = {
     "Git": ["status", "branch", "log"],
-    "Navigation": ["pwd", "cd", "ls", "tree"],
+    "Navigation": ["pwd", "cd", "ls", "tree", "list_directories"],
     "Management": ["mkdir", "touch", "cp", "mv", "rm", "rmdir"],
     "Viewing & Searching": ["cat", "less", "head", "tail", "grep", "find"],
 }
@@ -145,7 +145,7 @@ def _build_local_agent_configs(connected_hosts):
             "host_id": h["host_id"],
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
-            "workspace": h.get("workspace", ""),
+            "workspace": h.get("workspace") or [],
         }
     return configs
 
@@ -220,6 +220,14 @@ def _fetch_local_json(config, action, **kwargs):
         return response.json()
     except requests.RequestException as e:
         return {"success": False, "stdout": "", "stderr": str(e)}
+
+
+def _dir_label(path):
+    """The trailing path component of an absolute directory path (from
+    either OS's separator), for a short expander label -- falls back to
+    the full path for a root-ish path with no basename (e.g. "/")."""
+    name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return name or path
 
 
 def _parse_tree_output(stdout):
@@ -338,26 +346,88 @@ with st.sidebar:
     selected_config = local_agent_configs.get(selected_host_label)
     st.subheader("Workspace")
     if selected_config is None:
-        st.caption("Select a connected host above to browse its workspace.")
+        st.caption("Select a connected host above to browse its directories.")
     else:
-        # Cached per host rather than re-fetched on every rerun (every chat
-        # message would otherwise re-walk the whole tree) -- a single
-        # `tree` call already returns the full depth-4 structure in one
-        # request (see agent/internal/commands/commands.go's runTree), so
-        # this is one fetch per host per browser session, refreshed only
-        # on demand.
-        cache_key = f"_tree_{selected_host_id}"
-        if cache_key not in st.session_state:
-            with st.spinner("Loading workspace..."):
-                st.session_state[cache_key] = _fetch_local_json(selected_config, "tree")
-        tree_result = st.session_state[cache_key]
-        if tree_result.get("success"):
-            _render_tree(_parse_tree_output(tree_result.get("stdout", "")))
+        directories = selected_config.get("workspace") or []
+
+        def _start_add_directory():
+            # Fast, fire-and-forget -- the daemon opens the native picker
+            # in its own background goroutine and returns immediately (see
+            # agent/internal/commands's runAddDirectory), rather than
+            # blocking on however long the user takes to respond, so doing
+            # this inline in the click handler (unlike _start_sign_out's
+            # flag-and-rerun pattern) doesn't stall the click.
+            result = _fetch_local_json(selected_config, "add_directory")
+            if not result.get("success"):
+                st.session_state["_add_directory_error"] = result.get("stderr") or "Couldn't open the folder picker."
+                st.session_state.pop("_add_directory_pending", None)
+            else:
+                st.session_state["_add_directory_pending"] = selected_host_id
+                st.session_state.pop("_add_directory_error", None)
+
+        st.button("➕ Add directory", on_click=_start_add_directory, key="add_directory_button")
+
+        if st.session_state.get("_add_directory_error"):
+            st.error(st.session_state.pop("_add_directory_error"))
+
+        if st.session_state.get("_add_directory_pending") == selected_host_id:
+            # A native dialog just opened on the *selected host's* machine
+            # -- not necessarily this browser's own. Brief poll (mirrors
+            # the hosts retry-loop above) for the fast case where it was
+            # answered right away; the realistic case is a human needs a
+            # moment to switch apps and pick a folder, so this expects to
+            # usually fall through to the manual "Check again" below.
+            found = False
+            with st.spinner("Waiting for a folder to be chosen on the local machine..."):
+                previous_count = len(directories)
+                for attempt in range(6):
+                    fresh = list_hosts(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
+                    fresh_host = next(
+                        (h for h in (fresh or {}).get("hosts", []) if h["host_id"] == selected_host_id), None
+                    )
+                    if fresh_host and len(fresh_host.get("workspace") or []) > previous_count:
+                        found = True
+                        break
+                    if attempt < 5:
+                        time.sleep(1)
+            if found:
+                st.session_state.pop("_add_directory_pending", None)
+                st.session_state.pop("_hosts", None)
+                st.rerun()
+            else:
+                st.caption(
+                    "Still waiting -- check the local machine for a folder-picker dialog, "
+                    "choose a folder, then click below."
+                )
+                if st.button("Check again", key="check_add_directory"):
+                    st.session_state.pop("_hosts", None)
+                    st.rerun()
+
+        if not directories:
+            st.caption("No directories added yet on this host.")
         else:
-            st.caption(f"Couldn't load the workspace: {tree_result.get('stderr') or 'unknown error'}")
-        if st.button("Refresh workspace", key="refresh_workspace"):
-            st.session_state.pop(cache_key, None)
-            st.rerun()
+            for directory in directories:
+                with st.expander(f"📁 {_dir_label(directory)}", expanded=False):
+                    # Cached per (host, directory) rather than re-fetched on
+                    # every rerun (every chat message would otherwise
+                    # re-walk every directory's tree) -- a single `tree`
+                    # call already returns the full depth-4 structure in
+                    # one request (see agent/internal/commands/commands.go's
+                    # runTree), so this is one fetch per directory per
+                    # browser session, refreshed only on demand.
+                    cache_key = f"_tree_{selected_host_id}_{directory}"
+                    if cache_key not in st.session_state:
+                        with st.spinner("Loading..."):
+                            st.session_state[cache_key] = _fetch_local_json(selected_config, "tree", path=directory)
+                    tree_result = st.session_state[cache_key]
+                    if tree_result.get("success"):
+                        _render_tree(_parse_tree_output(tree_result.get("stdout", "")))
+                    else:
+                        st.caption(f"Couldn't load: {tree_result.get('stderr') or 'unknown error'}")
+            if st.button("Refresh directories", key="refresh_workspace"):
+                for directory in directories:
+                    st.session_state.pop(f"_tree_{selected_host_id}_{directory}", None)
+                st.rerun()
 
     st.page_link("pages/environments.py", label="Manage hosts & Environments")
 
@@ -366,7 +436,7 @@ with st.sidebar:
     for category, commands in COMMAND_CATEGORIES.items():
         with st.expander(category):
             st.markdown("\n".join(f"- `{cmd}`" for cmd in commands))
-    st.caption(f"Confined to the directory tree {NAME} runs in, on each machine.")
+    st.caption("Confined to whichever directories have been added on each machine (see Workspace above).")
     if local_agent_configs:
         st.caption(f"🔧 {NAME} connected and ready to run.")
     else:
@@ -401,12 +471,15 @@ LOCAL_AGENT_TOOL = {
     "description": (
         "Run a command on the user's local machine via Casper, their local "
         "agent — not arbitrary shell access, but a fixed, allowlisted set "
-        "of commands, confined to the directory tree the agent server runs "
-        "in (it can't read, write, or navigate outside that tree). "
-        "Categories: Git (status/branch/log), Navigation (pwd/cd/ls/tree), "
-        "Management (mkdir/touch/cp/mv/rm/rmdir — 'rm' only deletes a file "
-        "and 'rmdir' only an already-empty directory, never recursively), "
-        "and Viewing & Searching (cat/less/head/tail/grep/find)."
+        "of commands, confined to whichever directories the user has "
+        "explicitly added on that machine (it can't read, write, or "
+        "navigate outside those trees; use 'list_directories' to see what's "
+        "currently addressable — there may be none yet). "
+        "Categories: Git (status/branch/log), Navigation "
+        "(pwd/cd/ls/tree/list_directories), Management (mkdir/touch/cp/mv/"
+        "rm/rmdir — 'rm' only deletes a file and 'rmdir' only an "
+        "already-empty directory, never recursively), and Viewing & "
+        "Searching (cat/less/head/tail/grep/find)."
     ),
     "parameters": {
         "type": "object",
@@ -517,13 +590,15 @@ active_tools = TOOLS + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs
 if "messages" not in st.session_state:
     st.session_state.messages = []
     # Only worth a proactive welcome message when there's exactly one
-    # connected machine to name -- with several, "your workspace is X"
+    # connected machine to name -- with several, "your directories are X"
     # would just be misleading about which one.
     if len(local_agent_configs) == 1:
         (only_config,) = local_agent_configs.values()
-        if only_config.get("workspace"):
+        directories = only_config.get("workspace") or []
+        if directories:
+            plural = "y is" if len(directories) == 1 else "ies are"
             st.session_state.messages.append(
-                {"role": "assistant", "content": f"Your workspace is {only_config['workspace']}"}
+                {"role": "assistant", "content": f"Your director{plural} {', '.join(directories)}"}
             )
 
 # The Responses API tracks conversation history server-side, keyed off the

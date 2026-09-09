@@ -112,26 +112,39 @@ def test_pair_then_list(client):
     assert body["label"] == "Erin's Mac"
     assert body["device_token"] and body["command_key"]
 
-    # not yet reported reachable -- listed, but disconnected
+    # not yet reported reachable -- listed, but disconnected, no directories yet
     hosts = client.get("/hosts", headers=headers).json()["hosts"]
     assert len(hosts) == 1
     assert hosts[0]["label"] == "Erin's Mac"
     assert hosts[0]["connected"] is False
+    assert hosts[0]["workspace"] == []
 
     device_headers = {"Authorization": f"Bearer {body['device_token']}"}
     assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": True}
 
     presence = client.post(
         "/hosts/presence",
-        json={"local_agent_url": "https://relay.example/agent/erin", "workspace": "/Users/erin/project"},
+        json={
+            "local_agent_url": "https://relay.example/agent/erin",
+            "workspace": ["/Users/erin/project", "/Users/erin/other-project"],
+        },
         headers=device_headers,
     )
     assert presence.status_code == 200
+    assert presence.json()["workspace"] == ["/Users/erin/project", "/Users/erin/other-project"]
 
     hosts = client.get("/hosts", headers=headers).json()["hosts"]
     assert hosts[0]["connected"] is True
     assert hosts[0]["local_agent_url"] == "https://relay.example/agent/erin"
     assert hosts[0]["command_key"] == body["command_key"]
+    assert hosts[0]["workspace"] == ["/Users/erin/project", "/Users/erin/other-project"]
+
+    # toggling reachability off clears the directory list too, same as
+    # local_agent_url -- both reflect "nothing currently reachable/known",
+    # not "still remembered while disconnected"
+    cleared = client.delete("/hosts/presence", headers=device_headers)
+    assert cleared.json()["workspace"] == []
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["workspace"] == []
 
 
 def test_pair_is_idempotent_for_the_same_user(client):
@@ -206,7 +219,7 @@ def test_signout_all_clears_attachment_not_history(client):
     device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
     client.post(
         "/hosts/presence",
-        json={"local_agent_url": "https://relay.example/agent/jack", "workspace": "/tmp/ws"},
+        json={"local_agent_url": "https://relay.example/agent/jack", "workspace": ["/tmp/ws"]},
         headers=device_headers,
     )
 

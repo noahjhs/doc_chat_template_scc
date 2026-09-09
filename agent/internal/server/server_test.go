@@ -13,7 +13,7 @@ import (
 )
 
 func newTestServer() *Server {
-	return New("initial-key", commands.New("/tmp"), log.New(logDiscard{}, "", 0))
+	return New("initial-key", commands.New(nil, nil), log.New(logDiscard{}, "", 0))
 }
 
 type logDiscard struct{}

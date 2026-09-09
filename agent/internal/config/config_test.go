@@ -54,38 +54,63 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceDir_EnvOverride(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CONTROL_TOOL_WORKSPACE", dir)
-	got, err := ResolveWorkspaceDir()
+func TestLoadWorkspaceDirs_EmptyWhenNeverSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := LoadWorkspaceDirs()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	resolved, _ := filepath.EvalSymlinks(dir)
-	if got != resolved {
-		t.Fatalf("expected %s, got %s", resolved, got)
+	if len(got) != 0 {
+		t.Fatalf("expected no directories yet, got %v", got)
 	}
 }
 
-func TestResolveWorkspaceDir_SavedPointer(t *testing.T) {
+func TestLoadWorkspaceDirs_ReadsSavedEntriesOnePerLine(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	workspace := t.TempDir()
+	dirA, dirB := t.TempDir(), t.TempDir()
 
 	cfgDir, err := AppConfigDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "workspace.txt"), []byte(workspace), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "workspace.txt"), []byte(dirA+"\n"+dirB+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := ResolveWorkspaceDir()
+	got, err := LoadWorkspaceDirs()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	resolved, _ := filepath.EvalSymlinks(workspace)
-	if got != resolved {
-		t.Fatalf("expected saved workspace %s, got %s", resolved, got)
+	resolvedA, _ := filepath.EvalSymlinks(dirA)
+	resolvedB, _ := filepath.EvalSymlinks(dirB)
+	if len(got) != 2 || got[0] != resolvedA || got[1] != resolvedB {
+		t.Fatalf("expected [%s %s], got %v", resolvedA, resolvedB, got)
+	}
+}
+
+func TestLoadWorkspaceDirs_DropsEntriesThatNoLongerExist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stillThere := t.TempDir()
+	gone := filepath.Join(home, "deleted-dir")
+
+	cfgDir, err := AppConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "workspace.txt"), []byte(gone+"\n"+stillThere+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadWorkspaceDirs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resolved, _ := filepath.EvalSymlinks(stillThere)
+	if len(got) != 1 || got[0] != resolved {
+		t.Fatalf("expected only %s to survive, got %v", resolved, got)
 	}
 }

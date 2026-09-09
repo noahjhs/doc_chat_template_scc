@@ -31,50 +31,85 @@ func workspaceFilePath() (string, error) {
 	return filepath.Join(dir, "workspace.txt"), nil
 }
 
-// ResolveWorkspaceDir is the confined workspace root. Checks, in order:
-// CONTROL_TOOL_WORKSPACE (env override -- for tests/CI/dev, so this never
-// blocks on a GUI dialog in a non-interactive run), then the remembered
-// pointer in workspace.txt inside AppConfigDir(), then prompts via a native
-// folder-picker dialog if neither is set or the remembered folder no longer
-// exists -- persisting whatever's chosen back to workspace.txt so later runs
-// are silent.
-//
-// Importing this package at all risks triggering that dialog the moment
-// ResolveWorkspaceDir is called -- callers in a non-interactive context
-// (tests, CI) must set CONTROL_TOOL_WORKSPACE first.
-func ResolveWorkspaceDir() (string, error) {
-	if v := os.Getenv("CONTROL_TOOL_WORKSPACE"); v != "" {
-		if resolved, err := filepath.EvalSymlinks(v); err == nil {
-			return resolved, nil
-		}
-		return v, nil
-	}
-
+// LoadWorkspaceDirs returns the persisted set of confined directories --
+// one per line in workspace.txt, possibly empty (no file yet, or every
+// remembered entry has since been deleted/unmounted). Unlike the old
+// ResolveWorkspaceDir, this never blocks on a native dialog and never
+// writes anything -- the daemon now starts with whatever's already been
+// added, even zero directories, rather than requiring a folder choice
+// before it can do anything at all (see AddWorkspaceDir for how a
+// directory actually gets added, on demand from the web app's "+"
+// button). A line whose directory no longer exists is silently dropped,
+// the same "remembered folder no longer exists" fallback the old
+// single-directory version had, just per-entry instead of all-or-nothing.
+func LoadWorkspaceDirs() ([]string, error) {
 	workspaceFile, err := workspaceFilePath()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if data, readErr := os.ReadFile(workspaceFile); readErr == nil {
-		saved := strings.TrimSpace(string(data))
-		if saved != "" {
-			if info, statErr := os.Stat(saved); statErr == nil && info.IsDir() {
-				if resolved, err := filepath.EvalSymlinks(saved); err == nil {
-					return resolved, nil
-				}
-				return saved, nil
-			}
+	data, err := os.ReadFile(workspaceFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		info, statErr := os.Stat(line)
+		if statErr != nil || !info.IsDir() {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(line); err == nil {
+			dirs = append(dirs, resolved)
+		} else {
+			dirs = append(dirs, line)
 		}
 	}
+	return dirs, nil
+}
 
+// saveWorkspaceDirs overwrites workspace.txt with exactly dirs, one per
+// line.
+func saveWorkspaceDirs(dirs []string) error {
+	workspaceFile, err := workspaceFilePath()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(workspaceFile, []byte(strings.Join(dirs, "\n")), 0o644)
+}
+
+// AddWorkspaceDir prompts via a native folder-picker dialog and, if the
+// user actually chose a folder (rather than cancelling), persists it
+// alongside whatever directories are already remembered and returns its
+// resolved path. Returns ("", nil) -- not an error -- on cancellation, so
+// callers can tell "nothing to add" apart from a real failure. Blocks for
+// as long as the dialog is on screen; callers on a request-handling path
+// with a timeout (see commands.Handler.runAddDirectory) must run this in
+// a goroutine, not inline.
+func AddWorkspaceDir() (string, error) {
 	chosen, err := chooseWorkspaceFolder()
 	if err != nil {
-		return "", err
+		return "", nil
 	}
 	resolved, err := filepath.EvalSymlinks(chosen)
 	if err != nil {
 		resolved = chosen
 	}
-	if err := os.WriteFile(workspaceFile, []byte(resolved), 0o644); err != nil {
+	existing, err := LoadWorkspaceDirs()
+	if err != nil {
+		return "", err
+	}
+	for _, d := range existing {
+		if d == resolved {
+			return resolved, nil
+		}
+	}
+	if err := saveWorkspaceDirs(append(existing, resolved)); err != nil {
 		return "", err
 	}
 	return resolved, nil

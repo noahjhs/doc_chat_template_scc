@@ -41,14 +41,13 @@ func fatal(format string, args ...any) {
 }
 
 func main() {
-	// Registered before anything else -- in particular, before
-	// config.ResolveWorkspaceDir() below, which can block on a native
-	// folder-picker dialog, and before systray.Run(). A throwaway spike
-	// confirmed registering this late (even just inside systray's onReady)
-	// reliably misses the Apple Event on a cold launch triggered by the
-	// pairing link itself; registering here catches both that case and the
-	// already-running case. Events that arrive before setup below finishes
-	// just queue here rather than being dropped.
+	// Registered before anything else -- in particular before
+	// systray.Run(). A throwaway spike confirmed registering this late
+	// (even just inside systray's onReady) reliably misses the Apple Event
+	// on a cold launch triggered by the pairing link itself; registering
+	// here catches both that case and the already-running case. Events
+	// that arrive before setup below finishes just queue here rather than
+	// being dropped.
 	pendingPairURLs := make(chan string, 4)
 	if err := urlscheme.Register(func(rawURL string) {
 		select {
@@ -59,14 +58,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Couldn't register the casper:// URL handler: %s\n", err)
 	}
 
-	workspaceDir, err := config.ResolveWorkspaceDir()
-	if err != nil {
-		fatal("Couldn't resolve a workspace directory: %s", err)
-	}
-
+	// No workspace folder chosen (or even choosable) at startup any more --
+	// addressable directories are now added on demand, later, via the web
+	// app's "+" button (see internal/commands.Handler.AddRoot and its
+	// runAddDirectory), so the log file's default location moves to
+	// AppConfigDir() (already used for session.json etc.) instead of
+	// living inside whatever the workspace happened to be.
 	logPath := os.Getenv("CONTROL_TOOL_LOG_FILE")
 	if logPath == "" {
-		logPath = filepath.Join(workspaceDir, "command_log.txt")
+		cfgDir, err := config.AppConfigDir()
+		if err != nil {
+			fatal("Couldn't resolve a config directory: %s", err)
+		}
+		logPath = filepath.Join(cfgDir, "command_log.txt")
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -96,11 +100,43 @@ func main() {
 		fatal("Couldn't set up a relay routing key: %s", err)
 	}
 
-	cmdHandler := commands.New(workspaceDir)
+	// state is assigned below, after cmdHandler -- but onRootAdded (called
+	// from inside cmdHandler, possibly from its own background goroutine
+	// the moment a folder picker resolves) needs to reach it to push a
+	// fresh presence report. Declared first and closed over by reference
+	// rather than reordering the two: newDaemonState itself needs srv,
+	// which needs cmdHandler, which needs this callback -- a genuine
+	// three-way cycle with no dependency-free starting point.
+	var state *daemonState
+	cmdHandler := commands.New(config.AddWorkspaceDir, func(dir string) {
+		logf("Added workspace directory: %s", dir)
+		if state != nil {
+			state.reportPresenceNow()
+		}
+	})
+
+	// Directories persist across restarts (workspace.txt, via
+	// LoadWorkspaceDirs) -- unless CONTROL_TOOL_WORKSPACE is set, which
+	// takes over entirely for a non-interactive run (dev/CI), exactly
+	// like the old single-workspace version's env override did: skip the
+	// persisted list (and any native dialog) altogether.
+	if envDir := os.Getenv("CONTROL_TOOL_WORKSPACE"); envDir != "" {
+		if resolved, err := filepath.EvalSymlinks(envDir); err == nil {
+			envDir = resolved
+		}
+		cmdHandler.AddRoot(envDir)
+	} else if dirs, err := config.LoadWorkspaceDirs(); err != nil {
+		logf("Couldn't load saved workspace directories: %s", err)
+	} else {
+		for _, dir := range dirs {
+			cmdHandler.AddRoot(dir)
+		}
+	}
+
 	srv := server.New("", cmdHandler, logger)
 	srv.ClearSession = func() { config.ClearSession(logf) }
 
-	state := newDaemonState(srv, relayDomain, authDomain, routingKey, port, workspaceDir, logf)
+	state = newDaemonState(srv, cmdHandler, relayDomain, authDomain, routingKey, port, logf)
 	srv.OnSignOut = state.onSignOut
 
 	go func() {

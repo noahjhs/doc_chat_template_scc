@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestHandler(t *testing.T) (*Handler, string) {
@@ -12,13 +13,15 @@ func newTestHandler(t *testing.T) (*Handler, string) {
 	root := t.TempDir()
 	// Resolve the root itself through realpath -- on macOS, t.TempDir() lives
 	// under /var/folders/..., which is itself a symlink to /private/var/...;
-	// RootDir must be in already-resolved form for the confinement check
+	// a root must be in already-resolved form for the confinement check
 	// (which compares against already-resolved paths) to work at all.
 	resolvedRoot, err := realpath(root)
 	if err != nil {
 		t.Fatalf("realpath(root): %v", err)
 	}
-	return New(resolvedRoot), resolvedRoot
+	h := New(nil, nil)
+	h.AddRoot(resolvedRoot)
+	return h, resolvedRoot
 }
 
 func TestResolvePath_RejectsDotDotEscape(t *testing.T) {
@@ -209,5 +212,122 @@ func TestWriteFileRejectsEscapingRoot(t *testing.T) {
 	}
 	if _, ok := err.(*ActionError); !ok {
 		t.Fatalf("expected an ActionError, got: %v", err)
+	}
+}
+
+func TestNoRootsMeansEveryCommandFails(t *testing.T) {
+	h := New(nil, nil)
+	res, err := h.Dispatch(&Request{Action: "pwd"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Success {
+		t.Fatal("expected pwd to fail with zero roots")
+	}
+	if _, err := h.Dispatch(&Request{Action: "ls", Path: "."}); err == nil {
+		t.Fatal("expected ls to fail (as an ActionError from resolvePath) with zero roots")
+	}
+}
+
+func TestMultipleRootsAreEachConfinedAndIndependentlyAddressable(t *testing.T) {
+	h := New(nil, nil)
+	rootA, err := realpath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootB, err := realpath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AddRoot(rootA)
+	h.AddRoot(rootB)
+
+	if got := h.Roots(); len(got) != 2 || got[0] != rootA || got[1] != rootB {
+		t.Fatalf("expected [%s %s], got %v", rootA, rootB, got)
+	}
+
+	// AddRoot switches cwd to whatever was just added (rootB, most recently).
+	if res, err := h.Dispatch(&Request{Action: "pwd"}); err != nil || res.Stdout != rootB {
+		t.Fatalf("expected cwd to be rootB (%s), got %q (err=%v)", rootB, res.Stdout, err)
+	}
+
+	// A command can still reach rootA by absolute path even while cwd is in rootB.
+	if _, err := os.Create(filepath.Join(rootA, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := h.Dispatch(&Request{Action: "cat", Path: filepath.Join(rootA, "a.txt")}); err != nil || !res.Success {
+		t.Fatalf("expected cat of a file in rootA to succeed while cwd is in rootB: res=%+v err=%v", res, err)
+	}
+
+	// But a path outside both roots is still rejected.
+	if _, err := h.Dispatch(&Request{Action: "cd", Path: t.TempDir()}); err == nil {
+		t.Fatal("expected cd into an unrelated directory to be rejected")
+	}
+}
+
+func TestAddRootIsIdempotent(t *testing.T) {
+	h := New(nil, nil)
+	root, err := realpath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AddRoot(root)
+	h.AddRoot(root)
+	if got := h.Roots(); len(got) != 1 {
+		t.Fatalf("expected AddRoot to be idempotent, got %v", got)
+	}
+}
+
+func TestListDirectories(t *testing.T) {
+	h := New(nil, nil)
+	if res, err := h.Dispatch(&Request{Action: "list_directories"}); err != nil || res.Stdout != "No directories added yet." {
+		t.Fatalf("expected the empty-roots message, got %q (err=%v)", res.Stdout, err)
+	}
+	root, err := realpath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AddRoot(root)
+	res, err := h.Dispatch(&Request{Action: "list_directories"})
+	if err != nil || res.Stdout != root {
+		t.Fatalf("expected %q, got %q (err=%v)", root, res.Stdout, err)
+	}
+}
+
+func TestAddDirectoryWithoutPickerConfigured(t *testing.T) {
+	h := New(nil, nil)
+	_, err := h.Dispatch(&Request{Action: "add_directory"})
+	if err == nil {
+		t.Fatal("expected add_directory to fail cleanly when no picker was injected")
+	}
+	if _, ok := err.(*ActionError); !ok {
+		t.Fatalf("expected an ActionError, got: %v", err)
+	}
+}
+
+func TestAddDirectoryViaInjectedPicker(t *testing.T) {
+	root, err := realpath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := make(chan string, 1)
+	h := New(
+		func() (string, error) { return root, nil },
+		func(dir string) { added <- dir },
+	)
+	res, err := h.Dispatch(&Request{Action: "add_directory"})
+	if err != nil || !res.Success {
+		t.Fatalf("expected add_directory to report success immediately: res=%+v err=%v", res, err)
+	}
+	select {
+	case got := <-added:
+		if got != root {
+			t.Fatalf("onRootAdded called with %q, want %q", got, root)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onRootAdded was never called")
+	}
+	if got := h.Roots(); len(got) != 1 || got[0] != root {
+		t.Fatalf("expected the picked directory to be added, got %v", got)
 	}
 }

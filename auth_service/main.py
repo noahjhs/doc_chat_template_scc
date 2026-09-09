@@ -236,7 +236,7 @@ def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, request
             "device_token_hash": hash_token(device_token),
             "command_key": command_key,
             "local_agent_url": None,
-            "workspace": None,
+            "workspace": [],
         }
     return host_id, device_token, command_key, label, is_new
 
@@ -348,7 +348,7 @@ def clear_host_presence(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with _attached_lock:
         _attached[attached["routing_key"]]["local_agent_url"] = None
-        _attached[attached["routing_key"]]["workspace"] = None
+        _attached[attached["routing_key"]]["workspace"] = []
     return HostInfo(host_id=attached["host_id"], label="", connected=False)
 
 
@@ -388,7 +388,7 @@ def list_hosts(authorization: str = Header(default="")):
             HostInfo(
                 host_id=r["id"], label=r["label"], hostname=r["hostname"], connected=connected,
                 local_agent_url=att["local_agent_url"] if connected else None,
-                workspace=att["workspace"] if connected else None,
+                workspace=att["workspace"] if connected else [],
                 command_key=att["command_key"] if mine else None,
                 environment_ids=envs_by_host.get(r["id"], []),
             )
