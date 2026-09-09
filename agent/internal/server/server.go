@@ -96,9 +96,27 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // (never "*"), set via AllowedOrigin, so an unrelated website's JS can't
 // use this to fingerprint which local port happens to have a Casper
 // daemon on it.
+//
+// Also handles the Private Network Access preflight (Chrome's own
+// restriction, not a general CORS requirement): a page loaded from a
+// public origin -- which is exactly what dev-app.casperagent.dev /
+// app.casperagent.dev look like to the browser, Cloudflare Tunnel or not
+// -- fetching anything on a private/loopback address like localhost first
+// gets an OPTIONS preflight carrying Access-Control-Request-Private-
+// Network: true, and Chrome silently fails the whole fetch (caught by
+// pages/chat.py's probe script's own .catch(), so this failed invisibly)
+// unless the response echoes Access-Control-Allow-Private-Network: true.
+// Confirmed the hard way: the plain-CORS response above alone was not
+// enough for the local-host probe to ever succeed in a real browser.
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	if s.AllowedOrigin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", s.AllowedOrigin)
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	}
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Methods", "GET")
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"routing_key": s.RoutingKey})
 }
