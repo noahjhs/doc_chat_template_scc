@@ -84,7 +84,20 @@ mkdir -p build/go_macos_dist
 # (github.com/getlantern/systray) and the casper:// URL-scheme handler
 # (internal/urlscheme) both bind Cocoa/AppKit directly. Requires Xcode
 # Command Line Tools' clang on the build machine.
-( cd agent && GOOS=darwin GOARCH="$GOARCH" CGO_ENABLED=1 go build -o "../build/go_macos_dist/casper-bin" ./cmd/casper )
+#
+# MACOSX_DEPLOYMENT_TARGET=11.0 -- without this, recent Go/Xcode toolchains
+# default to baking in whatever the build machine's own SDK considers
+# current (confirmed directly: Go 1.27.1 against an Xcode 15.5 SDK produced
+# LC_BUILD_VERSION minos=15.0) as the binary's *minimum* required macOS
+# version, entirely independent of Info.plist's LSMinimumSystemVersion
+# below -- the OS loader enforces the Mach-O load command, not the plist.
+# A binary built on a newer machine then refuses to even launch on any
+# older one ("You can't use this version of the application... with this
+# version of macOS") -- confirmed the hard way against a real machine still
+# on macOS 14. 11.0 (Big Sur) is the actual floor worth targeting for an
+# arm64 build: it's the first macOS release Apple Silicon shipped with, so
+# nothing lower is reachable on this architecture regardless.
+( cd agent && MACOSX_DEPLOYMENT_TARGET=11.0 GOOS=darwin GOARCH="$GOARCH" CGO_ENABLED=1 go build -o "../build/go_macos_dist/casper-bin" ./cmd/casper )
 
 APP_DIR="dist/CasperGo/Casper.app"
 rm -rf "$APP_DIR"
@@ -133,7 +146,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>LSMinimumSystemVersion</key><string>10.13</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSUIElement</key><true/>
   <key>CFBundleURLTypes</key>
   <array><dict>
