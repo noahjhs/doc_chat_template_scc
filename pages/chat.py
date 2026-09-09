@@ -233,22 +233,25 @@ with st.sidebar:
         with st.expander(category):
             st.markdown("\n".join(f"- `{cmd}`" for cmd in commands))
     st.caption(f"Confined to the directory tree {NAME} runs in, on each machine.")
-    if not local_agent_configs:
+    if local_agent_configs:
+        st.caption(f"🔧 {NAME} connected and ready to run.")
+    else:
         st.caption(f"No connected machines in this Environment. Download {NAME} from the home page to add one.")
-    # Manual fallbacks for the machine this browser tab is itself running
-    # on, distinct from the "connected machines" tracked above (which may
-    # be entirely different physical hosts, already paired elsewhere): two
-    # distinct failure modes, both confirmed via a real click-through test
-    # in the original single-host version -- "Reconnect" re-fires the
-    # casper://pair hand-off (for when it truly never reached this
-    # machine's daemon -- wasn't running yet, missed the event); "Check
-    # again" just re-runs the host lookup above (for when pairing *did*
-    # succeed, only moments after this page's one-shot check already gave
-    # up -- the retry loop above covers the common case, but a slow click
-    # through Chrome's "Open Casper?" prompt can still outlast it).
-    reconnect_url = build_pair_url(current_token(), username)
-    st.markdown(f'Running {NAME} on this machine? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
-    st.button("Check again", on_click=_recheck_hosts)
+        # Manual fallbacks for the machine this browser tab is itself
+        # running on, distinct from the "connected machines" tracked above
+        # (which may be entirely different physical hosts, already paired
+        # elsewhere): two distinct failure modes, both confirmed via a real
+        # click-through test in the original single-host version --
+        # "Reconnect" re-fires the casper://pair hand-off (for when it
+        # truly never reached this machine's daemon -- wasn't running yet,
+        # missed the event); "Check again" just re-runs the host lookup
+        # above (for when pairing *did* succeed, only moments after this
+        # page's one-shot check already gave up -- the retry loop above
+        # covers the common case, but a slow click through Chrome's "Open
+        # Casper?" prompt can still outlast it).
+        reconnect_url = build_pair_url(current_token(), username)
+        st.markdown(f'Running {NAME} on this machine? <a href="{reconnect_url}">Reconnect</a>', unsafe_allow_html=True)
+        st.button("Check again", on_click=_recheck_hosts)
 
 # All the built-in Responses API tools that don't need extra setup (unlike
 # file_search, which needs a vector store), plus the local git tool if
