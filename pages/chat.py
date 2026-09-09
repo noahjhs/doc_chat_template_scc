@@ -140,6 +140,7 @@ def _build_local_agent_configs(connected_hosts):
     for h in connected_hosts:
         key = h["label"] if label_counts[h["label"]] == 1 else f"{h['label']} ({h['host_id']})"
         configs[key] = {
+            "host_id": h["host_id"],
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
             "workspace": h.get("workspace", ""),
@@ -196,6 +197,84 @@ def _switch_environment():
     st.session_state["_active_environment_id"] = st.session_state["_environment_selector"]
 
 
+def _fetch_local_json(config, action, **kwargs):
+    """Like call_local_agent below, but returns the parsed response dict
+    (or an error dict in the same {success, stdout, stderr} shape
+    commands.Result already uses) instead of a model-facing string --
+    for UI code that needs to read a result programmatically, namely the
+    workspace browser below. Kept separate from call_local_agent rather
+    than sharing a helper, since the two need genuinely different return
+    shapes for their different callers (model vs. this page's own code)."""
+    try:
+        response = requests.post(
+            f"{config['url']}/api/command",
+            json={"action": action, **kwargs},
+            headers={"X-API-Key": config["api_key"]},
+            timeout=15,
+        )
+        if response.status_code == 401:
+            return {"success": False, "stdout": "", "stderr": "Invalid API key."}
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        return {"success": False, "stdout": "", "stderr": str(e)}
+
+
+def _parse_tree_output(stdout):
+    """Parses the local agent's `tree` action output (2-space indent per
+    depth level, directories suffixed with "/", already capped at depth 4
+    -- see agent/internal/commands/commands.go's runTree) into a nested
+    [{"name", "is_dir", "children"}, ...] structure for rendering as
+    nested expanders below."""
+    root = []
+    stack = [(-1, root)]
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        depth = (len(line) - len(line.lstrip(" "))) // 2
+        name = line.strip()
+        is_dir = name.endswith("/")
+        if is_dir:
+            name = name[:-1]
+        node = {"name": name, "is_dir": is_dir, "children": []}
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        stack[-1][1].append(node)
+        if is_dir:
+            stack.append((depth, node["children"]))
+    return root
+
+
+MAX_TREE_RENDER_DEPTH = 2  # independent of the server's own depth-4 fetch cap -- see below
+MAX_TREE_ENTRIES_PER_DIR = 50
+
+
+def _render_tree(nodes, depth=0):
+    """Renders nested expanders for a parsed tree -- capped shallower than
+    the server's own fetch depth (commands.go's runTree already limits to
+    4), confirmed necessary against a real workspace: Streamlit expanders
+    render their contents into the page regardless of collapsed/expanded
+    state (there's no built-in lazy loading), so eagerly rendering a full
+    depth-4 tree of a large, real directory (e.g. a node_modules/ with 80+
+    entries) means hundreds of sidebar widgets even though the underlying
+    fetch is a single cached request. Deeper levels just show a count
+    instead of recursing further; per-directory entries are similarly
+    capped so one huge flat folder can't blow up the sidebar on its own."""
+    for node in nodes[:MAX_TREE_ENTRIES_PER_DIR]:
+        if node["is_dir"]:
+            with st.expander(f"📁 {node['name']}"):
+                if not node["children"]:
+                    st.caption("(empty)")
+                elif depth < MAX_TREE_RENDER_DEPTH:
+                    _render_tree(node["children"], depth + 1)
+                else:
+                    st.caption(f"{len(node['children'])} item(s) -- open in a local file browser to go deeper.")
+        else:
+            st.caption(f"📄 {node['name']}")
+    if len(nodes) > MAX_TREE_ENTRIES_PER_DIR:
+        st.caption(f"... and {len(nodes) - MAX_TREE_ENTRIES_PER_DIR} more.")
+
+
 with st.sidebar:
     st.markdown(home_link_html(size=32), unsafe_allow_html=True)
     st.button("Sign out", key="sign_out_button", on_click=_start_sign_out)
@@ -214,17 +293,70 @@ with st.sidebar:
             key="_environment_selector",
             on_change=_switch_environment,
         )
-        if active_environment:
-            for host_id in active_environment["host_ids"]:
+        env_host_ids = active_environment["host_ids"] if active_environment else []
+        if env_host_ids:
+            # Click-selectable -- the selection becomes the default target
+            # for local commands the model doesn't name a host for (see
+            # call_local_agent's default_host below), same idea as the
+            # active Environment selector just above it. Re-defaults to
+            # the first host whenever the current selection isn't valid
+            # for this Environment any more (switched Environments, or
+            # never selected yet) -- Streamlit's radio requires its keyed
+            # session_state value to already be one of the options before
+            # it's instantiated.
+            if (
+                "_selected_host_id" not in st.session_state
+                or st.session_state["_selected_host_id"] not in env_host_ids
+            ):
+                st.session_state["_selected_host_id"] = env_host_ids[0]
+
+            def _format_host_option(host_id):
                 host = hosts_by_id.get(host_id)
                 if host is None:
-                    continue
+                    return str(host_id)
                 icon = "🔧" if host.get("connected") else "⚪"
-                st.caption(f"{icon} {host['label']}")
-            if not active_environment["host_ids"]:
-                st.caption("No hosts in this Environment yet.")
+                return f"{icon} {host['label']}"
+
+            st.radio(
+                "Hosts",
+                options=env_host_ids,
+                format_func=_format_host_option,
+                key="_selected_host_id",
+                label_visibility="collapsed",
+            )
+        else:
+            st.caption("No hosts in this Environment yet.")
     else:
         st.caption("No Environments yet.")
+
+    selected_host_id = st.session_state.get("_selected_host_id")
+    selected_host_label = next(
+        (label for label, cfg in local_agent_configs.items() if cfg.get("host_id") == selected_host_id), None
+    )
+    selected_config = local_agent_configs.get(selected_host_label)
+    st.subheader("Workspace")
+    if selected_config is None:
+        st.caption("Select a connected host above to browse its workspace.")
+    else:
+        # Cached per host rather than re-fetched on every rerun (every chat
+        # message would otherwise re-walk the whole tree) -- a single
+        # `tree` call already returns the full depth-4 structure in one
+        # request (see agent/internal/commands/commands.go's runTree), so
+        # this is one fetch per host per browser session, refreshed only
+        # on demand.
+        cache_key = f"_tree_{selected_host_id}"
+        if cache_key not in st.session_state:
+            with st.spinner("Loading workspace..."):
+                st.session_state[cache_key] = _fetch_local_json(selected_config, "tree")
+        tree_result = st.session_state[cache_key]
+        if tree_result.get("success"):
+            _render_tree(_parse_tree_output(tree_result.get("stdout", "")))
+        else:
+            st.caption(f"Couldn't load the workspace: {tree_result.get('stderr') or 'unknown error'}")
+        if st.button("Refresh workspace", key="refresh_workspace"):
+            st.session_state.pop(cache_key, None)
+            st.rerun()
+
     st.page_link("pages/environments.py", label="Manage hosts & Environments")
 
     st.divider()
@@ -316,10 +448,13 @@ LOCAL_AGENT_TOOL = {
                 "type": "string",
                 "enum": list(local_agent_configs.keys()),
                 "description": (
-                    "Which connected machine to run this on. Only needed "
-                    "when more than one is available in the active "
-                    "Environment -- ask the user to clarify if it's "
-                    "ambiguous."
+                    "Which connected machine to run this on. Usually fine "
+                    "to omit -- if the user is talking about a specific "
+                    "one ('on the mini', 'my laptop'), name it explicitly, "
+                    "but otherwise it defaults to whichever host is "
+                    "selected in the sidebar (or the only connected one). "
+                    "Ask the user to clarify only if the system reports "
+                    "it's still ambiguous."
                 ),
             },
         },
@@ -346,18 +481,22 @@ if "previous_response_id" not in st.session_state:
     st.session_state.previous_response_id = None
 
 
-def call_local_agent(local_agent_configs, action, host=None, **kwargs):
+def call_local_agent(local_agent_configs, action, host=None, default_host=None, **kwargs):
     """Call one of the user's connected local agent servers; never raises,
     so a connection failure (or an ambiguous/unknown host) just gets
     reported back to the model as text. host selection isn't in the tool
     schema's "required" list (there's no way to say "required only when
     there's more than one option" in JSON Schema), so ambiguity is enforced
-    here instead."""
+    here instead. default_host is whichever host is currently selected in
+    the sidebar (see the host radio above) -- tried before falling back to
+    asking the model to specify one."""
     if not local_agent_configs:
         return "Local agent error: no connected machines available."
     if host is None:
         if len(local_agent_configs) == 1:
             host = next(iter(local_agent_configs))
+        elif default_host in local_agent_configs:
+            host = default_host
         else:
             available = ", ".join(local_agent_configs)
             return f"Local agent error: multiple machines connected ({available}) -- specify which one via 'host'."
@@ -533,6 +672,7 @@ if prompt := st.chat_input("Chat"):
                             local_agent_configs,
                             action,
                             host=args.get("host"),
+                            default_host=selected_host_label,
                             path=args.get("path"),
                             destination=args.get("destination"),
                             pattern=args.get("pattern"),
