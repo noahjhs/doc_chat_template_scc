@@ -18,16 +18,17 @@ def _render_topbar_css():
     block/key prefix rather than reusing theirs, since the two are meant to
     look visibly different in scale.
 
-    Sizing via transform: scale(2) rather than font-size -- confirmed
-    directly (a previous font-size attempt visibly had no effect at all)
-    that the rendered :material/ icon glyph's own size isn't governed by
-    the surrounding button's font-size the way ordinary text is; a
-    transform scales whatever's actually there regardless of how its size
-    is otherwise determined, so it isn't hostage to that. transform-origin
-    top right on the rightmost (sign-out) icon and top on the gear next to
-    it keeps the visible top-right corner anchored in place as they grow,
-    instead of growing symmetrically outward from center and drifting
-    further from the actual corner.
+    Sizing via zoom rather than font-size (font-size confirmed to have no
+    effect on a :material/ icon glyph's rendered size) or transform (also
+    tried -- confirmed directly to be the wrong tool here: the popover's
+    floating panel is positioned off the *reference div wrapping* the
+    button, and transform: scale is a paint-only effect that doesn't change
+    that div's actual layout size, so the panel opened positioned against
+    the button's small pre-scale footprint -- squarely in the middle of
+    the now visually-much-bigger icon, i.e. "partly obscures the gear").
+    zoom actually resizes the element's real layout box, so anything
+    measuring it (the popover's own positioning math included) sees the
+    true, bigger size and lays out correctly around it.
 
     The whole row is pinned via position: fixed at the browser viewport's
     top-right corner (not just flush against whatever padding the page's
@@ -101,13 +102,16 @@ def _render_topbar_css():
             min-height: 0 !important;
             color: inherit !important;
         }
-        .st-key-topbar_settings_button button {
-            transform: scale(2) !important;
-            transform-origin: top !important;
+        .st-key-topbar_settings_button button, .st-key-topbar_signout_button button {
+            zoom: 2 !important;
         }
-        .st-key-topbar_signout_button button {
-            transform: scale(2) !important;
-            transform-origin: top right !important;
+        /* The popover trigger's own dropdown chevron (rendered next to our
+        gear icon, inside the same button) -- marked aria-hidden="true" in
+        Streamlit's own markup, which doubles as a clean CSS hook to hide
+        it; asked for directly ("the dropdown arrow indicator is
+        overlapping the signout icon"). */
+        .st-key-topbar_settings_button button [aria-hidden="true"] {
+            display: none !important;
         }
         .st-key-topbar_settings_button button:hover, .st-key-topbar_signout_button button:hover,
         .st-key-topbar_settings_button button:focus, .st-key-topbar_signout_button button:focus,
@@ -135,7 +139,7 @@ def render_settings_menu():
     with st.container(key="topbar_row"):
         gear_col, signout_col = st.columns([1, 1])
         with gear_col:
-            with st.popover("", icon=":material/settings:", key="topbar_settings_button", help="Settings"):
+            with st.popover("", icon=":material/settings:", key="topbar_settings_button"):
                 st.page_link("pages/settings_profile.py", label="Profile", icon=":material/person:")
                 st.page_link("pages/settings_security.py", label="Security", icon=":material/lock:")
         with signout_col:

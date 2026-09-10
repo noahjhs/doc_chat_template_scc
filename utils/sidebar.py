@@ -123,7 +123,24 @@ def _render_chrome_css():
     first one this browser has ever seen) so initial_sidebar_state actually
     gets a chance to apply each time. Iterates rather than removing one
     constructed key directly, since the exact <id> isn't a documented/stable
-    value worth depending on."""
+    value worth depending on.
+
+    stExpandSidebarButton's own padding-top: forcing stHeader/stToolbar's
+    height down to auto/0 above (needed so the collapsed header doesn't
+    reserve its native ~headerHeight of dead space above the page) has a
+    side effect: Streamlit's own stSidebarHeader (the sidebar's *own*
+    header, holding the "collapse" arrow when expanded) keeps its native
+    fixed headerHeight box with flex-centered content, so its arrow icon
+    sits vertically centered within a tall box -- but stExpandSidebarButton
+    (the "expand" arrow, shown in stToolbar when collapsed) now sits in a
+    box shrunk to fit the icon exactly, with none of that centering
+    headroom above it. The two arrows are meant to occupy the same visual
+    spot as the sidebar toggles between collapsed/expanded, so this nudges
+    the expand arrow down to match -- confirmed directly (reading both
+    components' own styled-component definitions) they share the same
+    headerHeight token and flex-center alignment otherwise; this is an
+    approximation of the resulting gap, not an exact measurement, so it may
+    still need a small visual tweak."""
     st.html(
         """
         <style>
@@ -135,6 +152,9 @@ def _render_chrome_css():
         }
         [data-testid="stMainMenu"] {
             display: none !important;
+        }
+        [data-testid="stExpandSidebarButton"] {
+            padding-top: 0.75rem !important;
         }
         </style>
         """
