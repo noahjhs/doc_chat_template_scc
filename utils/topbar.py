@@ -80,10 +80,10 @@ def _render_topbar_css():
             width: fit-content !important;
             box-sizing: border-box !important;
             z-index: 999999 !important;
-            padding: 0.4rem 0.6rem !important;
+            padding: 1rem 1.25rem !important;
         }
         .st-key-topbar_row [data-testid="stHorizontalBlock"] {
-            gap: 0.75rem !important;
+            gap: 1.5rem !important;
             justify-content: flex-end !important;
         }
         .st-key-topbar_row [data-testid="stColumn"] {
