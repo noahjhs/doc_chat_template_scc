@@ -203,19 +203,44 @@ TRANSFER_TOOL = {
 
 active_tools = TOOLS + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs else [])
 
+def _build_welcome_message():
+    """A status snapshot of the active Environment/selected host, read
+    straight from the session_state render_sidebar() (utils/sidebar.py)
+    already populated -- rather than plumbing extra return values through
+    it, since every value needed here (hosts, Environments, the active
+    Environment/selected host ids) is already sitting there once it's run."""
+    environments = st.session_state.get("_environments", [])
+    hosts_by_id = {h["host_id"]: h for h in st.session_state.get("_hosts", [])}
+    active_environment = next(
+        (e for e in environments if e["id"] == st.session_state.get("_active_environment_id")), None
+    )
+    environment_name = active_environment["name"] if active_environment else "None"
+    env_host_ids = active_environment["host_ids"] if active_environment else []
+    total_hosts = len(env_host_ids)
+    active_hosts = sum(1 for host_id in env_host_ids if hosts_by_id.get(host_id, {}).get("connected"))
+
+    lines = [
+        "Welcome to Casper!",
+        f'Your environment is "{environment_name}"',
+        f"consisting of {total_hosts} host{'s' if total_hosts != 1 else ''} ({active_hosts} active).",
+    ]
+
+    selected_host = hosts_by_id.get(st.session_state.get("_selected_host_id"))
+    if selected_host is None:
+        lines.append("No host is currently selected.")
+    else:
+        directories = selected_host.get("workspace") or []
+        lines.append(f"The selected host, {selected_host['label']}, has these folders available:")
+        lines.extend(directories if directories else ["(none added yet)"])
+
+    return "\n".join(lines)
+
+
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-    # Only worth a proactive welcome message when there's exactly one
-    # connected machine to name -- with several, "your directories are X"
-    # would just be misleading about which one.
-    if len(local_agent_configs) == 1:
-        (only_config,) = local_agent_configs.values()
-        directories = only_config.get("workspace") or []
-        if directories:
-            plural = "y is" if len(directories) == 1 else "ies are"
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"Your director{plural} {', '.join(directories)}"}
-            )
+    st.session_state.messages = [
+        {"role": "assistant", "content": _build_welcome_message()},
+        {"role": "assistant", "content": "What's on your mind today?"},
+    ]
 
 # The Responses API tracks conversation history server-side, keyed off the
 # previous turn's response id.
