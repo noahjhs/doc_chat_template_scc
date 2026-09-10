@@ -254,25 +254,28 @@ func (d *daemonState) reportPresence(deviceToken string) {
 }
 
 // applyState brings the status-bar icon/menu in line with the current
-// signed-out / signed-in-off / signed-in-on state. Safe to call before the
-// menu exists (onReady calls it once after building the menu, to cover a
-// pairing event that arrived before that point). Note: the "Run on system
-// startup" checkbox (mStartup in main.go) isn't touched here -- it's a
-// system-level preference independent of Casper's own sign-in state, so it
-// stays visible and keeps whatever checked state the user (or the startup
-// prompt) last left it at, regardless of what this method does.
+// running/paused (isEnabled) state. Safe to call before the menu exists
+// (onReady calls it once after building the menu, to cover a pairing event
+// that arrived before that point).
+//
+// Deliberately independent of sign-in state (d.srv.HasAPIKey()) -- an
+// earlier version hid mToggle/mStatus entirely while signed out, which
+// just reads as "the status item is missing" (confirmed directly: reported
+// as "don't see a start/stop item, or a status item" after signing out
+// during testing), and conflates two genuinely separate concerns: whether
+// the relay tunnel is running, and whether anyone's currently paired to
+// this installation. setEnabled/ensureTunnel/stopTunnel never required
+// credentials in the first place (only the presence-reporting call inside
+// them is separately gated on having a device_token) -- this was previously
+// just a visibility choice on top of an already-independent capability, not
+// a real dependency. mToggle and mStatus are both always visible now (set
+// once at creation in onReady, never Hidden here); "Run on system startup"
+// (mStartup in main.go) was already independent of sign-in state and isn't
+// touched here either.
 func (d *daemonState) applyState() {
 	if d.mToggle == nil || d.mStatus == nil {
 		return
 	}
-	if !d.srv.HasAPIKey() {
-		d.mToggle.Hide()
-		d.mStatus.Hide()
-		systray.SetTooltip("Casper — waiting to sign in")
-		return
-	}
-	d.mToggle.Show()
-	d.mStatus.Show()
 	if d.isEnabled() {
 		d.mToggle.SetTitle("Stop")
 		d.mStatus.SetTitle("Service is running")
