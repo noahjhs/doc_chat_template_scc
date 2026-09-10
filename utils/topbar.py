@@ -45,6 +45,25 @@ def _render_topbar_css():
     scale their own padding too) insets the icons a bit from the literal
     corner, per an explicit ask.
 
+    width: fit-content + box-sizing: border-box on the row itself turned
+    out to matter just as much as the position rules above -- without an
+    explicit width, this container was inheriting Streamlit's normal
+    block-level width (effectively 100% of the viewport, since it's
+    position: fixed with right: 0 already pinning one edge). With right:0
+    *and* width:100%, left resolves to 0 too -- the box silently spanned
+    the whole viewport, so its content (flex's default justify-content:
+    flex-start) rendered flush against that box's *left* edge instead of
+    its right one, which is what actually looked like "pinned to the
+    left" (confirmed directly: the fixed positioning itself was working
+    the whole time, right:0 and left:0 were just both simultaneously
+    true). box-sizing: border-box on top of that is why the small padding
+    was pushing it further left, off-screen: content-box (the default)
+    adds padding *on top of* a 100%-wide box, so the border-box was
+    actually wider than the viewport by twice the padding, with the
+    overflow landing on the left. Sizing the row to fit-content removes
+    the ambiguity entirely -- there's no longer any "the box is wider than
+    its visible content" case for either bug to hide in.
+
     [data-testid="stPopoverBody"] is the popover's floating panel -- it
     carries its own generous default min-width (sized for typical popover
     content like forms/date pickers), which is what left visible empty
@@ -58,11 +77,14 @@ def _render_topbar_css():
             top: 0 !important;
             right: 0 !important;
             left: auto !important;
+            width: fit-content !important;
+            box-sizing: border-box !important;
             z-index: 999999 !important;
             padding: 0.4rem 0.6rem !important;
         }
         .st-key-topbar_row [data-testid="stHorizontalBlock"] {
             gap: 0.75rem !important;
+            justify-content: flex-end !important;
         }
         .st-key-topbar_row [data-testid="stColumn"] {
             flex: 0 0 auto !important;
