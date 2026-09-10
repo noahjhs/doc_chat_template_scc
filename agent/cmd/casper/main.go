@@ -9,6 +9,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,16 @@ import (
 	"github.com/getlantern/systray"
 )
 
+// A double-clicked .app bundle never gets these (Finder launches it with no
+// arguments) -- this is for a Terminal-launched binary, or `open
+// Casper.app --args --clear-preferences`, mainly useful for support/testing
+// (resetting a test installation back to its out-of-the-box state without
+// hunting down and deleting individual files under AppConfigDir).
+var clearPreferences = flag.Bool(
+	"clear-preferences", false,
+	"Clear saved preferences (currently just the running/paused toggle) and start fresh, defaulting to running.",
+)
+
 // fatal shows a native error dialog and exits -- used only for startup
 // failures that leave the daemon unable to do anything useful at all (no
 // workspace, no log file, no domains configured). Once past startup, a
@@ -41,6 +52,11 @@ func fatal(format string, args ...any) {
 }
 
 func main() {
+	flag.Parse()
+	if *clearPreferences {
+		config.ClearEnabled()
+	}
+
 	// Registered before anything else -- in particular before
 	// systray.Run(). A throwaway spike confirmed registering this late
 	// (even just inside systray's onReady) reliably misses the Apple Event
@@ -207,7 +223,7 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 	mStatus.Disable()
 	systray.AddSeparator()
 
-	mToggle := systray.AddMenuItem("Start", "Pause/resume the relay connection")
+	mToggle := systray.AddMenuItem("Run", "Pause/resume the relay connection")
 
 	isLoginItem, err := config.IsLoginItem()
 	if err != nil {
@@ -217,7 +233,7 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 	// visible, since "launch Casper at login" is a system-level preference
 	// a user might want set before ever pairing a host.
 	mStartup := systray.AddMenuItemCheckbox(
-		"Run on system startup", "Automatically launch Casper when you log in", isLoginItem,
+		"Include in startup items", "Automatically launch Casper when you log in", isLoginItem,
 	)
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit Casper")
@@ -266,7 +282,7 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 // promptAddToLoginItems asks (via a native, declinable modal -- see
 // internal/dialog.ConfirmWithDontAskAgain) whether to register Casper as a
 // macOS Login Item, so it relaunches automatically after a logout/restart
-// -- otherwise "Run on system startup" would only ever get turned on by a
+// -- otherwise "Include in startup items" would only ever get turned on by a
 // user who happens to notice the menu item themselves.
 func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, args ...any)) {
 	accepted, dontAskAgain := dialog.ConfirmWithDontAskAgain(

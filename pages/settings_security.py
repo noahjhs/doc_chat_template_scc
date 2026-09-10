@@ -83,10 +83,16 @@ for field_key, label in PERMISSION_FIELDS:
         on_change=_make_permission_on_change(field_key),
     )
 
-if st.session_state.get("_profile_error"):
-    st.error(st.session_state.pop("_profile_error"))
-if st.session_state.pop("_profile_saved", False):
-    st.success("Update saved")
+# A fixed-height slot for the save status message -- see
+# pages/settings_profile.py's own copy of this for why (reserved whether or
+# not anything is actually shown in it this rerun, so "← Back to chat"
+# below doesn't jump up/down depending on whether a save just happened).
+st.html("<style>.st-key-save_status_row { min-height: 3rem; }</style>")
+with st.container(key="save_status_row"):
+    if st.session_state.get("_profile_error"):
+        st.error(st.session_state.pop("_profile_error"))
+    if st.session_state.pop("_profile_saved", False):
+        st.success("Update saved")
 
 st.divider()
 st.button("← Back to chat", on_click=lambda: st.switch_page("pages/chat.py"))

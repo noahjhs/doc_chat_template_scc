@@ -25,3 +25,18 @@ func TestSaveEnabled_RoundTrip(t *testing.T) {
 		t.Fatal("expected LoadEnabled to report true after SaveEnabled(true)")
 	}
 }
+
+func TestClearEnabled_ResetsToDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	SaveEnabled(false)
+	if LoadEnabled() {
+		t.Fatal("expected LoadEnabled to report false after SaveEnabled(false)")
+	}
+
+	ClearEnabled()
+	if !LoadEnabled() {
+		t.Fatal("expected LoadEnabled to report true (the default) after ClearEnabled")
+	}
+}

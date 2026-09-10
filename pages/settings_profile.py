@@ -107,7 +107,6 @@ st.text_input(
     key="_sms_number_input",
     on_change=_on_sms_number_change,
     placeholder="(555) 123-4567",
-    help="A 10-digit US phone number -- reformatted automatically once entered.",
 )
 st.checkbox(
     "Allow texts?",
@@ -116,10 +115,18 @@ st.checkbox(
     on_change=_on_sms_notifications_change,
 )
 
-if st.session_state.get("_profile_error"):
-    st.error(st.session_state.pop("_profile_error"))
-if st.session_state.pop("_profile_saved", False):
-    st.success("Update saved")
+# A fixed-height slot for the save status message -- reserved whether or
+# not anything is actually shown in it this rerun, so the "← Back to chat"
+# button below doesn't jump up/down depending on whether a save just
+# happened. Plain st.empty() alone doesn't do this (it collapses to zero
+# height with nothing written into it); the min-height on this specific
+# keyed container is what actually holds the space open.
+st.html("<style>.st-key-save_status_row { min-height: 3rem; }</style>")
+with st.container(key="save_status_row"):
+    if st.session_state.get("_profile_error"):
+        st.error(st.session_state.pop("_profile_error"))
+    if st.session_state.pop("_profile_saved", False):
+        st.success("Update saved")
 
 st.divider()
 st.button("← Back to chat", on_click=lambda: st.switch_page("pages/chat.py"))

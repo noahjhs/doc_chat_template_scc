@@ -43,3 +43,16 @@ func SaveEnabled(enabled bool) {
 	}
 	_ = os.WriteFile(path, []byte(value), 0o644)
 }
+
+// ClearEnabled removes the persisted on/off toggle file entirely, so the
+// next LoadEnabled call falls back to its own default (true) as if this
+// installation had never been toggled before -- used by cmd/casper's
+// --clear-preferences startup flag. Best-effort, same posture as
+// SaveEnabled above.
+func ClearEnabled() {
+	path, err := enabledFilePath()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(path)
+}

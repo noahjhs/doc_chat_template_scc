@@ -269,7 +269,7 @@ func (d *daemonState) reportPresence(deviceToken string) {
 // them is separately gated on having a device_token) -- this was previously
 // just a visibility choice on top of an already-independent capability, not
 // a real dependency. mToggle and mStatus are both always visible now (set
-// once at creation in onReady, never Hidden here); "Run on system startup"
+// once at creation in onReady, never Hidden here); "Include in startup items"
 // (mStartup in main.go) was already independent of sign-in state and isn't
 // touched here either.
 //
@@ -292,7 +292,7 @@ func (d *daemonState) applyState() {
 		setStatusDotIcon("Service is", greenDotIcon, dotCanvasWidthPt, dotCanvasHeightPt)
 		systray.SetTooltip("Casper — connected")
 	} else {
-		d.mToggle.SetTitle("Start")
+		d.mToggle.SetTitle("Run")
 		d.mStatus.SetTitle("Service is paused")
 		setStatusDotIcon("Service is", grayDotIcon, dotCanvasWidthPt, dotCanvasHeightPt)
 		systray.SetTooltip("Casper — paused")
