@@ -8,7 +8,7 @@ from utils.auth import (
     update_profile,
 )
 from utils.sidebar import handle_sign_out_if_requested, render_sidebar
-from utils.topbar import render_settings_menu
+from utils.topbar import render_topbar
 
 st.set_page_config(page_title="Casper - Profile", page_icon="👻", initial_sidebar_state="expanded")
 require_app_subdomain()
@@ -19,7 +19,7 @@ require_app_subdomain()
 handle_sign_out_if_requested()
 
 username = require_agent_session()
-render_settings_menu()
+render_topbar()
 render_sidebar(username)
 
 st.title("Profile")

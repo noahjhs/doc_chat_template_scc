@@ -13,7 +13,7 @@ from utils.auth import (
     revoke_token_with_auth_service,
     signout_all_hosts,
 )
-from utils.branding import NAME, home_link_html
+from utils.branding import NAME
 from utils.browser_nav import click_anchor_js
 
 # Mirrors casper_tool.py's COMMAND_CATEGORIES -- the two run as separate
@@ -36,7 +36,7 @@ MAX_TREE_ENTRIES_PER_DIR = 50
 
 def start_sign_out():
     # Exported (not sidebar-private) -- the sign-out button itself lives in
-    # utils/topbar.py's render_settings_menu() now, next to the Settings
+    # utils/topbar.py's render_topbar() now, next to the Settings
     # gear, not in the sidebar; this and handle_sign_out_if_requested below
     # stayed here since they're about the sign-out *flow*, not where its
     # button happens to be drawn. on_click (not "if st.button(...):") so
@@ -52,7 +52,7 @@ def start_sign_out():
 def handle_sign_out_if_requested():
     """Call right after require_app_subdomain(), before require_agent_session()
     -- on every page with the sign-out icon (utils/topbar.py's
-    render_settings_menu(), called from every real in-app page). Split from
+    render_topbar(), called from every real in-app page). Split from
     the button click itself (start_sign_out above) on purpose: these are
     slow, blocking network calls (up to several seconds), and running them
     directly in the button's own script run left the click looking like it
@@ -344,14 +344,15 @@ def _build_local_agent_configs(connected_hosts):
 
 
 def render_sidebar(username):
-    """The entire sidebar: brand, Environment selection, host picker,
-    workspace directory browser, and Local commands reference -- identical
-    on every page that calls it (pages/chat.py, pages/environments.py,
-    pages/settings_profile.py, pages/settings_security.py), so a user sees
-    the exact same controls (and can switch host/Environment, browse
-    directories, etc.) regardless of which page they're on. Sign-out lives
-    in utils/topbar.py's render_settings_menu() instead, not here -- see
-    its own module docstring for why. Returns (local_agent_configs,
+    """The entire sidebar: "Signed in as", Environment selection, host
+    picker, workspace directory browser, and Local commands reference --
+    identical on every page that calls it (pages/chat.py,
+    pages/environments.py, pages/settings_profile.py,
+    pages/settings_security.py), so a user sees the exact same controls
+    (and can switch host/Environment, browse directories, etc.) regardless
+    of which page they're on. The brand/logo and sign-out both live in
+    utils/topbar.py's render_topbar() instead, not here -- see its own
+    module docstring for why. Returns (local_agent_configs,
     selected_host_label) -- pages/chat.py's own tool-calling code needs
     both; every other caller just ignores them, since only chat.py does
     tool calling."""
@@ -415,7 +416,11 @@ def render_sidebar(username):
         st.session_state["_active_environment_id"] = st.session_state["_environment_selector"]
 
     with st.sidebar:
-        st.markdown(home_link_html(size=32), unsafe_allow_html=True)
+        # The brand/logo itself is no longer here -- see utils/topbar.py's
+        # render_topbar(), which pins it to the viewport's top-left corner
+        # (mirroring the Settings/sign-out icons pinned top-right) instead
+        # of living inside the sidebar, so it stays visible even when the
+        # sidebar is collapsed.
         st.caption(f"Signed in as {username}")
 
         st.divider()

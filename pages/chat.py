@@ -20,7 +20,7 @@ from utils.sidebar import (
     handle_sign_out_if_requested,
     render_sidebar,
 )
-from utils.topbar import render_settings_menu
+from utils.topbar import render_topbar
 
 # Same reasoning as casper_app.py's set_page_config -- a consistent tab
 # identity across the whole flow.
@@ -41,12 +41,13 @@ handle_sign_out_if_requested()
 username = require_agent_session()
 client = get_client()
 
-# render_settings_menu() (utils/topbar.py) is the Settings gear + sign-out
-# icon, top-right of the main content -- render_sidebar() (utils/sidebar.py)
-# builds the rest: brand, Environment/host selection, workspace directory
-# browser, Local commands reference -- identical to pages/environments.py's
-# own sidebar, so switching between pages doesn't lose any of that context.
-render_settings_menu()
+# render_topbar() (utils/topbar.py) is the brand (top-left) and the
+# Settings gear + sign-out icon (top-right) -- render_sidebar()
+# (utils/sidebar.py) builds the rest: "Signed in as", Environment/host
+# selection, workspace directory browser, Local commands reference --
+# identical to pages/environments.py's own sidebar, so switching between
+# pages doesn't lose any of that context.
+render_topbar()
 local_agent_configs, selected_host_label = render_sidebar(username)
 
 # Cosmetic: once the query params have been read (above), drop them from

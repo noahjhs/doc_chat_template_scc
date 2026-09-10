@@ -1,14 +1,16 @@
 import streamlit as st
 
+from utils.branding import home_link_html
 from utils.sidebar import start_sign_out
 
 # Rendered at the top of every real in-app page's *main* content area (not
 # the sidebar -- see utils/sidebar.py's render_sidebar for that), right
-# after require_agent_session(): a Settings gear (a popover -- Streamlit has
-# no native anchored dropdown menu, but a popover is the closest built-in
-# equivalent) linking to the Profile/Security pages, plus the sign-out icon
-# next to it. Sign-out moved here from the sidebar specifically so it sits
-# beside Settings instead.
+# after require_agent_session(): the brand/logo pinned to the viewport's
+# top-left corner, and a Settings gear (a popover -- Streamlit has no native
+# anchored dropdown menu, but a popover is the closest built-in equivalent)
+# linking to the Profile/Security pages plus the sign-out icon next to it,
+# pinned top-right. Both moved out of the sidebar specifically so they stay
+# visible even when the sidebar is collapsed.
 
 
 def _render_topbar_css():
@@ -126,16 +128,41 @@ def _render_topbar_css():
             width: fit-content !important;
             max-width: none !important;
         }
+
+        /* Brand/logo, pinned top-left -- same positioning approach as
+        .st-key-topbar_row above (fixed + !important throughout, explicit
+        opposite-side inset pinned to auto, width: fit-content +
+        box-sizing: border-box) and the same padding, so it lines up with
+        the Settings/sign-out row's own inset on the opposite corner. Without
+        fit-content this has the same latent bug .st-key-topbar_row had:
+        a fixed element with only one side pinned and no explicit width
+        inherits Streamlit's normal block-level width (~100% of the
+        viewport), which here would silently overlay the *entire* top
+        strip at a high z-index -- harmless-looking (content still renders
+        flush-left either way) until it started eating hover/click events
+        over the Settings/sign-out icons on the right. */
+        .st-key-brand_corner {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: auto !important;
+            width: fit-content !important;
+            box-sizing: border-box !important;
+            z-index: 999999 !important;
+            padding: 1rem 1.25rem !important;
+        }
         </style>
         """
     )
 
 
-def render_settings_menu():
-    """The Settings gear + sign-out icon, pinned to the top-right corner of
-    the browser viewport. Call once, right after require_agent_session(),
-    before any other main-content output."""
+def render_topbar():
+    """The brand/logo (top-left) and Settings gear + sign-out icon
+    (top-right), both pinned to the viewport's corners. Call once, right
+    after require_agent_session(), before any other main-content output."""
     _render_topbar_css()
+    with st.container(key="brand_corner"):
+        st.markdown(home_link_html(size=32), unsafe_allow_html=True)
     with st.container(key="topbar_row"):
         gear_col, signout_col = st.columns([1, 1])
         with gear_col:
