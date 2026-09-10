@@ -241,6 +241,13 @@ if "messages" not in st.session_state:
         {"role": "assistant", "content": _build_welcome_message()},
         {"role": "assistant", "content": "What's on your mind today?"},
     ]
+    # The second message reveals itself a couple seconds after the first,
+    # rather than both landing at once -- consumed (popped) below on the
+    # very next render, so this only ever applies to this pair, once, right
+    # after they're first created; a later rerun (the user sending a
+    # message, switching Environments, etc.) just renders history normally,
+    # instantly, with nothing hidden.
+    st.session_state["_delay_second_welcome_message"] = True
 
 # The Responses API tracks conversation history server-side, keyed off the
 # previous turn's response id.
@@ -395,7 +402,7 @@ def show_transfer_calls(calls):
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
-for message in st.session_state.messages:
+def _render_message(message):
     with st.chat_message(message["role"]):
         st.write(message["content"])
         if message.get("image"):
@@ -404,6 +411,36 @@ for message in st.session_state.messages:
         show_code_interpreter(message.get("code_blocks", []))
         show_local_agent_calls(message.get("local_agent_calls", []))
         show_transfer_calls(message.get("transfer_calls", []))
+
+
+# One-shot: True only on the render right after the welcome pair is first
+# created (see above) -- popped immediately so it can never re-trigger on
+# a later rerun.
+delay_second_message = st.session_state.pop("_delay_second_welcome_message", False)
+for i, message in enumerate(st.session_state.messages):
+    if delay_second_message and i == 1:
+        # Rendered normally (nothing here blocks/sleeps -- chat_input and
+        # everything else below is fully interactive immediately), just
+        # started hidden and revealed a couple seconds later by a plain
+        # client-side timer -- a real delay with zero server-side cost.
+        with st.container(key="delayed_welcome_message"):
+            _render_message(message)
+        st.html("<style>.st-key-delayed_welcome_message { display: none; }</style>")
+        st.iframe(
+            """
+            <script>
+            setTimeout(function() {
+                try {
+                    var el = window.parent.document.querySelector('.st-key-delayed_welcome_message');
+                    if (el) { el.style.display = ''; }
+                } catch (e) {}
+            }, 2500);
+            </script>
+            """,
+            height=1,
+        )
+    else:
+        _render_message(message)
 
 if prompt := st.chat_input("Chat"):
     st.session_state.messages.append({"role": "user", "content": prompt})
