@@ -169,6 +169,7 @@ def render_topbar():
             with st.popover("", icon=":material/settings:", key="topbar_settings_button"):
                 st.page_link("pages/settings_profile.py", label="Profile", icon=":material/person:")
                 st.page_link("pages/settings_security.py", label="Security", icon=":material/lock:")
+                st.page_link("pages/resources.py", label="Command Templates", icon=":material/terminal:")
         with signout_col:
             st.button(
                 "",

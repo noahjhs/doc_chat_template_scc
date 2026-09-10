@@ -1,4 +1,5 @@
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -51,6 +52,32 @@ class HostPresenceReport(BaseModel):
     workspace: list[str] = []
 
 
+class CommandTemplateArgPattern(BaseModel):
+    """One allowed argv option for a CommandTemplate. "slots" is reserved
+    for future parameterized authorization (see the Resources plan's
+    "Forward compatibility: intent-based authorization" section) -- v1
+    always sends/stores an empty dict, and only ever enforces a zero-slot,
+    exact-match "pattern" (e.g. "run build") anywhere in this codebase."""
+
+    pattern: str = Field(min_length=1, max_length=500)
+    slots: dict = Field(default_factory=dict)
+
+
+class HostCommandTemplateInfo(BaseModel):
+    """The subset of a command template relevant once it's already known
+    to be attached to a specific host -- embedded in HostInfo below
+    (browser-facing, via GET /hosts) and returned by the daemon-facing
+    GET /hosts/command-templates. No host_ids on either: both callers
+    already know which host they're asking about."""
+
+    id: int
+    name: str
+    binary: str
+    allowed_args: list[CommandTemplateArgPattern]
+    tier: str
+    path_scoped: bool
+
+
 class HostInfo(BaseModel):
     host_id: int
     label: str
@@ -60,6 +87,7 @@ class HostInfo(BaseModel):
     workspace: list[str] = []
     command_key: str | None = None
     environment_ids: list[int] = []
+    command_templates: list[HostCommandTemplateInfo] = []
 
 
 class HostListResponse(BaseModel):
@@ -86,6 +114,43 @@ class EnvironmentInfo(BaseModel):
 
 class EnvironmentListResponse(BaseModel):
     environments: list[EnvironmentInfo]
+
+
+class CommandTemplateCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    binary: str = Field(min_length=1, max_length=200)
+    allowed_args: list[CommandTemplateArgPattern] = Field(min_length=1)
+    tier: Literal["allow", "ask"] = "ask"
+    path_scoped: bool = True
+
+
+class CommandTemplateUpdateRequest(BaseModel):
+    """PATCH /command-templates/{id}'s body -- every field optional, same
+    merge-only-what's-present convention as ProfileUpdateRequest."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    binary: str | None = Field(default=None, min_length=1, max_length=200)
+    allowed_args: list[CommandTemplateArgPattern] | None = Field(default=None, min_length=1)
+    tier: Literal["allow", "ask"] | None = None
+    path_scoped: bool | None = None
+
+
+class CommandTemplateInfo(BaseModel):
+    id: int
+    name: str
+    binary: str
+    allowed_args: list[CommandTemplateArgPattern]
+    tier: str
+    path_scoped: bool
+    host_ids: list[int] = []
+
+
+class CommandTemplateListResponse(BaseModel):
+    command_templates: list[CommandTemplateInfo]
+
+
+class HostCommandTemplateListResponse(BaseModel):
+    command_templates: list[HostCommandTemplateInfo]
 
 
 class SignOutAllResponse(BaseModel):

@@ -2,6 +2,7 @@ import base64
 import binascii
 import concurrent.futures
 import hashlib
+import json
 import os
 import secrets
 import threading
@@ -16,10 +17,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from models import (
     AuthResponse,
+    CommandTemplateCreateRequest,
+    CommandTemplateInfo,
+    CommandTemplateListResponse,
+    CommandTemplateUpdateRequest,
     EnvironmentCreateRequest,
     EnvironmentInfo,
     EnvironmentListResponse,
     EnvironmentRenameRequest,
+    HostCommandTemplateInfo,
+    HostCommandTemplateListResponse,
     HostInfo,
     HostListResponse,
     HostPairRequest,
@@ -312,6 +319,37 @@ def _environment_info(db, environment_id: int, name: str) -> EnvironmentInfo:
     return EnvironmentInfo(id=environment_id, name=name, host_ids=host_ids)
 
 
+def _user_owns_command_template(db, user_id: int, template_id: int) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM command_templates WHERE id = ? AND user_id = ?", (template_id, user_id)
+        ).fetchone()
+        is not None
+    )
+
+
+def _command_template_info(db, template_id: int) -> CommandTemplateInfo:
+    row = db.execute(
+        "SELECT id, name, binary, allowed_args, tier, path_scoped FROM command_templates WHERE id = ?",
+        (template_id,),
+    ).fetchone()
+    host_ids = [
+        r["host_id"]
+        for r in db.execute(
+            "SELECT host_id FROM command_template_hosts WHERE command_template_id = ?", (template_id,)
+        ).fetchall()
+    ]
+    return CommandTemplateInfo(
+        id=row["id"],
+        name=row["name"],
+        binary=row["binary"],
+        allowed_args=json.loads(row["allowed_args"]),
+        tier=row["tier"],
+        path_scoped=bool(row["path_scoped"]),
+        host_ids=host_ids,
+    )
+
+
 # --- Host pairing / presence (daemon-initiated, device_token-gated) ------
 @app.post("/hosts/pair", response_model=HostPairResponse, status_code=201)
 def pair_host(body: HostPairRequest, authorization: str = Header(default="")):
@@ -397,9 +435,34 @@ def list_hosts(authorization: str = Header(default="")):
             """,
             (user_id,),
         ).fetchall()
+        template_rows = db.execute(
+            """
+            SELECT cth.host_id, ct.id, ct.name, ct.binary, ct.allowed_args, ct.tier, ct.path_scoped
+            FROM command_template_hosts cth JOIN command_templates ct ON ct.id = cth.command_template_id
+            WHERE ct.user_id = ? ORDER BY ct.name COLLATE NOCASE
+            """,
+            (user_id,),
+        ).fetchall()
     envs_by_host: dict[int, list[int]] = {}
     for r in env_rows:
         envs_by_host.setdefault(r["host_id"], []).append(r["environment_id"])
+    # Attached regardless of live connection state -- like environment_ids
+    # above (persisted config), not like workspace/local_agent_url below
+    # (live daemon-reported state) -- a disconnected host's attached
+    # templates are still meaningful to show (e.g. in the Resources page's
+    # host-attachment grid).
+    templates_by_host: dict[int, list[HostCommandTemplateInfo]] = {}
+    for r in template_rows:
+        templates_by_host.setdefault(r["host_id"], []).append(
+            HostCommandTemplateInfo(
+                id=r["id"],
+                name=r["name"],
+                binary=r["binary"],
+                allowed_args=json.loads(r["allowed_args"]),
+                tier=r["tier"],
+                path_scoped=bool(r["path_scoped"]),
+            )
+        )
     with _attached_lock:
         attached_snapshot = {k: dict(v) for k, v in _attached.items()}
     hosts_out = []
@@ -414,6 +477,7 @@ def list_hosts(authorization: str = Header(default="")):
                 workspace=att["workspace"] if connected else [],
                 command_key=att["command_key"] if mine else None,
                 environment_ids=envs_by_host.get(r["id"], []),
+                command_templates=templates_by_host.get(r["id"], []),
             )
         )
     return HostListResponse(hosts=hosts_out)
@@ -547,6 +611,146 @@ def remove_host_from_environment(environment_id: int, host_id: int, authorizatio
             "DELETE FROM environment_hosts WHERE environment_id = ? AND host_id = ?", (environment_id, host_id)
         )
         return _environment_info(db, environment_id, env["name"])
+
+
+# --- Command templates (browser-initiated CRUD, session-token-gated) -----
+# See the "Resources: command templates" plan -- a user-authored, reusable
+# rule for how the assistant may invoke one CLI command on a host. Which
+# hosts it's enabled on is separate (command_template_hosts), mirroring
+# environments/environment_hosts immediately above.
+@app.get("/command-templates", response_model=CommandTemplateListResponse)
+def list_command_templates(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        rows = db.execute(
+            "SELECT id FROM command_templates WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,)
+        ).fetchall()
+        return CommandTemplateListResponse(command_templates=[_command_template_info(db, r["id"]) for r in rows])
+
+
+@app.post("/command-templates", response_model=CommandTemplateInfo, status_code=201)
+def create_command_template(body: CommandTemplateCreateRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        existing = db.execute(
+            "SELECT id FROM command_templates WHERE user_id = ? AND name = ? COLLATE NOCASE", (user_id, body.name)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="A command template with that name already exists.")
+        allowed_args_json = json.dumps([p.model_dump() for p in body.allowed_args])
+        template_id = db.execute(
+            "INSERT INTO command_templates (user_id, name, binary, allowed_args, tier, path_scoped) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, body.name, body.binary, allowed_args_json, body.tier, int(body.path_scoped)),
+        ).lastrowid
+        return _command_template_info(db, template_id)
+
+
+@app.patch("/command-templates/{template_id}", response_model=CommandTemplateInfo)
+def update_command_template(
+    template_id: int, body: CommandTemplateUpdateRequest, authorization: str = Header(default="")
+):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_command_template(db, user_id, template_id):
+            raise HTTPException(status_code=404, detail="Command template not found.")
+        updates = body.model_dump(exclude_unset=True)
+        if "allowed_args" in updates:
+            updates["allowed_args"] = json.dumps(updates["allowed_args"])
+        if "path_scoped" in updates:
+            updates["path_scoped"] = int(updates["path_scoped"])
+        if updates:
+            db.execute(
+                f"UPDATE command_templates SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
+                (*updates.values(), template_id),
+            )
+        return _command_template_info(db, template_id)
+
+
+@app.delete("/command-templates/{template_id}", response_model=RevokeResponse)
+def delete_command_template(template_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_command_template(db, user_id, template_id):
+            raise HTTPException(status_code=404, detail="Command template not found.")
+        db.execute("DELETE FROM command_template_hosts WHERE command_template_id = ?", (template_id,))
+        db.execute("DELETE FROM command_templates WHERE id = ?", (template_id,))
+    return RevokeResponse(revoked=True)
+
+
+@app.put("/command-templates/{template_id}/hosts/{host_id}", response_model=CommandTemplateInfo)
+def add_command_template_to_host(template_id: int, host_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_command_template(db, user_id, template_id) or not _user_owns_host(db, user_id, host_id):
+            raise HTTPException(status_code=404, detail="Command template or host not found.")
+        db.execute(
+            "INSERT OR IGNORE INTO command_template_hosts (command_template_id, host_id) VALUES (?, ?)",
+            (template_id, host_id),
+        )
+        return _command_template_info(db, template_id)
+
+
+@app.delete("/command-templates/{template_id}/hosts/{host_id}", response_model=CommandTemplateInfo)
+def remove_command_template_from_host(template_id: int, host_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_command_template(db, user_id, template_id):
+            raise HTTPException(status_code=404, detail="Command template not found.")
+        db.execute(
+            "DELETE FROM command_template_hosts WHERE command_template_id = ? AND host_id = ?",
+            (template_id, host_id),
+        )
+        return _command_template_info(db, template_id)
+
+
+# --- Command templates (daemon-facing fetch, device_token-gated) ---------
+# What THIS host's own enforcement copy should be -- independent of GET
+# /hosts's browser-facing copy above (same underlying data, different
+# credential/audience). The daemon fetches this for itself rather than
+# trusting the browser/model to have applied a template correctly -- see
+# the plan's "the daemon does not need to understand tier to execute
+# safely" note; this endpoint hands over the structural fields it *does*
+# need to enforce (binary/allowed_args/path_scoped), plus tier just for
+# the daemon's own list_command_templates action to report back verbatim.
+@app.get("/hosts/command-templates", response_model=HostCommandTemplateListResponse)
+def list_host_command_templates(authorization: str = Header(default="")):
+    attached = _resolve_attached(authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT ct.id, ct.name, ct.binary, ct.allowed_args, ct.tier, ct.path_scoped
+            FROM command_template_hosts cth JOIN command_templates ct ON ct.id = cth.command_template_id
+            WHERE cth.host_id = ? AND ct.user_id = ? ORDER BY ct.name COLLATE NOCASE
+            """,
+            (attached["host_id"], attached["user_id"]),
+        ).fetchall()
+    templates = [
+        HostCommandTemplateInfo(
+            id=r["id"],
+            name=r["name"],
+            binary=r["binary"],
+            allowed_args=json.loads(r["allowed_args"]),
+            tier=r["tier"],
+            path_scoped=bool(r["path_scoped"]),
+        )
+        for r in rows
+    ]
+    return HostCommandTemplateListResponse(command_templates=templates)
 
 
 def _shutdown_hosts_best_effort(targets: list[tuple[str, str]]):

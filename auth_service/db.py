@@ -79,6 +79,34 @@ CREATE TABLE IF NOT EXISTS user_profile (
     allow_configure_environments INTEGER NOT NULL DEFAULT 0,
     allow_configure_local_agents INTEGER NOT NULL DEFAULT 0
 );
+
+-- A user-authored, reusable rule for how the assistant may invoke one CLI
+-- command -- see the "Resources: command templates" plan. Which hosts it's
+-- actually enabled on is a separate many-to-many (command_template_hosts
+-- below), mirroring environment_hosts' relationship to environments.
+CREATE TABLE IF NOT EXISTS command_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    binary TEXT NOT NULL,
+    -- JSON list of {"pattern": str, "slots": {}} objects (see
+    -- models.CommandTemplateArgPattern) -- v1 only ever stores/enforces
+    -- zero-slot (exact-match) patterns; "slots" is reserved for future
+    -- parameterized authorization, not migrated in later.
+    allowed_args TEXT NOT NULL,
+    tier TEXT NOT NULL DEFAULT 'ask',       -- 'allow' | 'ask' -- no stored 'deny': absence of a matching template already means deny, same as any unrecognized action today
+    path_scoped INTEGER NOT NULL DEFAULT 1, -- confined to the host's own addressable directories via the daemon's existing resolvePath/roots machinery
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, name COLLATE NOCASE)
+);
+CREATE INDEX IF NOT EXISTS idx_command_templates_user_id ON command_templates(user_id);
+
+CREATE TABLE IF NOT EXISTS command_template_hosts (
+    command_template_id INTEGER NOT NULL REFERENCES command_templates(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    PRIMARY KEY (command_template_id, host_id)
+);
+CREATE INDEX IF NOT EXISTS idx_command_template_hosts_host_id ON command_template_hosts(host_id);
 """
 
 

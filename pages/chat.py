@@ -202,7 +202,89 @@ TRANSFER_TOOL = {
     },
 }
 
-active_tools = TOOLS + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs else [])
+def _build_command_template_tool(local_agent_configs):
+    """Collects every command template enabled on any connected host in the
+    active Environment (deduped by id) into one tool -- conditional
+    per-template argument enums aren't expressible in a flat JSON Schema
+    tool definition the way host selection's flat enum is (see
+    LOCAL_AGENT_TOOL's own 'host' field), so the available templates and
+    their allowed argument options are described in prose in the tool's
+    own description instead. The daemon
+    (agent/internal/commands/templates.go) is what actually validates the
+    binary+args combination server-side regardless of what this
+    description says -- a wrong guess here just comes back as a clear
+    rejection the model can retry from, same posture as an unrecognized
+    run_local_command action. Returns None (no tool at all) when no
+    connected host has any command templates enabled, mirroring how
+    LOCAL_AGENT_TOOL/TRANSFER_TOOL are only added when local_agent_configs
+    is non-empty."""
+    seen = {}
+    for config in local_agent_configs.values():
+        for template in config.get("command_templates") or []:
+            seen[template["id"]] = template
+    if not seen:
+        return None
+    lines = []
+    for template in sorted(seen.values(), key=lambda t: t["id"]):
+        options = ", ".join(repr(p["pattern"]) for p in template["allowed_args"])
+        lines.append(
+            f"- template_id={template['id']} name={template['name']!r} "
+            f"binary={template['binary']!r} tier={template['tier']} allowed args: {options}"
+        )
+    description = (
+        "Run one of the user's pre-approved command templates on a connected "
+        "machine -- a fixed binary with a fixed set of allowed argument "
+        "options, not arbitrary shell access. Available templates on hosts "
+        "in the active Environment:\n" + "\n".join(lines) + "\n"
+        "Only the exact argument option listed above for a given template_id "
+        "is allowed -- anything else is rejected. A template whose tier is "
+        "'ask' pauses for the user's explicit approval in chat before it "
+        "actually runs; 'allow' runs immediately."
+    )
+    return {
+        "type": "function",
+        "name": "run_command_template",
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "template_id": {
+                    "type": "integer",
+                    "description": "The id of the command template to run, from the list above.",
+                },
+                "args": {
+                    "type": "string",
+                    "description": "One of that template's exact allowed argument options, verbatim.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional -- which addressable directory to run in, for a "
+                        "path-scoped template. Defaults to the currently selected directory."
+                    ),
+                },
+                "host": {
+                    "type": "string",
+                    "enum": list(local_agent_configs.keys()),
+                    "description": (
+                        "Which connected machine to run this on. Usually fine to "
+                        "omit -- defaults to whichever host is selected in the "
+                        "sidebar, same as run_local_command."
+                    ),
+                },
+            },
+            "required": ["template_id", "args"],
+        },
+    }
+
+
+COMMAND_TEMPLATE_TOOL = _build_command_template_tool(local_agent_configs)
+
+active_tools = (
+    TOOLS
+    + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs else [])
+    + ([COMMAND_TEMPLATE_TOOL] if COMMAND_TEMPLATE_TOOL else [])
+)
 
 def _build_welcome_message():
     """A status snapshot of the active Environment/selected host, read
@@ -344,6 +426,63 @@ def call_transfer_file(local_agent_configs, source, source_path, destination, de
     return f"Transferred {source_path!r} from {source} to {destination_path!r} on {destination}."
 
 
+def _find_command_template(local_agent_configs, host, template_id):
+    """Looks up a command template's cached metadata (name/binary/tier/
+    allowed_args) by id, scoped to the given host -- needed before
+    dispatch, both for decide_tier() below and to build a human-readable
+    label for the approval UI/status message."""
+    config = local_agent_configs.get(host)
+    if config is None:
+        return None
+    for template in config.get("command_templates") or []:
+        if template.get("id") == template_id:
+            return template
+    return None
+
+
+def decide_tier(template, args, recent_messages):
+    """v1: just the template's own stored tier. args/recent_messages are
+    accepted but unused for now -- see the "Resources" plan's "Forward
+    compatibility: intent-based authorization" section for why this
+    signature carries them regardless: a later intent-evaluation layer
+    would need exactly this input (the proposed call plus the
+    conversation that prompted it), and threading it through now avoids
+    re-plumbing the pause/resume mechanism below when that's built."""
+    return (template or {}).get("tier", "ask")
+
+
+def call_command_template(local_agent_configs, template_id, args_str, host=None, default_host=None, path=None):
+    """Mirrors call_local_agent's shape/error posture exactly, for the
+    daemon's run_command_template action. Never raises."""
+    if not local_agent_configs:
+        return "Command template error: no connected machines available."
+    if host is None:
+        if len(local_agent_configs) == 1:
+            host = next(iter(local_agent_configs))
+        elif default_host in local_agent_configs:
+            host = default_host
+        else:
+            available = ", ".join(local_agent_configs)
+            return f"Command template error: multiple machines connected ({available}) -- specify which one via 'host'."
+    config = local_agent_configs.get(host)
+    if config is None:
+        available = ", ".join(local_agent_configs)
+        return f"Command template error: unknown host {host!r}. Available: {available}."
+    try:
+        response = requests.post(
+            f"{config['url']}/api/command",
+            json={"action": "run_command_template", "template_id": template_id, "args": args_str, "path": path},
+            headers={"X-API-Key": config["api_key"]},
+            timeout=15,
+        )
+        if response.status_code == 401:
+            return "Command template error: invalid API key."
+        response.raise_for_status()
+        return json.dumps(response.json())
+    except requests.RequestException as e:
+        return f"Command template error: {e}"
+
+
 def describe_local_command(action, args):
     """A single source of truth for how a local command call is displayed,
     live and in history — used by both the tool-call status label and
@@ -408,6 +547,21 @@ def show_transfer_calls(calls):
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
+def show_command_template_calls(calls):
+    """Render a demo-friendly summary of command template invocations
+    (including denied ones -- see _process_turn's own "Denied by user."
+    synthesized output, appended here the same as a real dispatch result
+    so a denial stays visible in the transcript, not just to the model)."""
+    if not calls:
+        return
+    label = f"🔧 {len(calls)} command template call{'s' if len(calls) != 1 else ''}"
+    with st.expander(label):
+        for entry in calls:
+            args = entry.get("args", {})
+            prefix = f"$ template #{args.get('template_id')} {args.get('args', '')}".rstrip()
+            st.code(f"{prefix}\n{entry['output']}", language="text")
+
+
 def _render_message(message):
     with st.chat_message(message["role"]):
         st.write(message["content"])
@@ -417,6 +571,7 @@ def _render_message(message):
         show_code_interpreter(message.get("code_blocks", []))
         show_local_agent_calls(message.get("local_agent_calls", []))
         show_transfer_calls(message.get("transfer_calls", []))
+        show_command_template_calls(message.get("command_template_calls", []))
 
 
 # One-shot: True only on the render right after the welcome pair is first
@@ -448,151 +603,241 @@ for i, message in enumerate(st.session_state.messages):
     else:
         _render_message(message)
 
-if prompt := st.chat_input("Chat"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
+def capture_response_meta(stream, meta):
+    """Captures the response id (for chaining), plus tool activity, from
+    the stream as a side effect, since st.write_stream fully consumes it."""
+    for event in stream:
+        if event.type == "response.completed":
+            meta["id"] = event.response.id
+            for item in event.response.output:
+                if item.type == "image_generation_call" and item.result:
+                    meta["image"] = item.result
+                elif item.type == "web_search_call" and item.action:
+                    meta["searches"].append(item.action.query)
+                elif item.type == "code_interpreter_call" and item.code:
+                    meta["code_blocks"].append(item.code)
+                elif item.type == "function_call":
+                    meta["function_calls"].append(
+                        {"call_id": item.call_id, "name": item.name, "arguments": item.arguments}
+                    )
+                elif item.type == "message":
+                    for content in item.content:
+                        for annotation in getattr(content, "annotations", None) or []:
+                            if annotation.type == "url_citation":
+                                meta["sources"].append((annotation.title, annotation.url))
+        yield event
 
-    def capture_response_meta(stream, meta):
-        """Captures the response id (for chaining), plus tool activity, from
-        the stream as a side effect, since st.write_stream fully consumes it."""
-        for event in stream:
-            if event.type == "response.completed":
-                meta["id"] = event.response.id
-                for item in event.response.output:
-                    if item.type == "image_generation_call" and item.result:
-                        meta["image"] = item.result
-                    elif item.type == "web_search_call" and item.action:
-                        meta["searches"].append(item.action.query)
-                    elif item.type == "code_interpreter_call" and item.code:
-                        meta["code_blocks"].append(item.code)
-                    elif item.type == "function_call":
-                        meta["function_calls"].append(
-                            {
-                                "call_id": item.call_id,
-                                "name": item.name,
-                                "arguments": item.arguments,
-                            }
-                        )
-                    elif item.type == "message":
-                        for content in item.content:
-                            for annotation in (
-                                getattr(content, "annotations", None) or []
-                            ):
-                                if annotation.type == "url_citation":
-                                    meta["sources"].append(
-                                        (annotation.title, annotation.url)
-                                    )
-            yield event
 
-    # Accumulates results across hops of the tool-calling loop below: the
-    # model can request a tool call, get its output fed back, and decide to
-    # call more before giving a final answer.
-    aggregate = {
-        "searches": [],
-        "sources": [],
-        "code_blocks": [],
-        "local_agent_calls": [],
-        "transfer_calls": [],
-        "image": None,
+def _dispatch_tool_call(call, local_agent_configs, selected_host_label, aggregate):
+    """Executes ONE already-decided tool call -- never an ask-tier
+    run_command_template still awaiting approval; _process_turn below
+    intercepts those before they ever reach here -- and returns its output
+    string, appending a demo-friendly entry to the relevant aggregate[...]
+    list as a side effect, same as the old inline dispatch did."""
+    args = json.loads(call["arguments"])
+    if call["name"] == "run_local_command":
+        action = args.get("action", "")
+        label = f"🔧 {describe_local_command(action, args)}"
+        with st.status(label):
+            output = call_local_agent(
+                local_agent_configs,
+                action,
+                host=args.get("host"),
+                default_host=selected_host_label,
+                path=args.get("path"),
+                destination=args.get("destination"),
+                pattern=args.get("pattern"),
+                lines=args.get("lines", 10),
+                limit=args.get("limit", 5),
+            )
+            st.code(output, language="text")
+        aggregate["local_agent_calls"].append({"action": action, "args": args, "output": output})
+    elif call["name"] == "transfer_file":
+        label = f"📤 Transfer {args.get('source_path')} ({args.get('source')} → {args.get('destination')})"
+        with st.status(label):
+            output = call_transfer_file(
+                local_agent_configs,
+                args.get("source"),
+                args.get("source_path"),
+                args.get("destination"),
+                args.get("destination_path"),
+            )
+            st.code(output, language="text")
+        aggregate["transfer_calls"].append({"args": args, "output": output})
+    elif call["name"] == "run_command_template":
+        host = args.get("host") or selected_host_label
+        template = _find_command_template(local_agent_configs, host, args.get("template_id"))
+        template_name = template["name"] if template else f"#{args.get('template_id')}"
+        label = f"🔧 Run {template_name}: {args.get('args', '')}"
+        with st.status(label):
+            output = call_command_template(
+                local_agent_configs,
+                args.get("template_id"),
+                args.get("args", ""),
+                host=args.get("host"),
+                default_host=selected_host_label,
+                path=args.get("path"),
+            )
+            st.code(output, language="text")
+        aggregate["command_template_calls"].append({"args": args, "output": output})
+    else:
+        output = f"Unknown tool: {call['name']}"
+    return output
+
+
+def _new_turn(prompt):
+    return {
+        "input": [{"role": "user", "content": prompt}],
+        "aggregate": {
+            "searches": [],
+            "sources": [],
+            "code_blocks": [],
+            "local_agent_calls": [],
+            "transfer_calls": [],
+            "command_template_calls": [],
+            "image": None,
+        },
+        "full_response": "",
+        "pending_calls": None,  # None = need a fresh hop from the model; a list = mid-hop, resuming after an approval
+        "outputs": None,
     }
-    turn_input = [{"role": "user", "content": prompt}]
-    full_response = ""
 
-    with st.chat_message("assistant"):
-        while True:
-            response_meta = {
-                "searches": [],
-                "sources": [],
-                "code_blocks": [],
-                "function_calls": [],
-            }
+
+def _process_turn(local_agent_configs, selected_host_label):
+    """Runs (or resumes, after an ask-tier approval/denial) the
+    tool-calling loop for st.session_state["_turn"]. Returns True once the
+    turn is fully complete (and has already appended the finished message
+    to st.session_state.messages); returns False if it paused mid-turn for
+    a pending approval (st.session_state["_pending_approval"] is set in
+    that case) -- the caller renders the approve/deny UI and st.stop()s,
+    so a later rerun (the approve/deny click) picks back up exactly where
+    this left off rather than starting the turn over. Known, accepted v1
+    rough edge: a hop's own spoken text isn't re-shown while resuming a
+    later hop in the same turn (only dispatched-call status boxes are) --
+    it's still part of the final saved message's content once the turn
+    completes, just not visible again during that one intermediate
+    render."""
+    turn = st.session_state["_turn"]
+    while True:
+        if turn["pending_calls"] is None:
+            response_meta = {"searches": [], "sources": [], "code_blocks": [], "function_calls": []}
             with st.spinner("Thinking..."):
                 stream = client.responses.create(
                     model="gpt-4.1-mini",
-                    input=turn_input,
+                    input=turn["input"],
                     previous_response_id=st.session_state.previous_response_id,
                     tools=active_tools,
                     stream=True,
                 )
                 hop_text = st.write_stream(capture_response_meta(stream, response_meta))
 
-            full_response += hop_text
+            turn["full_response"] += hop_text
             st.session_state.previous_response_id = response_meta["id"]
-            aggregate["searches"].extend(response_meta["searches"])
-            aggregate["sources"].extend(response_meta["sources"])
-            aggregate["code_blocks"].extend(response_meta["code_blocks"])
+            turn["aggregate"]["searches"].extend(response_meta["searches"])
+            turn["aggregate"]["sources"].extend(response_meta["sources"])
+            turn["aggregate"]["code_blocks"].extend(response_meta["code_blocks"])
             if "image" in response_meta:
-                aggregate["image"] = response_meta["image"]
+                turn["aggregate"]["image"] = response_meta["image"]
 
             if not response_meta["function_calls"]:
                 break
+            turn["pending_calls"] = response_meta["function_calls"]
+            turn["outputs"] = []
 
-            # Dispatch each requested tool call and feed the output back in
-            # as the next hop's input.
-            turn_input = []
-            for call in response_meta["function_calls"]:
+        while turn["pending_calls"]:
+            call = turn["pending_calls"][0]
+            denied_output = None
+            if call["name"] == "run_command_template":
                 args = json.loads(call["arguments"])
-                if call["name"] == "run_local_command":
-                    action = args.get("action", "")
-                    label = f"🔧 {describe_local_command(action, args)}"
-                    with st.status(label):
-                        output = call_local_agent(
-                            local_agent_configs,
-                            action,
-                            host=args.get("host"),
-                            default_host=selected_host_label,
-                            path=args.get("path"),
-                            destination=args.get("destination"),
-                            pattern=args.get("pattern"),
-                            lines=args.get("lines", 10),
-                            limit=args.get("limit", 5),
-                        )
-                        st.code(output, language="text")
-                    aggregate["local_agent_calls"].append(
-                        {"action": action, "args": args, "output": output}
-                    )
-                elif call["name"] == "transfer_file":
-                    label = (
-                        f"📤 Transfer {args.get('source_path')} "
-                        f"({args.get('source')} → {args.get('destination')})"
-                    )
-                    with st.status(label):
-                        output = call_transfer_file(
-                            local_agent_configs,
-                            args.get("source"),
-                            args.get("source_path"),
-                            args.get("destination"),
-                            args.get("destination_path"),
-                        )
-                        st.code(output, language="text")
-                    aggregate["transfer_calls"].append({"args": args, "output": output})
-                else:
-                    output = f"Unknown tool: {call['name']}"
-                turn_input.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call["call_id"],
-                        "output": output,
-                    }
-                )
+                host = args.get("host") or selected_host_label
+                template = _find_command_template(local_agent_configs, host, args.get("template_id"))
+                if decide_tier(template, args, st.session_state.messages) == "ask":
+                    decisions = st.session_state.setdefault("_approval_decisions", {})
+                    decision = decisions.get(call["call_id"])
+                    if decision is None:
+                        st.session_state["_pending_approval"] = {
+                            "call_id": call["call_id"], "host": host, "template": template, "args": args,
+                        }
+                        return False
+                    decisions.pop(call["call_id"], None)
+                    if decision == "deny":
+                        denied_output = "Denied by user."
 
-        if aggregate["image"]:
-            st.image(base64.b64decode(aggregate["image"]))
-        show_web_search(aggregate["searches"], aggregate["sources"])
-        show_code_interpreter(aggregate["code_blocks"])
-        show_local_agent_calls(aggregate["local_agent_calls"])
-        show_transfer_calls(aggregate["transfer_calls"])
+            if denied_output is not None:
+                output = denied_output
+                turn["aggregate"]["command_template_calls"].append(
+                    {"args": json.loads(call["arguments"]), "output": output}
+                )
+            else:
+                output = _dispatch_tool_call(call, local_agent_configs, selected_host_label, turn["aggregate"])
+            turn["outputs"].append({"type": "function_call_output", "call_id": call["call_id"], "output": output})
+            turn["pending_calls"].pop(0)
+
+        # All calls in this hop are done -- feed outputs back as the next
+        # hop's input.
+        turn["input"] = turn["outputs"]
+        turn["pending_calls"] = None
+        turn["outputs"] = None
+
+    aggregate = turn["aggregate"]
+    if aggregate["image"]:
+        st.image(base64.b64decode(aggregate["image"]))
+    show_web_search(aggregate["searches"], aggregate["sources"])
+    show_code_interpreter(aggregate["code_blocks"])
+    show_local_agent_calls(aggregate["local_agent_calls"])
+    show_transfer_calls(aggregate["transfer_calls"])
+    show_command_template_calls(aggregate["command_template_calls"])
 
     st.session_state.messages.append(
         {
             "role": "assistant",
-            "content": full_response,
+            "content": turn["full_response"],
             "image": aggregate["image"],
             "searches": aggregate["searches"],
             "sources": aggregate["sources"],
             "code_blocks": aggregate["code_blocks"],
             "local_agent_calls": aggregate["local_agent_calls"],
             "transfer_calls": aggregate["transfer_calls"],
+            "command_template_calls": aggregate["command_template_calls"],
         }
     )
+    del st.session_state["_turn"]
+    return True
+
+
+# Gated on there being no pending approval -- otherwise a new message sent
+# while one's outstanding would silently discard the in-progress turn
+# (including the model's still-unresolved tool call) and leave the
+# Responses API's previous_response_id chain pointing at a response whose
+# function call was never actually answered.
+if "_pending_approval" not in st.session_state and (prompt := st.chat_input("Chat")):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.write(prompt)
+    st.session_state["_turn"] = _new_turn(prompt)
+
+if "_turn" in st.session_state:
+    with st.chat_message("assistant"):
+        finished = _process_turn(local_agent_configs, selected_host_label)
+
+    if not finished:
+        pending = st.session_state["_pending_approval"]
+        template = pending["template"]
+        template_label = template["name"] if template else f"template #{pending['args'].get('template_id')}"
+        with st.chat_message("assistant"):
+            st.warning(
+                f"The assistant wants to run **{template_label}** "
+                f"(`{pending['args'].get('args', '')}`) on **{pending['host']}**. Allow it?"
+            )
+            approve_col, deny_col = st.columns(2)
+            with approve_col:
+                if st.button("Approve", key="approve_command_template", type="primary"):
+                    st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "allow"
+                    del st.session_state["_pending_approval"]
+                    st.rerun()
+            with deny_col:
+                if st.button("Deny", key="deny_command_template"):
+                    st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "deny"
+                    del st.session_state["_pending_approval"]
+                    st.rerun()
+        st.stop()

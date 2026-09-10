@@ -339,6 +339,10 @@ def _build_local_agent_configs(connected_hosts):
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
             "workspace": h.get("workspace") or [],
+            # Command templates enabled on this specific host -- see
+            # auth_service's HostInfo.command_templates. pages/chat.py
+            # builds its run_command_template tool schema from these.
+            "command_templates": h.get("command_templates") or [],
         }
     return configs
 

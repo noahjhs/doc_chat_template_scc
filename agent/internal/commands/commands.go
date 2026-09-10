@@ -40,6 +40,13 @@ type Request struct {
 	// transferred files need to survive round-tripping arbitrary binary
 	// content intact through JSON, which requires valid UTF-8.
 	Content string `json:"content,omitempty"`
+	// TemplateID/Args are only used by run_command_template (see
+	// templates.go) -- TemplateID picks which cached CommandTemplate to
+	// run, Args must exactly match one of its AllowedArgs entries. Path
+	// (above) is reused by run_command_template too, when the template is
+	// PathScoped, to pick which confined directory to run in.
+	TemplateID int    `json:"template_id,omitempty"`
+	Args       string `json:"args,omitempty"`
 }
 
 // ApplyDefaults matches CommandRequest's Pydantic field defaults (lines=10,
@@ -86,9 +93,11 @@ func (e *ActionError) Error() string { return e.Detail }
 // "+" button in the web app (see runAddDirectory), which is now the only
 // way roots ever grows.
 type Handler struct {
-	mu    sync.Mutex
-	roots []string
-	cwd   string
+	mu                        sync.Mutex
+	roots                     []string
+	cwd                       string
+	templates                 []CommandTemplate // see templates.go -- the daemon's own cached copy of enabled command templates, fetched from auth_service
+	refreshCommandTemplatesFn func()            // see templates.go's SetRefreshCommandTemplatesFunc
 
 	// Both injected at construction (see cmd/casper/main.go) -- kept out of
 	// this package since they're daemon-orchestration concerns (an
@@ -901,6 +910,12 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 		return h.runListDirectories(req)
 	case "add_directory":
 		return h.runAddDirectory(req)
+	case "list_command_templates":
+		return h.runListCommandTemplates(req)
+	case "run_command_template":
+		return h.runRunCommandTemplate(req)
+	case "refresh_command_templates":
+		return h.runRefreshCommandTemplates(req)
 	default:
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

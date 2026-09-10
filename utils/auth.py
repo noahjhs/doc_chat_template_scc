@@ -351,3 +351,45 @@ def update_profile(auth_domain, token, **fields):
     updated profile dict, or {"error": str} (e.g. a malformed email/phone
     number -- see auth_service/models.py's validators)."""
     return _auth_write("PATCH", auth_domain, token, "/profile", fields)
+
+
+def list_command_templates(auth_domain, token):
+    """GET /command-templates. Returns {"command_templates": [...]}, or
+    {"error": str}."""
+    return _auth_write("GET", auth_domain, token, "/command-templates")
+
+
+def create_command_template(auth_domain, token, name, binary, allowed_args, tier="ask", path_scoped=True):
+    """POST /command-templates. allowed_args is a list of {"pattern": str}
+    dicts (v1 never sets "slots" -- see models.CommandTemplateArgPattern).
+    Returns the new template (with host_ids=[]), or {"error": str}."""
+    return _auth_write(
+        "POST",
+        auth_domain,
+        token,
+        "/command-templates",
+        {"name": name, "binary": binary, "allowed_args": allowed_args, "tier": tier, "path_scoped": path_scoped},
+    )
+
+
+def update_command_template(auth_domain, token, template_id, **fields):
+    """PATCH /command-templates/{id} -- merge-updates only the given fields
+    (any subset). Returns the updated template, or {"error": str}."""
+    return _auth_write("PATCH", auth_domain, token, f"/command-templates/{template_id}", fields)
+
+
+def delete_command_template(auth_domain, token, template_id):
+    """DELETE /command-templates/{id}. Returns {"revoked": True}, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/command-templates/{template_id}")
+
+
+def add_command_template_to_host(auth_domain, token, template_id, host_id):
+    """PUT /command-templates/{id}/hosts/{host_id}. Returns the updated
+    template, or {"error": str}."""
+    return _auth_write("PUT", auth_domain, token, f"/command-templates/{template_id}/hosts/{host_id}")
+
+
+def remove_command_template_from_host(auth_domain, token, template_id, host_id):
+    """DELETE /command-templates/{id}/hosts/{host_id}. Returns the updated
+    template, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/command-templates/{template_id}/hosts/{host_id}")

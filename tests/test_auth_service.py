@@ -477,3 +477,133 @@ def test_profile_is_per_user(client):
     )
     b_profile = client.get("/profile", headers={"Authorization": f"Bearer {b['token']}"}).json()
     assert b_profile["email"] == ""
+
+
+def _create_template(client, headers, name="npm scripts", **overrides):
+    body = {
+        "name": name,
+        "binary": "npm",
+        "allowed_args": [{"pattern": "run build"}, {"pattern": "run test"}],
+        "tier": "ask",
+        "path_scoped": True,
+    }
+    body.update(overrides)
+    return client.post("/command-templates", json=body, headers=headers)
+
+
+def test_command_template_crud(client):
+    signup = _signup(client, "carol")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    created = _create_template(client, headers)
+    assert created.status_code == 201
+    body = created.json()
+    assert body["name"] == "npm scripts"
+    assert body["binary"] == "npm"
+    assert body["allowed_args"] == [
+        {"pattern": "run build", "slots": {}}, {"pattern": "run test", "slots": {}}
+    ]
+    assert body["tier"] == "ask"
+    assert body["path_scoped"] is True
+    assert body["host_ids"] == []
+
+    dup = _create_template(client, headers, name="NPM SCRIPTS")  # case-insensitive
+    assert dup.status_code == 409
+
+    listed = client.get("/command-templates", headers=headers).json()["command_templates"]
+    assert [t["id"] for t in listed] == [body["id"]]
+
+    updated = client.patch(
+        f"/command-templates/{body['id']}", json={"tier": "allow"}, headers=headers
+    ).json()
+    assert updated["tier"] == "allow"
+    assert updated["binary"] == "npm"  # untouched fields survive a partial update
+
+    deleted = client.delete(f"/command-templates/{body['id']}", headers=headers)
+    assert deleted.status_code == 200
+    assert client.get("/command-templates", headers=headers).json()["command_templates"] == []
+
+
+def test_command_template_rejects_empty_allowed_args(client):
+    signup = _signup(client, "dave2")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = _create_template(client, headers, allowed_args=[])
+    assert r.status_code == 422
+
+
+def test_command_template_host_attachment_and_hosts_listing(client):
+    signup = _signup(client, "erin2")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-erin2-1", "hostname": "erins-mac"}, headers=headers
+    ).json()
+    template = _create_template(client, headers).json()
+
+    attached = client.put(
+        f"/command-templates/{template['id']}/hosts/{pair['host_id']}", headers=headers
+    ).json()
+    assert attached["host_ids"] == [pair["host_id"]]
+
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    (host,) = [h for h in hosts if h["host_id"] == pair["host_id"]]
+    assert len(host["command_templates"]) == 1
+    assert host["command_templates"][0]["name"] == "npm scripts"
+
+    detached = client.delete(
+        f"/command-templates/{template['id']}/hosts/{pair['host_id']}", headers=headers
+    ).json()
+    assert detached["host_ids"] == []
+    hosts_after = client.get("/hosts", headers=headers).json()["hosts"]
+    (host_after,) = [h for h in hosts_after if h["host_id"] == pair["host_id"]]
+    assert host_after["command_templates"] == []
+
+
+def test_command_template_daemon_facing_fetch(client):
+    signup = _signup(client, "frank2")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    pair_a = client.post(
+        "/hosts/pair", json={"routing_key": "rk-frank2-a", "hostname": "a"}, headers=headers
+    ).json()
+    pair_b = client.post(
+        "/hosts/pair", json={"routing_key": "rk-frank2-b", "hostname": "b"}, headers=headers
+    ).json()
+    template = _create_template(client, headers).json()
+    client.put(f"/command-templates/{template['id']}/hosts/{pair_a['host_id']}", headers=headers)
+
+    device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
+    device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
+
+    fetched_a = client.get("/hosts/command-templates", headers=device_headers_a).json()
+    assert len(fetched_a["command_templates"]) == 1
+    assert fetched_a["command_templates"][0]["binary"] == "npm"
+    assert fetched_a["command_templates"][0]["allowed_args"] == [
+        {"pattern": "run build", "slots": {}}, {"pattern": "run test", "slots": {}}
+    ]
+
+    # Not attached to host B -- device_token B sees nothing.
+    fetched_b = client.get("/hosts/command-templates", headers=device_headers_b).json()
+    assert fetched_b["command_templates"] == []
+
+    no_auth = client.get("/hosts/command-templates")
+    assert no_auth.status_code == 401
+
+
+def test_command_template_is_per_user(client):
+    a = _signup(client, "gina2")
+    b = _signup(client, "hank2")
+    headers_a = {"Authorization": f"Bearer {a['token']}"}
+    headers_b = {"Authorization": f"Bearer {b['token']}"}
+    _create_template(client, headers_a)
+    assert client.get("/command-templates", headers=headers_b).json()["command_templates"] == []
+
+
+def test_command_template_ownership_enforced(client):
+    a = _signup(client, "ivan2")
+    b = _signup(client, "judy2")
+    headers_a = {"Authorization": f"Bearer {a['token']}"}
+    headers_b = {"Authorization": f"Bearer {b['token']}"}
+    template = _create_template(client, headers_a).json()
+    assert client.patch(
+        f"/command-templates/{template['id']}", json={"tier": "allow"}, headers=headers_b
+    ).status_code == 404
+    assert client.delete(f"/command-templates/{template['id']}", headers=headers_b).status_code == 404
