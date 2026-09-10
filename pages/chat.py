@@ -114,6 +114,38 @@ st.html(
     """
 )
 
+# initial_sidebar_state="expanded" above (meant to reset the sidebar to
+# open on every fresh page load) turned out not to be enough on its own --
+# confirmed directly: Streamlit persists whatever the user last manually
+# toggled the sidebar to in this browser's own localStorage (key pattern
+# stSidebarCollapsed-<id>), and consults *that* before initial_sidebar_state
+# at all on every future load, including a brand new session. Cleared here
+# every fresh page load (not gated to run once per session like
+# _url_cleaned below -- each collapse the user does during a session
+# writes a fresh key, so this needs to re-clear on every new load, not
+# just the first one this browser has ever seen) so initial_sidebar_state
+# actually gets a chance to apply each time, rather than only mattering
+# the very first time this browser ever loads the page. Iterates rather
+# than removing one constructed key directly, since the exact <id> isn't
+# a documented/stable value worth depending on.
+st.iframe(
+    """
+    <script>
+    (function() {
+        try {
+            var keys = Object.keys(window.parent.localStorage);
+            for (var i = 0; i < keys.length; i++) {
+                if (keys[i].indexOf('stSidebarCollapsed-') === 0) {
+                    window.parent.localStorage.removeItem(keys[i]);
+                }
+            }
+        } catch (e) {}
+    })();
+    </script>
+    """,
+    height=1,
+)
+
 # The Environment-management gear and the workspace refresh icon (both
 # below) are meant to read as small, secondary glyphs next to their
 # labels, not full buttons -- strips Streamlit's default bordered-button
