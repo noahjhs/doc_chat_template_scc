@@ -92,49 +92,68 @@ func ShowError(message string) {
 	_ = exec.Command("osascript", "-e", script).Run()
 }
 
-// checkboxUnchecked/checkboxChecked are the two label states of the
-// "Don't ask again" toggle in ConfirmWithDontAskAgain below.
-const (
-	checkboxUnchecked = "☐ Don't ask again"
-	checkboxChecked   = "☑ Don't ask again"
-)
+// escapeForJavaScriptString makes an arbitrary string safe to embed inside
+// a JavaScript double-quoted string literal -- ConfirmWithDontAskAgain's own
+// equivalent of escapeForAppleScript above, needed because it drives Cocoa
+// via JXA (JavaScript for Automation) rather than plain AppleScript.
+func escapeForJavaScriptString(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	return r.Replace(s)
+}
 
 // ConfirmWithDontAskAgain shows a native modal offering a custom
-// affirmative action (actionLabel, the default button), a "Not Now"
-// decline, and a "Don't ask again" checkbox -- unchecked by default.
-// AppleScript's `display dialog` has no real checkbox widget, so this is
-// the standard substitute: the checkbox is itself a third button whose
-// label toggles between checkboxUnchecked/checkboxChecked, re-showing the
-// same dialog rather than dismissing it, until the user actually picks
-// "Not Now" or actionLabel. Returns (accepted, dontAskAgain) -- accepted is
-// whether actionLabel was chosen; dontAskAgain reflects the checkbox's
-// state at the moment either of those two was clicked. Same
-// System-Events-activate trick as ShowFarewellDialog, for the same reason.
+// affirmative action (actionLabel), a "Not Now" decline, and a real "Don't
+// ask again" checkbox on its own line beneath the message -- unchecked by
+// default. AppleScript's `display dialog` has no checkbox widget at all
+// (an earlier version of this faked one out of a third, self-relabeling
+// button), so this goes around it entirely: `osascript -l JavaScript`
+// (JXA) can bridge straight to Cocoa via ObjC.import, so this builds a real
+// NSAlert with an NSButton(type: switch) accessory view, the standard
+// AppKit idiom for exactly this "don't show this again" pattern. Confirmed
+// directly (a throwaway spike) that the ObjC bridge resolves
+// NSButtonTypeSwitch/NSAlertFirstButtonReturn/NSControlStateValueOn/Off to
+// their real integer values, so those are used symbolically rather than as
+// magic numbers. actionLabel is added first, which is what makes it (not
+// "Not Now") the alert's default/highlighted button -- Cocoa does this
+// automatically for the first button added, no extra styling code needed.
+// Returns (accepted, dontAskAgain) -- accepted is whether actionLabel was
+// chosen; dontAskAgain is the checkbox's final state regardless of which
+// button was clicked. activateIgnoringOtherApps is this version's
+// equivalent of ShowFarewellDialog's "tell application System Events to
+// activate" -- same reason (no window/Dock presence of its own to bring
+// forward otherwise), different mechanism (an in-process NSApplication
+// call, since this alert is being driven directly rather than through
+// another application).
 func ConfirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAskAgain bool) {
-	script := fmt.Sprintf(`tell application "System Events" to activate
-set dontAskChecked to false
-set finalButton to ""
-repeat
-	set checkboxLabel to "%s"
-	if dontAskChecked then set checkboxLabel to "%s"
-	set dialogResult to display dialog "%s" with title "Casper" buttons {checkboxLabel, "Not Now", "%s"} default button "%s"
-	set finalButton to button returned of dialogResult
-	if finalButton is "%s" or finalButton is "Not Now" then
-		exit repeat
-	end if
-	set dontAskChecked to not dontAskChecked
-end repeat
-return finalButton & "|" & dontAskChecked`,
-		checkboxUnchecked, checkboxChecked, escapeForAppleScript(message),
-		escapeForAppleScript(actionLabel), escapeForAppleScript(actionLabel), escapeForAppleScript(actionLabel),
-	)
-	out, err := exec.Command("osascript", "-e", script).Output()
+	script := fmt.Sprintf(`
+ObjC.import('Cocoa');
+function run() {
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    var alert = $.NSAlert.alloc.init;
+    alert.messageText = "Casper";
+    alert.informativeText = "%s";
+    alert.addButtonWithTitle("%s");
+    alert.addButtonWithTitle("Not Now");
+
+    var checkbox = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, 0, 320, 18));
+    checkbox.setButtonType($.NSButtonTypeSwitch);
+    checkbox.title = "Don't ask again";
+    checkbox.state = $.NSControlStateValueOff;
+    alert.accessoryView = checkbox;
+
+    var response = alert.runModal;
+    var accepted = response === $.NSAlertFirstButtonReturn;
+    var dontAskAgain = checkbox.state === $.NSControlStateValueOn;
+    return (accepted ? "1" : "0") + (dontAskAgain ? "1" : "0");
+}
+`, escapeForJavaScriptString(message), escapeForJavaScriptString(actionLabel))
+	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
 	if err != nil {
 		return false, false
 	}
-	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
-	if len(parts) != 2 {
+	result := strings.TrimSpace(string(out))
+	if len(result) != 2 {
 		return false, false
 	}
-	return parts[0] == actionLabel, parts[1] == "true"
+	return result[0] == '1', result[1] == '1'
 }
