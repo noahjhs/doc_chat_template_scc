@@ -14,12 +14,24 @@ from utils.auth import (
     require_agent_session,
     require_app_subdomain,
 )
-from utils.branding import NAME, page_header
+from utils.branding import NAME
+from utils.sidebar import handle_sign_out_if_requested, render_sidebar
 
-st.set_page_config(page_title="Casper - Hosts & Environments", page_icon="👻")
+st.set_page_config(page_title="Casper - Hosts & Environments", page_icon="👻", initial_sidebar_state="expanded")
 require_app_subdomain()
+
+# Handles (and st.stop()s on) an in-flight sign-out -- see
+# utils/sidebar.py's own docstring for why this has to run before
+# require_agent_session() below, not after.
+handle_sign_out_if_requested()
+
 username = require_agent_session()
-page_header()
+
+# Same sidebar as pages/chat.py (brand, sign-out, Environment/host
+# selection, workspace directory browser, Local commands reference) --
+# this page doesn't do any tool-calling, so its own local_agent_configs/
+# selected_host_label return value is simply unused here.
+render_sidebar(username)
 
 st.title("Hosts & Environments")
 
