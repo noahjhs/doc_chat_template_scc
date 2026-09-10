@@ -162,7 +162,7 @@ def render_topbar():
     after require_agent_session(), before any other main-content output."""
     _render_topbar_css()
     with st.container(key="brand_corner"):
-        st.markdown(home_link_html(size=32), unsafe_allow_html=True)
+        st.markdown(home_link_html(size=44), unsafe_allow_html=True)
     with st.container(key="topbar_row"):
         gear_col, signout_col = st.columns([1, 1])
         with gear_col:

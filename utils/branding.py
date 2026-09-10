@@ -1,5 +1,7 @@
 import streamlit as st
 
+from utils.auth import www_subdomain_url
+
 NAME = "Casper"
 TAGLINE = "your friendly ghost."
 
@@ -78,19 +80,26 @@ def hide_streamlit_chrome():
 def home_link_html(size=32):
     """HTML for the clickable brand+logo linking back to the home page --
     shared by page_header() (rendered in the main content area) and
-    pages/chat.py (rendered directly in its sidebar instead, alongside its
-    other real, persistent controls). Carries its own bottom margin so
-    whatever follows it -- the rest of a page's content, or chat.py's
-    "Sign out" button -- gets some breathing room rather than sitting
-    right against it. A real <a> tag with target="_self" (not st.markdown's
-    `[text](url)` syntax) is deliberate: st.markdown's markdown-syntax links
-    default to target="_blank" regardless of the URL, and a link that
-    always points at a relative "/" is always same-subdomain navigation,
-    which should never open a new tab (see casper_app.py's other links for
-    the same rule applied to cross-subdomain links, which -- correctly --
-    do open one)."""
+    utils/topbar.py's render_topbar() (pinned to the top-left corner on
+    every real in-app page instead). Carries its own bottom margin so
+    whatever follows it in normal document flow -- the rest of a page's
+    content, for page_header() callers -- gets some breathing room rather
+    than sitting right against it (moot for render_topbar()'s own use,
+    which is the only thing in its fixed-position box, but harmless there).
+
+    Links to www_subdomain_url() (utils/auth.py), not a bare relative "/"
+    -- every caller of this (signin.py, signup.py, download.py via
+    page_header(), and now every in-app page via render_topbar()) is
+    served from the *app* subdomain, where "/" resolves to nothing (fixed
+    directly: this was a dead link in practice). Since that makes it a
+    genuinely cross-subdomain link, target="_blank" + rel="noopener" now,
+    matching this codebase's own established rule for cross-subdomain
+    links elsewhere (see casper_app.py's own Sign in/Sign up links) --
+    opening in a new tab rather than abandoning whatever's active in this
+    one (a chat session, mid-signup)."""
     return (
-        f'<a href="/" target="_self" style="text-decoration:none;color:inherit;'
+        f'<a href="{www_subdomain_url()}" target="_blank" rel="noopener" '
+        f'style="text-decoration:none;color:inherit;'
         f'display:inline-flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">'
         f'{ghost_svg(size)}<span style="font-size:{round(size * 0.6)}px;font-weight:700;">{NAME}</span></a>'
     )

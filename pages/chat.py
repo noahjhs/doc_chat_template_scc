@@ -234,7 +234,12 @@ def _build_welcome_message():
         lines.append(f"The selected host, {selected_host['label']}, has these folders available:")
         lines.extend(directories if directories else ["(none added yet)"])
 
-    return "\n".join(lines)
+    # "  \n" (two trailing spaces), not a bare "\n" -- st.write() renders
+    # this as markdown, which collapses a plain single newline into a space
+    # (confirmed directly: the message rendered as one long wrapped line
+    # instead of the intended one-item-per-line layout); two trailing
+    # spaces is markdown's actual hard-line-break syntax.
+    return "  \n".join(lines)
 
 
 if "messages" not in st.session_state:

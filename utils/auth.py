@@ -25,6 +25,28 @@ def app_subdomain_url():
     return _base_url(st.secrets["APP_SUBDOMAIN_DOMAIN"])
 
 
+def www_subdomain_url():
+    """Base URL (with scheme) of this deployment's "www" subdomain -- where
+    the public landing/download page (casper_app.py) lives. The reverse of
+    app_subdomain_url(), for pages served from the app subdomain that need
+    to link *back* to the landing page (utils/branding.py's brand/logo
+    link -- a bare relative "/" resolved against the app subdomain itself,
+    which serves no page there, was a dead link). There's no separate
+    stored www-domain secret (require_www_subdomain() only ever needs to
+    know a host *isn't* the app host, never its own value), so this derives
+    it from APP_SUBDOMAIN_DOMAIN by swapping "app" for "www" in its first
+    label only: "app.X" -> "www.X", "dev-app.X" -> "dev-www.X" -- matching
+    the actual naming convention this deployment uses. Falls back to "/" if
+    APP_SUBDOMAIN_DOMAIN isn't configured at all (e.g. local dev), where
+    every page already lives at the same origin anyway."""
+    app_domain = st.secrets.get("APP_SUBDOMAIN_DOMAIN", "")
+    if not app_domain:
+        return "/"
+    labels = app_domain.split(".")
+    labels[0] = labels[0].replace("app", "www", 1)
+    return _base_url(".".join(labels))
+
+
 def _current_host():
     """The Host header of the current request, hostname only (no port) --
     both www.casperagent.dev/app.casperagent.dev and dev-www/dev-app resolve
