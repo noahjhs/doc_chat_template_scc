@@ -31,10 +31,11 @@ func dotIconPNG(c color.RGBA) []byte {
 }
 
 var (
-	// SetIcon (not SetTemplateIcon) is used with these -- a template icon
-	// gets forced to monochrome by macOS to match the menu bar's
-	// light/dark appearance, which would defeat the point of a green/gray
-	// status color.
+	// Applied via setStatusDotIcon (statusicon_darwin.go), not
+	// MenuItem.SetIcon/SetTemplateIcon -- a template image gets forced to
+	// monochrome by macOS to match the menu bar's light/dark appearance,
+	// which would defeat the point of a green/gray status color; a plain
+	// (non-template) NSImage keeps the real color regardless.
 	greenDotIcon = dotIconPNG(color.RGBA{R: 0x2E, G: 0xC7, B: 0x5F, A: 0xFF})
 	grayDotIcon  = dotIconPNG(color.RGBA{R: 0x9E, G: 0x9E, B: 0x9E, A: 0xFF})
 )

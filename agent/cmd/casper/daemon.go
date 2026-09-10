@@ -272,6 +272,16 @@ func (d *daemonState) reportPresence(deviceToken string) {
 // once at creation in onReady, never Hidden here); "Run on system startup"
 // (mStartup in main.go) was already independent of sign-in state and isn't
 // touched here either.
+//
+// The status dot itself is set via setStatusDotIcon (statusicon_darwin.go),
+// not MenuItem.SetIcon -- SetIcon sets NSMenuItem.image, a separate column
+// that pushes this item's title text right of every other item's; the
+// state/checkmark column setStatusDotIcon uses instead is the one "Run on
+// system startup"'s checkbox already occupies, so the dot lines up with
+// that checkmark and this item's title stays flush with the rest (reported
+// directly as misaligned before this). SetTitle first, then
+// setStatusDotIcon -- the latter finds the item by matching its current
+// title's prefix, so the rename has to land first.
 func (d *daemonState) applyState() {
 	if d.mToggle == nil || d.mStatus == nil {
 		return
@@ -279,12 +289,12 @@ func (d *daemonState) applyState() {
 	if d.isEnabled() {
 		d.mToggle.SetTitle("Stop")
 		d.mStatus.SetTitle("Service is running")
-		d.mStatus.SetIcon(greenDotIcon)
+		setStatusDotIcon("Service is", greenDotIcon)
 		systray.SetTooltip("Casper — connected")
 	} else {
 		d.mToggle.SetTitle("Start")
 		d.mStatus.SetTitle("Service is paused")
-		d.mStatus.SetIcon(grayDotIcon)
+		setStatusDotIcon("Service is", grayDotIcon)
 		systray.SetTooltip("Casper — paused")
 	}
 }
