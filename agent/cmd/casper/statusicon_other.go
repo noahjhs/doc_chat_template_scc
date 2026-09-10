@@ -7,4 +7,4 @@ package main
 // access at all. A silent no-op elsewhere, same posture as the rest of
 // this codebase's darwin-only native-integration code (there's no packaged
 // Windows build yet -- see build/build_go_macos.sh).
-func setStatusDotIcon(titlePrefix string, png []byte) {}
+func setStatusDotIcon(titlePrefix string, png []byte, widthPt, heightPt float64) {}

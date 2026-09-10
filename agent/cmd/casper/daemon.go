@@ -289,12 +289,12 @@ func (d *daemonState) applyState() {
 	if d.isEnabled() {
 		d.mToggle.SetTitle("Stop")
 		d.mStatus.SetTitle("Service is running")
-		setStatusDotIcon("Service is", greenDotIcon)
+		setStatusDotIcon("Service is", greenDotIcon, dotCanvasWidthPt, dotCanvasHeightPt)
 		systray.SetTooltip("Casper — connected")
 	} else {
 		d.mToggle.SetTitle("Start")
 		d.mStatus.SetTitle("Service is paused")
-		setStatusDotIcon("Service is", grayDotIcon)
+		setStatusDotIcon("Service is", grayDotIcon, dotCanvasWidthPt, dotCanvasHeightPt)
 		systray.SetTooltip("Casper — paused")
 	}
 }
