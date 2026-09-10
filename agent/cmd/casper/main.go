@@ -217,13 +217,15 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 	systray.SetTooltip("Casper")
 
 	// First item, always -- a glance at the icon (green = running, gray =
-	// paused) says everything the tooltip already says, without needing to
-	// open the menu at all. Disabled: it's a status readout, not an action.
-	mStatus := systray.AddMenuItem("Service is paused", "Casper's current status")
+	// paused) says everything at a glance, without needing to open the menu
+	// at all. Disabled: it's a status readout, not an action. No tooltip
+	// strings on any item below (removed per an explicit ask) -- the
+	// item's own title is meant to be self-explanatory.
+	mStatus := systray.AddMenuItem("Service is paused", "")
 	mStatus.Disable()
 	systray.AddSeparator()
 
-	mToggle := systray.AddMenuItem("Run", "Pause/resume the relay connection")
+	mToggle := systray.AddMenuItem("Resume", "")
 
 	isLoginItem, err := config.IsLoginItem()
 	if err != nil {
@@ -232,11 +234,9 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 	// Independent of sign-in state (unlike mToggle/mStatus above) -- always
 	// visible, since "launch Casper at login" is a system-level preference
 	// a user might want set before ever pairing a host.
-	mStartup := systray.AddMenuItemCheckbox(
-		"Include in startup items", "Automatically launch Casper when you log in", isLoginItem,
-	)
+	mStartup := systray.AddMenuItemCheckbox("Include in startup items", "", isLoginItem)
 	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("Quit", "Quit Casper")
+	mQuit := systray.AddMenuItem("Quit", "")
 
 	state.mToggle = mToggle
 	state.mStatus = mStatus
