@@ -396,3 +396,84 @@ def test_storage_is_per_user(client):
     )
     assert client.get("/storage", headers={"Authorization": f"Bearer {b['token']}"}).json()["files"] == []
     assert client.get("/storage/a-only.txt", headers={"Authorization": f"Bearer {b['token']}"}).status_code == 404
+
+
+def test_profile_defaults_and_get_creates_row(client):
+    signup = _signup(client, "uma")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = client.get("/profile", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["email"] == ""
+    assert body["email_notifications_enabled"] is False
+    assert body["sms_number"] == ""
+    assert body["sms_notifications_enabled"] is False
+    for field in (
+        "allow_configure_command_sets",
+        "allow_configure_apps",
+        "allow_configure_hosts",
+        "allow_configure_environments",
+        "allow_configure_local_agents",
+    ):
+        assert body[field] is False
+
+
+def test_profile_partial_update_merges(client):
+    signup = _signup(client, "vince")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r1 = client.patch("/profile", json={"email": "vince@example.com"}, headers=headers)
+    assert r1.status_code == 200
+    assert r1.json()["email"] == "vince@example.com"
+    assert r1.json()["email_notifications_enabled"] is False
+
+    r2 = client.patch("/profile", json={"email_notifications_enabled": True}, headers=headers)
+    assert r2.status_code == 200
+    # Previously-set email survives an update that doesn't mention it.
+    assert r2.json()["email"] == "vince@example.com"
+    assert r2.json()["email_notifications_enabled"] is True
+
+
+def test_profile_rejects_invalid_email(client):
+    signup = _signup(client, "wendy")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = client.patch("/profile", json={"email": "not-an-email"}, headers=headers)
+    assert r.status_code == 422
+    # A clean string, not FastAPI's default {"detail": [{"msg": ...}]} shape
+    # -- see main.py's _validation_error_handler.
+    assert r.json()["detail"] == "Enter a valid email address."
+
+
+def test_profile_normalizes_valid_phone_number(client):
+    signup = _signup(client, "xavier")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = client.patch("/profile", json={"sms_number": "1 (555) 234-5678"}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["sms_number"] == "(555) 234-5678"
+
+
+def test_profile_rejects_invalid_phone_number(client):
+    signup = _signup(client, "yara")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = client.patch("/profile", json={"sms_number": "12345"}, headers=headers)
+    assert r.status_code == 422
+    assert r.json()["detail"] == "Enter a 10-digit phone number."
+
+
+def test_profile_permission_checkboxes_default_off_and_toggle(client):
+    signup = _signup(client, "zack")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = client.patch("/profile", json={"allow_configure_hosts": True}, headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["allow_configure_hosts"] is True
+    assert body["allow_configure_environments"] is False
+
+
+def test_profile_is_per_user(client):
+    a = _signup(client, "amy2")
+    b = _signup(client, "bob2")
+    client.patch(
+        "/profile", json={"email": "amy@example.com"}, headers={"Authorization": f"Bearer {a['token']}"}
+    )
+    b_profile = client.get("/profile", headers={"Authorization": f"Bearer {b['token']}"}).json()
+    assert b_profile["email"] == ""

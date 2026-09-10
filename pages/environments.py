@@ -16,6 +16,7 @@ from utils.auth import (
 )
 from utils.branding import NAME
 from utils.sidebar import handle_sign_out_if_requested, render_sidebar
+from utils.topbar import render_settings_menu
 
 st.set_page_config(page_title="Casper - Hosts & Environments", page_icon="👻", initial_sidebar_state="expanded")
 require_app_subdomain()
@@ -27,10 +28,11 @@ handle_sign_out_if_requested()
 
 username = require_agent_session()
 
-# Same sidebar as pages/chat.py (brand, sign-out, Environment/host
-# selection, workspace directory browser, Local commands reference) --
-# this page doesn't do any tool-calling, so its own local_agent_configs/
-# selected_host_label return value is simply unused here.
+# Same Settings gear/sign-out + sidebar as every other real in-app page --
+# this page doesn't do any tool-calling, so render_sidebar's own
+# local_agent_configs/selected_host_label return value is simply unused
+# here.
+render_settings_menu()
 render_sidebar(username)
 
 st.title("Hosts & Environments")

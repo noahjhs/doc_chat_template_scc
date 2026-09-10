@@ -315,3 +315,17 @@ def download_storage(auth_domain, token, filename):
 def delete_storage(auth_domain, token, filename):
     """DELETE /storage/{filename}. Returns {"deleted": True}, or {"error": str}."""
     return _auth_write("DELETE", auth_domain, token, f"/storage/{quote(filename, safe='')}")
+
+
+def get_profile(auth_domain, token):
+    """GET /profile. Returns the full profile dict (server-side defaults
+    filled in on this user's first-ever call), or {"error": str}."""
+    return _auth_write("GET", auth_domain, token, "/profile")
+
+
+def update_profile(auth_domain, token, **fields):
+    """PATCH /profile -- merge-updates only the given fields (any subset),
+    e.g. update_profile(domain, token, email="a@b.com"). Returns the full,
+    updated profile dict, or {"error": str} (e.g. a malformed email/phone
+    number -- see auth_service/models.py's validators)."""
+    return _auth_write("PATCH", auth_domain, token, "/profile", fields)

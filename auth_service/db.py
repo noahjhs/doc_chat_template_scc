@@ -60,6 +60,25 @@ CREATE TABLE IF NOT EXISTS environment_hosts (
     PRIMARY KEY (environment_id, host_id)
 );
 CREATE INDEX IF NOT EXISTS idx_environment_hosts_host_id ON environment_hosts(host_id);
+
+-- Notification contact info + assistant-permission preferences (pages/
+-- settings_profile.py, pages/settings_security.py) -- a new table rather
+-- than new columns on users, same reasoning as hosts/environments above
+-- (no migration mechanism, and users.db already has real rows on deployed
+-- instances). One row per user, created lazily with defaults on first
+-- read/write -- see main.py's _get_or_create_profile.
+CREATE TABLE IF NOT EXISTS user_profile (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    email TEXT NOT NULL DEFAULT '',
+    email_notifications_enabled INTEGER NOT NULL DEFAULT 0,
+    sms_number TEXT NOT NULL DEFAULT '',
+    sms_notifications_enabled INTEGER NOT NULL DEFAULT 0,
+    allow_configure_command_sets INTEGER NOT NULL DEFAULT 0,
+    allow_configure_apps INTEGER NOT NULL DEFAULT 0,
+    allow_configure_hosts INTEGER NOT NULL DEFAULT 0,
+    allow_configure_environments INTEGER NOT NULL DEFAULT 0,
+    allow_configure_local_agents INTEGER NOT NULL DEFAULT 0
+);
 """
 
 

@@ -34,24 +34,29 @@ MAX_TREE_RENDER_DEPTH = 2  # independent of the server's own depth-4 fetch cap -
 MAX_TREE_ENTRIES_PER_DIR = 50
 
 
-def _start_sign_out():
-    # on_click (not "if st.button(...):") so this runs as part of Streamlit's
-    # own click-handling, before the rerun it then triggers automatically --
-    # more robust than checking the button's return value inline, which a
-    # couple of reported cases suggest can occasionally miss a click's first
-    # rerun. No st.rerun() needed/wanted here; Streamlit already reruns once
-    # after any on_click callback returns.
+def start_sign_out():
+    # Exported (not sidebar-private) -- the sign-out button itself lives in
+    # utils/topbar.py's render_settings_menu() now, next to the Settings
+    # gear, not in the sidebar; this and handle_sign_out_if_requested below
+    # stayed here since they're about the sign-out *flow*, not where its
+    # button happens to be drawn. on_click (not "if st.button(...):") so
+    # this runs as part of Streamlit's own click-handling, before the rerun
+    # it then triggers automatically -- more robust than checking the
+    # button's return value inline, which a couple of reported cases
+    # suggest can occasionally miss a click's first rerun. No st.rerun()
+    # needed/wanted here; Streamlit already reruns once after any on_click
+    # callback returns.
     st.session_state["_signing_out"] = True
 
 
 def handle_sign_out_if_requested():
     """Call right after require_app_subdomain(), before require_agent_session()
-    -- on every page with a sidebar (both render_sidebar() callers), since
-    the sign-out icon inside render_sidebar() lives on all of them now. Split
-    from the button click itself (_start_sign_out above) on purpose: these
-    are slow, blocking network calls (up to several seconds), and running
-    them directly in the button's own script run left the click looking like
-    it hadn't registered -- if the user clicked again before this finished,
+    -- on every page with the sign-out icon (utils/topbar.py's
+    render_settings_menu(), called from every real in-app page). Split from
+    the button click itself (start_sign_out above) on purpose: these are
+    slow, blocking network calls (up to several seconds), and running them
+    directly in the button's own script run left the click looking like it
+    hadn't registered -- if the user clicked again before this finished,
     Streamlit cancels the still-running script for the newer one, aborting
     these calls mid-flight. Setting a flag and rerunning first means the
     click itself is answered instantly, and this (visibly, via the spinner)
@@ -151,33 +156,33 @@ def _render_chrome_css():
         """,
         height=1,
     )
-    # The sign-out, Environment-gear, and workspace-refresh icons (all
-    # below) are meant to read as small, secondary glyphs, not full bordered
-    # buttons -- strips Streamlit's default button chrome down to just the
-    # icon glyph, in every interaction state (hover/focus/active too, so
-    # nothing picks up the theme's accent color on interaction --
-    # "monochromatic" per the original ask, still true now that these are
-    # Material icons instead of emoji). font-size scales the icon glyph
-    # itself, since Streamlit renders a `icon=":material/xxx:"` button icon
-    # as a ligature in an icon font -- sized like any other text. Targeted
-    # by key via Streamlit's own .st-key-<key> convention rather than a
-    # page-wide selector, so no other button on either page is affected; all
-    # three share one font-size so they render as one consistent icon set
-    # ("the same size, a bit bigger than the former gear icon" per the ask).
+    # The Environment-gear and workspace-refresh icons (both below) are
+    # meant to read as small, secondary glyphs, not full bordered buttons --
+    # strips Streamlit's default button chrome down to just the icon glyph,
+    # in every interaction state (hover/focus/active too, so nothing picks
+    # up the theme's accent color on interaction -- "monochromatic" per the
+    # original ask, still true now that these are Material icons instead of
+    # emoji). font-size scales the icon glyph itself, since Streamlit
+    # renders a `icon=":material/xxx:"` button icon as a ligature in an icon
+    # font -- sized like any other text. Targeted by key via Streamlit's own
+    # .st-key-<key> convention rather than a page-wide selector, so no other
+    # button on either page is affected. See utils/topbar.py for the
+    # Settings gear/sign-out icons' own (larger) sizing -- a separate CSS
+    # block, since "slightly larger" than these was requested for those.
     #
-    # The icon *rows* (brand+sign-out, Environment+gear, Workspace+refresh)
-    # are each their own st.container(key="icon_row_...") specifically so
-    # the icon's own column can be pinned to a fixed width via the shared
-    # "st-key-icon_row_" prefix below -- confirmed necessary against a real
-    # narrow-sidebar drag-resize: st.columns' default proportional flex
-    # widths shrink the icon column right along with the label column,
-    # eventually clipping the icon itself. Pinning the icon column's flex
-    # to a fixed, non-shrinking basis (and letting the label column's own
-    # text clip/ellipsis instead) keeps the icon fully visible at any width.
+    # The icon *rows* (Environment+gear, Workspace+refresh) are each their
+    # own st.container(key="icon_row_...") specifically so the icon's own
+    # column can be pinned to a fixed width via the shared "st-key-icon_row_"
+    # prefix below -- confirmed necessary against a real narrow-sidebar
+    # drag-resize: st.columns' default proportional flex widths shrink the
+    # icon column right along with the label column, eventually clipping the
+    # icon itself. Pinning the icon column's flex to a fixed, non-shrinking
+    # basis (and letting the label column's own text clip/ellipsis instead)
+    # keeps the icon fully visible at any width.
     st.html(
         """
         <style>
-        .st-key-env_gear_button button, .st-key-refresh_workspace button, .st-key-sign_out_button button {
+        .st-key-env_gear_button button, .st-key-refresh_workspace button {
             border: none !important;
             background: transparent !important;
             box-shadow: none !important;
@@ -187,9 +192,9 @@ def _render_chrome_css():
             font-size: 1.4rem !important;
             line-height: 1.4rem !important;
         }
-        .st-key-env_gear_button button:hover, .st-key-refresh_workspace button:hover, .st-key-sign_out_button button:hover,
-        .st-key-env_gear_button button:focus, .st-key-refresh_workspace button:focus, .st-key-sign_out_button button:focus,
-        .st-key-env_gear_button button:active, .st-key-refresh_workspace button:active, .st-key-sign_out_button button:active {
+        .st-key-env_gear_button button:hover, .st-key-refresh_workspace button:hover,
+        .st-key-env_gear_button button:focus, .st-key-refresh_workspace button:focus,
+        .st-key-env_gear_button button:active, .st-key-refresh_workspace button:active {
             border: none !important;
             background: transparent !important;
             box-shadow: none !important;
@@ -319,15 +324,17 @@ def _build_local_agent_configs(connected_hosts):
 
 
 def render_sidebar(username):
-    """The entire sidebar: brand+sign-out, Environment selection, host
-    picker, workspace directory browser, and Local commands reference --
-    identical on every page that calls it (pages/chat.py and
-    pages/environments.py), so a user sees the exact same controls (and can
-    switch host/Environment, browse directories, sign out, etc.) regardless
-    of which page they're on. Returns (local_agent_configs,
+    """The entire sidebar: brand, Environment selection, host picker,
+    workspace directory browser, and Local commands reference -- identical
+    on every page that calls it (pages/chat.py, pages/environments.py,
+    pages/settings_profile.py, pages/settings_security.py), so a user sees
+    the exact same controls (and can switch host/Environment, browse
+    directories, etc.) regardless of which page they're on. Sign-out lives
+    in utils/topbar.py's render_settings_menu() instead, not here -- see
+    its own module docstring for why. Returns (local_agent_configs,
     selected_host_label) -- pages/chat.py's own tool-calling code needs
-    both; pages/environments.py just ignores them, since it doesn't do tool
-    calling."""
+    both; every other caller just ignores them, since only chat.py does
+    tool calling."""
     _render_chrome_css()
 
     # Looked up once (cached in session_state) rather than carried via query
@@ -388,18 +395,7 @@ def render_sidebar(username):
         st.session_state["_active_environment_id"] = st.session_state["_environment_selector"]
 
     with st.sidebar:
-        with st.container(key="icon_row_brand"):
-            logo_col, signout_col = st.columns([5, 1])
-            with logo_col:
-                st.markdown(home_link_html(size=32), unsafe_allow_html=True)
-            with signout_col:
-                st.button(
-                    "",
-                    icon=":material/logout:",
-                    key="sign_out_button",
-                    help="Sign out",
-                    on_click=_start_sign_out,
-                )
+        st.markdown(home_link_html(size=32), unsafe_allow_html=True)
         st.caption(f"Signed in as {username}")
 
         st.divider()

@@ -12,6 +12,8 @@ import bcrypt
 import requests
 from db import get_db, init_db
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from models import (
     AuthResponse,
     EnvironmentCreateRequest,
@@ -26,6 +28,8 @@ from models import (
     HostRenameRequest,
     HostVerifyResponse,
     LoginRequest,
+    ProfileInfo,
+    ProfileUpdateRequest,
     RevokeResponse,
     SignOutAllResponse,
     SignupRequest,
@@ -39,6 +43,25 @@ from models import (
 
 app = FastAPI()
 init_db()
+
+
+@app.exception_handler(RequestValidationError)
+def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """Flattens FastAPI/pydantic's default {"detail": [{"msg": ..., ...}]}
+    shape into a single human-readable string, consistent with every other
+    error response in this service (e.g. HostPairResponse's 409, or
+    _safe_filename's 400) -- and what utils/auth.py's _error_detail (and
+    thus every settings-page st.error(result["error"])) actually expects.
+    Added for ProfileUpdateRequest's email/phone validators, but applies
+    service-wide since every 422 here benefits the same way."""
+    first = exc.errors()[0]
+    message = first.get("msg", "Invalid request.")
+    # pydantic v2 prefixes a validator's own raised ValueError text with
+    # "Value error, " in the formatted message -- stripped so e.g. "Enter a
+    # valid email address." isn't shown as "Value error, Enter a valid
+    # email address."
+    message = message.removeprefix("Value error, ")
+    return JSONResponse(status_code=422, content={"detail": message})
 
 
 # --- Rate limiting -----------------------------------------------------
@@ -668,3 +691,57 @@ def delete_storage(filename: str, authorization: str = Header(default="")):
     if os.path.isfile(target):
         os.remove(target)
     return StorageDeleteResponse(deleted=True)
+
+
+# --- Profile (pages/settings_profile.py, pages/settings_security.py) ----
+# Notification contact info + the "allow chat to configure..." checkboxes
+# are plain per-user preferences -- persisted here, but not enforced
+# anywhere yet (nothing in pages/chat.py's tool-calling loop reads
+# allow_configure_* today). "Command sets"/"Apps"/"Local agents" don't
+# correspond to any existing modeled concept in this codebase the way
+# Hosts/Environments do (see auth_service/db.py's hosts/environments
+# tables) -- wiring real enforcement for those three needs its own design
+# pass first, so this deliberately stops at "saved preference" for now.
+
+
+def _get_or_create_profile(db, user_id: int) -> ProfileInfo:
+    row = db.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+    if row is None:
+        db.execute("INSERT INTO user_profile (user_id) VALUES (?)", (user_id,))
+        row = db.execute("SELECT * FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+    return ProfileInfo(
+        email=row["email"],
+        email_notifications_enabled=bool(row["email_notifications_enabled"]),
+        sms_number=row["sms_number"],
+        sms_notifications_enabled=bool(row["sms_notifications_enabled"]),
+        allow_configure_command_sets=bool(row["allow_configure_command_sets"]),
+        allow_configure_apps=bool(row["allow_configure_apps"]),
+        allow_configure_hosts=bool(row["allow_configure_hosts"]),
+        allow_configure_environments=bool(row["allow_configure_environments"]),
+        allow_configure_local_agents=bool(row["allow_configure_local_agents"]),
+    )
+
+
+@app.get("/profile", response_model=ProfileInfo)
+def get_profile(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        return _get_or_create_profile(db, user_id)
+
+
+@app.patch("/profile", response_model=ProfileInfo)
+def update_profile(body: ProfileUpdateRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        _get_or_create_profile(db, user_id)  # ensures the row exists before the UPDATE below
+        updates = body.model_dump(exclude_unset=True)
+        if updates:
+            db.execute(
+                f"UPDATE user_profile SET {', '.join(f'{k} = ?' for k in updates)} WHERE user_id = ?",
+                (*updates.values(), user_id),
+            )
+        return _get_or_create_profile(db, user_id)
