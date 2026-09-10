@@ -85,29 +85,32 @@ client = get_client()
 # floating above the conversation.
 hide_streamlit_chrome()
 
-# hide_streamlit_chrome() fully hides Streamlit's own header bar
-# ([data-testid="stHeader"], display: none) on every page -- but the
-# control that reopens the sidebar once it's been collapsed lives inside
-# that same header (it has to: it's outside the sidebar itself, since a
-# collapsed sidebar can't hold the only way to un-collapse it). Hiding the
-# whole header therefore leaves no way back once you collapse the sidebar
-# here -- re-shown page-locally (not in branding.py's shared function),
-# since only this page actually has sidebar content worth reopening; every
-# other page keeps the header fully hidden. Layered after
+# hide_streamlit_chrome() fully hides Streamlit's own header bar AND
+# toolbar ([data-testid="stHeader"]/[data-testid="stToolbar"], both
+# display: none) on every page -- but confirmed directly, by reading
+# Streamlit's own frontend source, that the button which reopens a
+# collapsed sidebar (data-testid="stExpandSidebarButton") is rendered
+# *inside* stToolbar specifically, not stHeader generally. An earlier
+# attempt here only un-hid stHeader itself, which did nothing -- stToolbar
+# was still display:none, hiding the button right along with it
+# regardless. Both re-shown page-locally (not in branding.py's shared
+# function), since only this page actually has sidebar content worth
+# reopening; every other page keeps both fully hidden. Layered after
 # hide_streamlit_chrome()'s own <style> tag, so this wins the cascade for
-# equally-specific, both-!important rules on the same selector. The
-# menu/toolbar (the parts of the header actually worth hiding) stay hidden
-# regardless.
+# equally-specific, both-!important rules on the same selectors.
+# stMainMenu (the hamburger/settings menu, a sibling of the expand button
+# within stToolbar, not an ancestor) is the one still worth hiding, and
+# stays hidden.
 st.html(
     """
     <style>
-    [data-testid="stHeader"] {
+    [data-testid="stHeader"], [data-testid="stToolbar"] {
         display: block !important;
         background: transparent !important;
         height: auto !important;
         min-height: 0 !important;
     }
-    [data-testid="stMainMenu"], [data-testid="stToolbar"] {
+    [data-testid="stMainMenu"] {
         display: none !important;
     }
     </style>

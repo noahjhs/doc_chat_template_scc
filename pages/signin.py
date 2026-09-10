@@ -13,6 +13,45 @@ from utils.browser_nav import autofocus_input_js, click_anchor_js
 st.set_page_config(page_title="Casper - Sign in", page_icon="👻")
 require_app_subdomain()
 
+# Every path that can land here should check for an already-signed-in
+# session first, rather than showing the form regardless. Two checks,
+# covering two different cases:
+# 1. This exact browser tab already has a verified session cached in
+#    session_state (e.g. browser-back-button navigation from chat.py) --
+#    bounce straight back, no form, no flash of it either.
+if st.session_state.get("_authenticated_username"):
+    st.switch_page("pages/chat.py")
+
+# 2. A *different* tab/session (or this one after a reload that lost
+# session_state) previously signed in successfully -- utils/auth.py's
+# require_agent_session() stashes that token in this browser's own
+# localStorage on every successful verification. One-shot per session:
+# if found, navigates to /chat with it attached, letting
+# require_agent_session() do the real verification there; if there's
+# nothing stashed (or it's since been invalidated), this just no-ops and
+# falls through to the normal sign-in form below -- deliberately not
+# st.stop()-ed, so a failed/skipped recovery attempt never leaves this
+# page looking blank. click_anchor_js, not a direct window.parent.location
+# assignment -- see its own docstring for why that silently no-ops from
+# inside st.iframe's sandboxed frame.
+if "_recovery_attempted" not in st.session_state:
+    st.session_state["_recovery_attempted"] = True
+    st.iframe(
+        f"""
+        <script>
+        (function() {{
+            var stored = window.parent.localStorage.getItem('casper_auth_token');
+            if (stored) {{
+                var url = new URL(window.parent.location.origin + '/chat');
+                url.searchParams.set('local_agent_token', stored);
+                {click_anchor_js("url.toString()")}
+            }}
+        }})();
+        </script>
+        """,
+        height=1,
+    )
+
 page_header()
 st.title("Sign in")
 
