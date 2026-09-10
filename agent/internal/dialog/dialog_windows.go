@@ -47,3 +47,33 @@ func ShowError(message string) {
 	)
 	_ = exec.Command("powershell", "-NoProfile", "-Command", script).Run()
 }
+
+// ConfirmWithDontAskAgain approximates the darwin implementation's
+// checkbox-toggle dialog using a three-way MessageBox instead (Windows'
+// MessageBox has no real checkbox option either, and there's no packaged
+// Windows build yet to warrant a heavier custom dialog for this): Yes ->
+// actionLabel accepted, No -> declined, Cancel -> declined and treated as
+// "don't ask again". actionLabel itself isn't shown (YesNoCancel's button
+// text is fixed), but the caller-visible contract matches the darwin
+// version.
+func ConfirmWithDontAskAgain(message, _ string) (accepted bool, dontAskAgain bool) {
+	script := fmt.Sprintf(
+		"Add-Type -AssemblyName System.Windows.Forms | Out-Null; "+
+			"$r = [System.Windows.Forms.MessageBox]::Show('%s' + [Environment]::NewLine + "+
+			"'(Cancel = don''t ask again)', 'Casper', [System.Windows.Forms.MessageBoxButtons]::YesNoCancel); "+
+			"Write-Output $r",
+		escapeForPowerShellSingleQuoted(message),
+	)
+	out, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
+	if err != nil {
+		return false, false
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "Yes":
+		return true, false
+	case "Cancel":
+		return false, true
+	default:
+		return false, false
+	}
+}

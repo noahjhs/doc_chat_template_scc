@@ -200,13 +200,30 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 	systray.SetTitle("👻")
 	systray.SetTooltip("Casper")
 
-	mToggle := systray.AddMenuItem("Turn off", "Pause/resume the relay connection")
-	mSignOut := systray.AddMenuItem("Sign out", "Sign out of Casper")
+	// First item, always -- a glance at the icon (green = running, gray =
+	// paused) says everything the tooltip already says, without needing to
+	// open the menu at all. Disabled: it's a status readout, not an action.
+	mStatus := systray.AddMenuItem("Service is paused", "Casper's current status")
+	mStatus.Disable()
+	systray.AddSeparator()
+
+	mToggle := systray.AddMenuItem("Start", "Pause/resume the relay connection")
+
+	isLoginItem, err := config.IsLoginItem()
+	if err != nil {
+		logf("Couldn't check login items: %s", err)
+	}
+	// Independent of sign-in state (unlike mToggle/mStatus above) -- always
+	// visible, since "launch Casper at login" is a system-level preference
+	// a user might want set before ever pairing a host.
+	mStartup := systray.AddMenuItemCheckbox(
+		"Run on system startup", "Automatically launch Casper when you log in", isLoginItem,
+	)
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit Casper")
 
 	state.mToggle = mToggle
-	state.mSignOut = mSignOut
+	state.mStatus = mStatus
 	state.applyState() // covers a pairing event that arrived before this ran
 
 	go func() {
@@ -215,9 +232,19 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 		}
 	}()
 	go func() {
-		for range mSignOut.ClickedCh {
-			logf("Sign out requested from the status bar")
-			state.signOutFromTray()
+		for range mStartup.ClickedCh {
+			if mStartup.Checked() {
+				mStartup.Uncheck()
+				if err := config.RemoveLoginItem(); err != nil {
+					logf("Couldn't remove Casper from login items: %s", err)
+				}
+			} else {
+				mStartup.Check()
+				if err := config.AddLoginItem(); err != nil {
+					logf("Couldn't add Casper to login items: %s", err)
+					mStartup.Uncheck() // revert the visual state -- the add itself failed
+				}
+			}
 		}
 	}()
 	go func() {
@@ -225,6 +252,38 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 		logf("Quit requested from the status bar")
 		systray.Quit()
 	}()
+
+	// Prompted once per cold launch (not gated behind whether the user
+	// happened to open the menu), unless it's already a login item, the
+	// user previously checked "Don't ask again", or this is a
+	// non-interactive dev/CI run (CONTROL_TOOL_KEY set, same env check
+	// main() uses to skip pairing dialogs entirely).
+	if !isLoginItem && os.Getenv("CONTROL_TOOL_KEY") == "" && !config.LoginItemPromptDismissed() {
+		go promptAddToLoginItems(mStartup, logf)
+	}
+}
+
+// promptAddToLoginItems asks (via a native, declinable modal -- see
+// internal/dialog.ConfirmWithDontAskAgain) whether to register Casper as a
+// macOS Login Item, so it relaunches automatically after a logout/restart
+// -- otherwise "Run on system startup" would only ever get turned on by a
+// user who happens to notice the menu item themselves.
+func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, args ...any)) {
+	accepted, dontAskAgain := dialog.ConfirmWithDontAskAgain(
+		"Add Casper to your login items, so it starts automatically when you log in?",
+		"Add",
+	)
+	if dontAskAgain {
+		config.DismissLoginItemPrompt()
+	}
+	if !accepted {
+		return
+	}
+	if err := config.AddLoginItem(); err != nil {
+		logf("Couldn't add Casper to login items: %s", err)
+		return
+	}
+	mStartup.Check()
 }
 
 func onExit(state *daemonState, srv *server.Server, logf func(format string, args ...any)) {

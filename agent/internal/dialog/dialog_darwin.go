@@ -91,3 +91,50 @@ func ShowError(message string) {
 	)
 	_ = exec.Command("osascript", "-e", script).Run()
 }
+
+// checkboxUnchecked/checkboxChecked are the two label states of the
+// "Don't ask again" toggle in ConfirmWithDontAskAgain below.
+const (
+	checkboxUnchecked = "☐ Don't ask again"
+	checkboxChecked   = "☑ Don't ask again"
+)
+
+// ConfirmWithDontAskAgain shows a native modal offering a custom
+// affirmative action (actionLabel, the default button), a "Not Now"
+// decline, and a "Don't ask again" checkbox -- unchecked by default.
+// AppleScript's `display dialog` has no real checkbox widget, so this is
+// the standard substitute: the checkbox is itself a third button whose
+// label toggles between checkboxUnchecked/checkboxChecked, re-showing the
+// same dialog rather than dismissing it, until the user actually picks
+// "Not Now" or actionLabel. Returns (accepted, dontAskAgain) -- accepted is
+// whether actionLabel was chosen; dontAskAgain reflects the checkbox's
+// state at the moment either of those two was clicked. Same
+// System-Events-activate trick as ShowFarewellDialog, for the same reason.
+func ConfirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAskAgain bool) {
+	script := fmt.Sprintf(`tell application "System Events" to activate
+set dontAskChecked to false
+set finalButton to ""
+repeat
+	set checkboxLabel to "%s"
+	if dontAskChecked then set checkboxLabel to "%s"
+	set dialogResult to display dialog "%s" with title "Casper" buttons {checkboxLabel, "Not Now", "%s"} default button "%s"
+	set finalButton to button returned of dialogResult
+	if finalButton is "%s" or finalButton is "Not Now" then
+		exit repeat
+	end if
+	set dontAskChecked to not dontAskChecked
+end repeat
+return finalButton & "|" & dontAskChecked`,
+		checkboxUnchecked, checkboxChecked, escapeForAppleScript(message),
+		escapeForAppleScript(actionLabel), escapeForAppleScript(actionLabel), escapeForAppleScript(actionLabel),
+	)
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return false, false
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
+	if len(parts) != 2 {
+		return false, false
+	}
+	return parts[0] == actionLabel, parts[1] == "true"
+}

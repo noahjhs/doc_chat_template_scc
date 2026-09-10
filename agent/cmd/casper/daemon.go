@@ -47,8 +47,8 @@ type daemonState struct {
 	// arrive before the menu exists (confirmed via a cold-launch spike: the
 	// launch-time Apple Event can be delivered before systray's onReady
 	// fires), so every method touching these must tolerate them being nil.
-	mToggle  *systray.MenuItem
-	mSignOut *systray.MenuItem
+	mToggle *systray.MenuItem
+	mStatus *systray.MenuItem
 }
 
 func newDaemonState(srv *server.Server, cmdHandler *commands.Handler, relayDomain, authDomain, routingKey string, port int, logf func(format string, args ...any)) *daemonState {
@@ -232,23 +232,6 @@ func (d *daemonState) onSignOut() {
 	d.applyState()
 }
 
-// signOutFromTray mirrors onSignOut but is triggered locally (the status-bar
-// "Sign out" item), where there's no web app in the loop to unpair the host
-// server-side -- so this does that part itself, using the daemon's cached
-// device_token before clearing it.
-func (d *daemonState) signOutFromTray() {
-	deviceToken := d.getDeviceToken()
-	d.stopTunnel()
-	d.srv.SetAPIKey("")
-	d.setCredentials("", "")
-	config.ClearSession(d.logf)
-	if deviceToken != "" {
-		go config.ClearPresence(d.authDomain, deviceToken)
-		go config.UnpairHost(d.authDomain, deviceToken)
-	}
-	d.applyState()
-}
-
 // reportPresence self-heals on a 401: the auth service no longer
 // recognizing this device_token (a remote sign-out, or an auth_service
 // restart clearing its in-memory attachment map -- see
@@ -273,24 +256,32 @@ func (d *daemonState) reportPresence(deviceToken string) {
 // applyState brings the status-bar icon/menu in line with the current
 // signed-out / signed-in-off / signed-in-on state. Safe to call before the
 // menu exists (onReady calls it once after building the menu, to cover a
-// pairing event that arrived before that point).
+// pairing event that arrived before that point). Note: the "Run on system
+// startup" checkbox (mStartup in main.go) isn't touched here -- it's a
+// system-level preference independent of Casper's own sign-in state, so it
+// stays visible and keeps whatever checked state the user (or the startup
+// prompt) last left it at, regardless of what this method does.
 func (d *daemonState) applyState() {
-	if d.mToggle == nil || d.mSignOut == nil {
+	if d.mToggle == nil || d.mStatus == nil {
 		return
 	}
 	if !d.srv.HasAPIKey() {
 		d.mToggle.Hide()
-		d.mSignOut.Hide()
+		d.mStatus.Hide()
 		systray.SetTooltip("Casper — waiting to sign in")
 		return
 	}
-	d.mSignOut.Show()
 	d.mToggle.Show()
+	d.mStatus.Show()
 	if d.isEnabled() {
-		d.mToggle.SetTitle("Turn off")
+		d.mToggle.SetTitle("Stop")
+		d.mStatus.SetTitle("Service is running")
+		d.mStatus.SetIcon(greenDotIcon)
 		systray.SetTooltip("Casper — connected")
 	} else {
-		d.mToggle.SetTitle("Turn on")
+		d.mToggle.SetTitle("Start")
+		d.mStatus.SetTitle("Service is paused")
+		d.mStatus.SetIcon(grayDotIcon)
 		systray.SetTooltip("Casper — paused")
 	}
 }
