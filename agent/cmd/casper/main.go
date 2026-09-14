@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -228,10 +229,11 @@ func main() {
 		systray.Quit()
 	}()
 
-	systray.Run(func() { onReady(state, logf) }, func() { onExit(state, srv, approvalRelayCancel, logf) })
+	restart := func() { restartApp(state, srv, approvalRelayCancel, logf) }
+	systray.Run(func() { onReady(state, restart, logf) }, func() { onExit(state, srv, approvalRelayCancel, logf) })
 }
 
-func onReady(state *daemonState, logf func(format string, args ...any)) {
+func onReady(state *daemonState, restart func(), logf func(format string, args ...any)) {
 	systray.SetTitle("👻")
 	systray.SetTooltip("Casper")
 
@@ -255,6 +257,11 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 	// a user might want set before ever pairing a host.
 	mStartup := systray.AddMenuItemCheckbox("Include in startup items", "", isLoginItem)
 	systray.AddSeparator()
+	// Restart, not just Quit -- a manual fallback for cases the automatic
+	// refresh triggers (pairing/resume, and the Resources page's own
+	// on-mutation refresh) don't cover, without having to hunt down and
+	// relaunch the app bundle by hand.
+	mRestart := systray.AddMenuItem("Restart", "")
 	mQuit := systray.AddMenuItem("Quit", "")
 
 	state.mToggle = mToggle
@@ -281,6 +288,10 @@ func onReady(state *daemonState, logf func(format string, args ...any)) {
 				}
 			}
 		}
+	}()
+	go func() {
+		<-mRestart.ClickedCh
+		restart()
 	}()
 	go func() {
 		<-mQuit.ClickedCh
@@ -321,9 +332,40 @@ func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, 
 	mStartup.Check()
 }
 
-func onExit(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc, logf func(format string, args ...any)) {
+// shutdownDaemon is the actual teardown work -- factored out of onExit so
+// restartApp can run the exact same steps synchronously itself (see its own
+// doc comment for why it can't just go through systray.Quit()/onExit).
+func shutdownDaemon(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc) {
 	cancelApprovalRelay()
 	state.stopTunnel()
 	srv.Shutdown()
+}
+
+func onExit(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc, logf func(format string, args ...any)) {
+	shutdownDaemon(state, srv, cancelApprovalRelay)
 	logf("casper-agent exiting")
+}
+
+// restartApp relaunches the running executable and then exits this process
+// -- shuts down first (synchronously, not via systray.Quit()'s own async
+// callback) specifically so the new instance never races this one for the
+// HTTP server's port; only once that's done does it spawn the replacement
+// and exit. The new instance picks its session back up from the same
+// cached session.json a normal quit-and-reopen would, so nothing else
+// needs to be handed to it explicitly.
+func restartApp(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc, logf func(format string, args ...any)) {
+	exePath, err := os.Executable()
+	if err != nil {
+		logf("Restart: couldn't resolve the running executable's path: %s", err)
+		dialog.ShowError("Couldn't restart Casper -- try quitting and reopening it manually.")
+		return
+	}
+	logf("Restart requested from the status bar")
+	shutdownDaemon(state, srv, cancelApprovalRelay)
+	if err := exec.Command(exePath).Start(); err != nil {
+		logf("Restart: couldn't relaunch %s: %s", exePath, err)
+		dialog.ShowError("Couldn't restart Casper -- try quitting and reopening it manually.")
+		return
+	}
+	os.Exit(0)
 }

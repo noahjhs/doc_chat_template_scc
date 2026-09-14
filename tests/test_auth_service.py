@@ -524,6 +524,20 @@ def test_command_template_crud(client):
     assert client.get("/command-templates", headers=headers).json()["command_templates"] == []
 
 
+def test_command_template_accepts_deny_tier(client):
+    signup = _signup(client, "dave3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    created = _create_template(client, headers, tier="deny")
+    assert created.status_code == 201
+    assert created.json()["tier"] == "deny"
+
+    updated = client.patch(
+        f"/command-templates/{created.json()['id']}", json={"tier": "deny"}, headers=headers
+    )
+    assert updated.status_code == 200
+    assert updated.json()["tier"] == "deny"
+
+
 def test_command_template_rejects_empty_allowed_args(client):
     signup = _signup(client, "dave2")
     headers = {"Authorization": f"Bearer {signup['token']}"}

@@ -120,7 +120,7 @@ class CommandTemplateCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     binary: str = Field(min_length=1, max_length=200)
     allowed_args: list[CommandTemplateArgPattern] = Field(min_length=1)
-    tier: Literal["allow", "ask"] = "ask"
+    tier: Literal["allow", "ask", "deny"] = "ask"
     path_scoped: bool = True
 
 
@@ -131,7 +131,7 @@ class CommandTemplateUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     binary: str | None = Field(default=None, min_length=1, max_length=200)
     allowed_args: list[CommandTemplateArgPattern] | None = Field(default=None, min_length=1)
-    tier: Literal["allow", "ask"] | None = None
+    tier: Literal["allow", "ask", "deny"] | None = None
     path_scoped: bool | None = None
 
 

@@ -12,7 +12,7 @@ from utils.auth import (
     require_app_subdomain,
     update_command_template,
 )
-from utils.sidebar import handle_sign_out_if_requested, render_sidebar
+from utils.sidebar import _fetch_local_json, handle_sign_out_if_requested, render_sidebar
 from utils.topbar import render_topbar
 
 st.set_page_config(page_title="Casper - Command Templates", page_icon="👻", initial_sidebar_state="expanded")
@@ -25,7 +25,10 @@ handle_sign_out_if_requested()
 
 username = require_agent_session()
 render_topbar()
-render_sidebar(username)
+# Captured (not discarded, unlike most other callers of render_sidebar) so
+# _refresh() below can push a live re-fetch to every connected daemon --
+# see its own docstring for why that's necessary.
+local_agent_configs, _ = render_sidebar(username)
 
 st.title("Command Templates")
 st.caption(
@@ -54,10 +57,20 @@ def _refresh():
     # Called only right after a change actually succeeded (every call site
     # is inside the non-error branch of a mutation) -- so it doubles as the
     # signal for the "Update saved" message at the bottom of the page.
-    # Also clears the *daemon's* own cached copy is NOT done here directly
-    # -- pages/chat.py's tool schema reads straight from _hosts (refreshed
-    # below), and any already-running daemon picks up the change on its
-    # own next pairing/resume, or via its "Refresh" trigger further down.
+    # Also pushes a live refresh to every currently connected daemon (fire-
+    # and-forget, same posture as the sidebar's own add_directory call) --
+    # without this, a daemon that was already running before a template was
+    # created/edited/attached keeps enforcing its own stale cached copy
+    # until its next pairing/resume, which made testing a fresh template
+    # change look like a broken feature rather than an unrelated staleness
+    # gap (confirmed directly: a brand-new template came back "unknown"
+    # from the daemon until this was added). Broadcasting to every
+    # connected host rather than just the one(s) actually affected by this
+    # particular mutation is deliberately simple -- an update/delete can
+    # affect every host a template is attached to, and re-fetching is cheap
+    # and idempotent, so there's no real cost to over-broadcasting.
+    for config in local_agent_configs.values():
+        _fetch_local_json(config, "refresh_command_templates")
     st.session_state.pop("_hosts", None)
     st.session_state.pop("_command_templates", None)
     st.session_state["_just_saved"] = True
@@ -66,8 +79,8 @@ def _refresh():
 hosts = st.session_state["_hosts"]
 templates = st.session_state["_command_templates"]
 
-TIER_OPTIONS = ["ask", "allow"]
-TIER_LABELS = {"ask": "Ask", "allow": "Allow"}
+TIER_OPTIONS = ["deny", "ask", "allow"]
+TIER_LABELS = {"deny": "Deny", "ask": "Ask", "allow": "Allow"}
 
 st.header("Create a template")
 with st.form("create_template_form", clear_on_submit=True):
@@ -78,7 +91,13 @@ with st.form("create_template_form", clear_on_submit=True):
         placeholder="run build\nrun test\ninstall",
         help="Each line is one exact argument option the assistant may use -- nothing else is allowed.",
     )
-    tier = st.radio("Tier", options=TIER_OPTIONS, format_func=lambda t: TIER_LABELS[t], horizontal=True)
+    tier = st.radio(
+        "Tier",
+        options=TIER_OPTIONS,
+        index=TIER_OPTIONS.index("ask"),  # "ask" as the sensible default, not "deny" (options[0])
+        format_func=lambda t: TIER_LABELS[t],
+        horizontal=True,
+    )
     path_scoped = st.checkbox("Confine to this host's addressable directories", value=True)
     if st.form_submit_button("Create"):
         lines = [line.strip() for line in allowed_args_text.splitlines() if line.strip()]

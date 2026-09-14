@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS command_templates (
     -- zero-slot (exact-match) patterns; "slots" is reserved for future
     -- parameterized authorization, not migrated in later.
     allowed_args TEXT NOT NULL,
-    tier TEXT NOT NULL DEFAULT 'ask',       -- 'allow' | 'ask' -- no stored 'deny': absence of a matching template already means deny, same as any unrecognized action today
+    tier TEXT NOT NULL DEFAULT 'ask',       -- 'allow' | 'ask' | 'deny' -- 'deny' is a structural rejection, enforced entirely client-side in pages/chat.py's _process_turn (same as 'ask' already was) before ever calling the daemon: unlike an unmatched/unknown template (which also means deny, by absence), this is an explicit "never even prompt" rule on a template the assistant otherwise has visibility into
     path_scoped INTEGER NOT NULL DEFAULT 1, -- confined to the host's own addressable directories via the daemon's existing resolvePath/roots machinery
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (user_id, name COLLATE NOCASE)

@@ -243,7 +243,8 @@ def _build_command_template_tool(local_agent_configs):
         "Only the exact argument option listed above for a given template_id "
         "is allowed -- anything else is rejected. A template whose tier is "
         "'ask' pauses for the user's explicit approval in chat before it "
-        "actually runs; 'allow' runs immediately."
+        "actually runs; 'allow' runs immediately; 'deny' always rejects it "
+        "without running or prompting -- don't bother retrying a 'deny' call."
     )
     return {
         "type": "function",
@@ -755,7 +756,16 @@ def _process_turn(local_agent_configs, selected_host_label):
                 args = json.loads(call["arguments"])
                 host = args.get("host") or selected_host_label
                 template = _find_command_template(local_agent_configs, host, args.get("template_id"))
-                if decide_tier(template, args, st.session_state.messages) == "ask":
+                call_tier = decide_tier(template, args, st.session_state.messages)
+                if call_tier == "deny":
+                    # A structural rejection stored on the template itself --
+                    # never dispatched, and deliberately never even shown as
+                    # an in-chat/native-dialog prompt (unlike "ask", there's
+                    # no decision for a human to make here). Distinct from a
+                    # human clicking Deny on an "ask"-tier call below, though
+                    # both resolve through the same denied_output path.
+                    denied_output = "Denied by policy (this command template is set to deny)."
+                elif call_tier == "ask":
                     decisions = st.session_state.setdefault("_approval_decisions", {})
                     decision = decisions.get(call["call_id"])
                     if decision is None:
