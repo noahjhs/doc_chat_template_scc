@@ -107,6 +107,20 @@ CREATE TABLE IF NOT EXISTS command_template_hosts (
     PRIMARY KEY (command_template_id, host_id)
 );
 CREATE INDEX IF NOT EXISTS idx_command_template_hosts_host_id ON command_template_hosts(host_id);
+
+-- Which one of a user's known hosts they're currently physically at --
+-- used to route a pending approval's native-dialog prompt to the right
+-- daemon (see main.py's pending-approvals endpoints). One row per user
+-- (upserted), not a column on users, same "new tables only" reasoning as
+-- everything else here. Must reference a row already in user_hosts
+-- (enforced in main.py, not by a foreign key -- PRAGMA foreign_keys is
+-- never turned on in this file, so none of this schema's REFERENCES
+-- clauses are DB-enforced).
+CREATE TABLE IF NOT EXISTS user_attended_host (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    set_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 

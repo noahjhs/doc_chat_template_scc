@@ -157,6 +157,53 @@ class SignOutAllResponse(BaseModel):
     signed_out_hosts: int
 
 
+class AttendedHostUpdateRequest(BaseModel):
+    host_id: int
+
+
+class AttendedHostInfo(BaseModel):
+    host_id: int | None = None
+    label: str | None = None
+
+
+class PendingApprovalCreateRequest(BaseModel):
+    """POST /hosts/pending-approvals's body -- mirrors exactly what
+    pages/chat.py already renders in its in-chat approval warning, so the
+    two channels (native dialog vs. in-chat buttons) show the human the
+    same thing."""
+
+    template_name: str = Field(min_length=1, max_length=64)
+    binary: str = Field(min_length=1, max_length=200)
+    args: str = Field(default="", max_length=2000)
+    host_label: str = Field(min_length=1, max_length=64)
+
+
+class PendingApprovalCreateResponse(BaseModel):
+    approval_id: str
+
+
+class PendingApprovalInfo(BaseModel):
+    id: str
+    template_name: str
+    binary: str
+    args: str
+    host_label: str
+    decision: Literal["allow", "deny"] | None = None
+    created_at: str
+
+
+class PendingApprovalListResponse(BaseModel):
+    """GET /hosts/pending-approvals' response -- at most one entry in
+    practice (a daemon only ever has one user attending it at a time), but
+    a list keeps the shape open-ended rather than assuming that."""
+
+    pending_approvals: list[PendingApprovalInfo]
+
+
+class PendingApprovalDecisionRequest(BaseModel):
+    decision: Literal["allow", "deny"]
+
+
 class StorageFileInfo(BaseModel):
     filename: str
     size: int

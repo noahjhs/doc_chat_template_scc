@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -176,6 +177,15 @@ func main() {
 		}
 	}()
 
+	// Long-polls for a pending approval to answer with a native dialog, for
+	// the daemon's whole lifetime -- see runApprovalRelayLoop's own doc
+	// comment for why this starts unconditionally rather than only once
+	// paired. approvalRelayCancel is called from onExit, mirroring how
+	// state.stopTunnel() already tears down tunnel.go's own background loop
+	// there.
+	approvalRelayCtx, approvalRelayCancel := context.WithCancel(context.Background())
+	go state.runApprovalRelayLoop(approvalRelayCtx)
+
 	// A non-interactive run (dev/CI): use the key directly, skip the
 	// session file/casper:// pairing entirely. There's no separate
 	// command_key to distinguish here -- both the device_token (unused,
@@ -218,7 +228,7 @@ func main() {
 		systray.Quit()
 	}()
 
-	systray.Run(func() { onReady(state, logf) }, func() { onExit(state, srv, logf) })
+	systray.Run(func() { onReady(state, logf) }, func() { onExit(state, srv, approvalRelayCancel, logf) })
 }
 
 func onReady(state *daemonState, logf func(format string, args ...any)) {
@@ -311,7 +321,8 @@ func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, 
 	mStartup.Check()
 }
 
-func onExit(state *daemonState, srv *server.Server, logf func(format string, args ...any)) {
+func onExit(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc, logf func(format string, args ...any)) {
+	cancelApprovalRelay()
 	state.stopTunnel()
 	srv.Shutdown()
 	logf("casper-agent exiting")

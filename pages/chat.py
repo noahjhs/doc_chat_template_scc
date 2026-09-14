@@ -8,8 +8,10 @@ from openai import OpenAI
 from utils.auth import (
     current_token,
     download_storage,
+    poll_pending_approval_decision,
     require_agent_session,
     require_app_subdomain,
+    submit_pending_approval,
     upload_storage,
 )
 from utils.branding import NAME
@@ -26,6 +28,8 @@ from utils.topbar import render_topbar
 # identity across the whole flow.
 st.set_page_config(page_title="Casper - Chat", page_icon="👻", initial_sidebar_state="expanded")
 require_app_subdomain()
+
+AUTH_DOMAIN = st.secrets["AUTH_SERVICE_DOMAIN"]
 
 
 @st.cache_resource
@@ -755,8 +759,31 @@ def _process_turn(local_agent_configs, selected_host_label):
                     decisions = st.session_state.setdefault("_approval_decisions", {})
                     decision = decisions.get(call["call_id"])
                     if decision is None:
+                        approval_id = None
+                        if template:
+                            # Additive, alongside (not instead of) the
+                            # in-chat Approve/Deny UI below -- lets a native
+                            # dialog on the user's attended host (see
+                            # utils/sidebar.py's "You are at" control)
+                            # answer this too. A failure here (network
+                            # issue, or no attended host configured) just
+                            # means that channel isn't available for this
+                            # call; the buttons still work on their own.
+                            submitted = submit_pending_approval(
+                                AUTH_DOMAIN,
+                                current_token(),
+                                template["name"],
+                                template["binary"],
+                                args.get("args", ""),
+                                host,
+                            )
+                            approval_id = (submitted or {}).get("approval_id")
                         st.session_state["_pending_approval"] = {
-                            "call_id": call["call_id"], "host": host, "template": template, "args": args,
+                            "call_id": call["call_id"],
+                            "host": host,
+                            "template": template,
+                            "args": args,
+                            "approval_id": approval_id,
                         }
                         return False
                     decisions.pop(call["call_id"], None)
@@ -840,4 +867,32 @@ if "_turn" in st.session_state:
                     st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "deny"
                     del st.session_state["_pending_approval"]
                     st.rerun()
+
+            # The relay's other channel: a native dialog on the user's
+            # attended host (see utils/sidebar.py's "You are at" control)
+            # can answer this same approval, via auth_service's
+            # pending-approvals store -- whichever channel answers first
+            # wins. A short server-side wait per check (not the endpoint's
+            # full ~25s default -- see poll_pending_approval_decision's own
+            # docstring), so this fragment's own polling cadence, not a
+            # long block inside it, is what keeps this session's script
+            # thread (and the buttons above) responsive. No-ops entirely
+            # if submit_pending_approval never got an approval_id (e.g. the
+            # daemon was unreachable, or no attended host is configured) --
+            # the buttons above are always sufficient on their own.
+            approval_id = pending.get("approval_id")
+            if approval_id:
+
+                @st.fragment(run_every="1s")
+                def _poll_relay_decision():
+                    if st.session_state.get("_pending_approval", {}).get("approval_id") != approval_id:
+                        return  # already resolved by the other channel/a previous tick
+                    result = poll_pending_approval_decision(AUTH_DOMAIN, current_token(), approval_id)
+                    decision = (result or {}).get("decision")
+                    if decision in ("allow", "deny"):
+                        st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = decision
+                        del st.session_state["_pending_approval"]
+                        st.rerun()
+
+                _poll_relay_decision()
         st.stop()

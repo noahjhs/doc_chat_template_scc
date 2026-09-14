@@ -7,10 +7,13 @@ import streamlit as st
 
 from utils.auth import (
     build_pair_url,
+    clear_attended_host,
     current_token,
+    get_attended_host,
     list_environments,
     list_hosts,
     revoke_token_with_auth_service,
+    set_attended_host,
     signout_all_hosts,
 )
 from utils.branding import NAME
@@ -488,6 +491,46 @@ def render_sidebar(username):
                 st.caption("No hosts in this Environment yet.")
         else:
             st.caption("No Environments yet.")
+
+        # Which host the *user* is physically at right now -- independent of
+        # which host the assistant acts on (the radio above), and not scoped
+        # to the active Environment, since a user's physical location
+        # doesn't change when they switch which project they're directing
+        # the assistant at. Used only to route an "ask"-tier approval's
+        # native-dialog prompt to the right daemon (see pages/chat.py's
+        # submit_pending_approval) -- purely additive, the in-chat
+        # Approve/Deny buttons work the same whether or not this is set.
+        if hosts:
+            if "_attended_host_id" not in st.session_state:
+                fetched = get_attended_host(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
+                st.session_state["_attended_host_id"] = (fetched or {}).get("host_id")
+
+            def _format_attended_option(host_id):
+                if host_id is None:
+                    return "Not set"
+                host = hosts_by_id.get(host_id)
+                return host["label"] if host else str(host_id)
+
+            def _apply_attended_host():
+                chosen = st.session_state["_attended_host_selector"]
+                if chosen is None:
+                    clear_attended_host(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
+                else:
+                    set_attended_host(st.secrets["AUTH_SERVICE_DOMAIN"], current_token(), chosen)
+                st.session_state["_attended_host_id"] = chosen
+
+            attended_options = [None] + [h["host_id"] for h in hosts]
+            current_attended = st.session_state["_attended_host_id"]
+            st.selectbox(
+                "You are at",
+                options=attended_options,
+                format_func=_format_attended_option,
+                index=attended_options.index(current_attended) if current_attended in attended_options else 0,
+                key="_attended_host_selector",
+                on_change=_apply_attended_host,
+                help="Lets an \"ask\"-tier approval show up as a native dialog on this machine, "
+                "alongside the usual in-chat Approve/Deny buttons.",
+            )
 
         selected_host_id = st.session_state.get("_selected_host_id")
         selected_host_label = next(

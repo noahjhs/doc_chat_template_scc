@@ -393,3 +393,64 @@ def remove_command_template_from_host(auth_domain, token, template_id, host_id):
     """DELETE /command-templates/{id}/hosts/{host_id}. Returns the updated
     template, or {"error": str}."""
     return _auth_write("DELETE", auth_domain, token, f"/command-templates/{template_id}/hosts/{host_id}")
+
+
+def get_attended_host(auth_domain, token):
+    """GET /users/me/attended-host. Returns {"host_id", "label"} (both None
+    if unset), or {"error": str}."""
+    return _auth_write("GET", auth_domain, token, "/users/me/attended-host")
+
+
+def set_attended_host(auth_domain, token, host_id):
+    """PUT /users/me/attended-host. Returns {"host_id", "label"}, or
+    {"error": str} (e.g. a host_id the caller hasn't paired)."""
+    return _auth_write("PUT", auth_domain, token, "/users/me/attended-host", {"host_id": host_id})
+
+
+def clear_attended_host(auth_domain, token):
+    """DELETE /users/me/attended-host. Returns {"revoked": True}, or
+    {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, "/users/me/attended-host")
+
+
+def submit_pending_approval(auth_domain, token, template_name, binary, args, host_label):
+    """POST /hosts/pending-approvals -- submitted once an "ask"-tier
+    command-template call needs a human decision, alongside (not instead
+    of) pages/chat.py's own in-chat Approve/Deny UI, so a native dialog on
+    the user's attended host (see get_attended_host/set_attended_host
+    above) can answer it too. Returns {"approval_id": str}, or
+    {"error": str} -- a failure here just means the native-dialog channel
+    isn't available for this call; the in-chat buttons still work on their
+    own."""
+    return _auth_write(
+        "POST",
+        auth_domain,
+        token,
+        "/hosts/pending-approvals",
+        {"template_name": template_name, "binary": binary, "args": args, "host_label": host_label},
+    )
+
+
+def poll_pending_approval_decision(auth_domain, token, approval_id, wait_seconds=3):
+    """GET /hosts/pending-approvals/{id}?wait_seconds=... -- a short-wait
+    variant of the endpoint's default ~25s long-poll, specifically so
+    pages/chat.py's st.fragment(run_every=...)-driven poll never blocks
+    that browser session's script thread (and its own Approve/Deny
+    buttons) for long -- see the endpoint's own docstring. Needs its own
+    timeout rather than _auth_write's hardcoded 10s (comfortably above
+    wait_seconds, not exactly matching _auth_write's assumption of a quick
+    call), but the same {"error": str} failure-shape convention. Returns
+    the full PendingApprovalInfo dict (decision is None until someone
+    answers), or {"error": str}."""
+    try:
+        response = requests.get(
+            f"{_base_url(auth_domain)}/hosts/pending-approvals/{quote(approval_id, safe='')}",
+            params={"wait_seconds": wait_seconds},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=wait_seconds + 10,
+        )
+        if response.status_code >= 400:
+            return {"error": _error_detail(response, "Request failed.")}
+        return response.json()
+    except requests.RequestException as e:
+        return {"error": f"Couldn't reach the auth service: {e}"}

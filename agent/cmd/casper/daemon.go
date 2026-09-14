@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"math/rand"
 	"net/url"
 	"sync"
 	"time"
@@ -235,6 +238,82 @@ func (d *daemonState) refreshCommandTemplates(deviceToken string) {
 		return
 	}
 	d.cmdHandler.SetCommandTemplates(templates)
+}
+
+// runApprovalRelayLoop long-polls auth_service's GET /hosts/pending-approvals
+// forever, showing a native dialog.Confirm and posting the decision back
+// whenever one shows up -- the alternative, additive channel for answering
+// an "ask"-tier command-template call, alongside pages/chat.py's existing
+// in-chat Approve/Deny UI. Runs unconditionally for the daemon's whole
+// lifetime (started once from main.go, cancelled via ctx on shutdown), on
+// every daemon regardless of whether it's currently anyone's attended host
+// -- it's auth_service's own query, not any local state here, that decides
+// whether this ever actually receives anything, so there's no local
+// "am I attended" branch to get wrong. Waits between attempts while signed
+// out (no device_token yet) rather than long-polling with an empty token.
+func (d *daemonState) runApprovalRelayLoop(ctx context.Context) {
+	const (
+		baseDelay   = 1 * time.Second
+		maxDelay    = 30 * time.Second
+		stableAfter = 10 * time.Second
+		noTokenWait = 2 * time.Second
+	)
+	delay := baseDelay
+	for ctx.Err() == nil {
+		deviceToken := d.getDeviceToken()
+		if deviceToken == "" {
+			select {
+			case <-time.After(noTokenWait):
+			case <-ctx.Done():
+			}
+			continue
+		}
+
+		start := time.Now()
+		approval, err := config.LongPollPendingApproval(ctx, d.authDomain, deviceToken)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			d.logf("Approval relay: long-poll error: %s", err)
+			if time.Since(start) > stableAfter {
+				delay = baseDelay
+			} else {
+				delay *= 2
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+			}
+			select {
+			case <-time.After(approvalRelayJitter(delay)):
+			case <-ctx.Done():
+			}
+			continue
+		}
+		delay = baseDelay
+		if approval == nil {
+			continue // clean timeout, nothing pending -- re-poll immediately
+		}
+
+		message := fmt.Sprintf(
+			"The assistant wants to run %s (%s) on %s. Allow it?", approval.TemplateName, approval.Args, approval.HostLabel,
+		)
+		allow := dialog.Confirm(message)
+		if err := config.PostPendingApprovalDecision(d.authDomain, deviceToken, approval.ID, allow); err != nil {
+			d.logf("Approval relay: couldn't post decision: %s", err)
+		}
+	}
+}
+
+// approvalRelayJitter mirrors internal/tunnel's own unexported jitter
+// helper -- duplicated rather than exported/shared, matching this
+// codebase's existing posture on small per-package helpers like this one
+// (see tunnel.go's Frame docstring for the same reasoning applied
+// elsewhere).
+func approvalRelayJitter(d time.Duration) time.Duration {
+	delta := float64(d) * 0.2
+	offset := (rand.Float64()*2 - 1) * delta
+	return time.Duration(float64(d) + offset)
 }
 
 // onSignOut is wired as the HTTP server's OnSignOut -- called after

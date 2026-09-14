@@ -48,6 +48,26 @@ func ShowError(message string) {
 	_ = exec.Command("powershell", "-NoProfile", "-Command", script).Run()
 }
 
+// Confirm shows a plain native Allow/Deny modal and returns whether Allow
+// was chosen -- deliberately not ConfirmWithDontAskAgain: see the darwin
+// implementation's docs for why a "don't ask again" escape doesn't belong
+// on this particular dialog. A failure to even show the dialog is treated
+// as a decline, never a silent allow.
+func Confirm(message string) bool {
+	script := fmt.Sprintf(
+		"Add-Type -AssemblyName System.Windows.Forms | Out-Null; "+
+			"$r = [System.Windows.Forms.MessageBox]::Show('%s', 'Casper', "+
+			"[System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question, "+
+			"[System.Windows.Forms.MessageBoxDefaultButton]::Button1); Write-Output $r",
+		escapeForPowerShellSingleQuoted(message),
+	)
+	out, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "Yes"
+}
+
 // ConfirmWithDontAskAgain approximates the darwin implementation's native
 // checkbox-accessory dialog using a three-way MessageBox instead (Windows'
 // MessageBox has no real checkbox option either, and there's no packaged

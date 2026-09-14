@@ -7,6 +7,7 @@ import os
 import secrets
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 import bcrypt
@@ -16,6 +17,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from models import (
+    AttendedHostInfo,
+    AttendedHostUpdateRequest,
     AuthResponse,
     CommandTemplateCreateRequest,
     CommandTemplateInfo,
@@ -35,6 +38,11 @@ from models import (
     HostRenameRequest,
     HostVerifyResponse,
     LoginRequest,
+    PendingApprovalCreateRequest,
+    PendingApprovalCreateResponse,
+    PendingApprovalDecisionRequest,
+    PendingApprovalInfo,
+    PendingApprovalListResponse,
     ProfileInfo,
     ProfileUpdateRequest,
     RevokeResponse,
@@ -516,11 +524,71 @@ def forget_host(host_id: int, authorization: str = Header(default="")):
             (host_id, user_id),
         )
         db.execute("DELETE FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, host_id))
+        db.execute(
+            "DELETE FROM user_attended_host WHERE user_id = ? AND host_id = ?", (user_id, host_id)
+        )
     if row is not None:
         with _attached_lock:
             attached = _attached.get(row["routing_key"])
             if attached and attached["user_id"] == user_id:
                 _attached.pop(row["routing_key"], None)
+    return RevokeResponse(revoked=True)
+
+
+# --- Attended host (browser-facing) ---------------------------------------
+# Which one of the user's own known hosts they're currently physically at
+# -- used only to route a pending approval's native-dialog prompt to the
+# right daemon (see the pending-approvals section below). Deliberately
+# separate from host *selection* in chat (which host the assistant acts
+# on) -- a user can direct the assistant at one machine while sitting at
+# another.
+@app.put("/users/me/attended-host", response_model=AttendedHostInfo)
+def set_attended_host(body: AttendedHostUpdateRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        row = db.execute(
+            "SELECT label FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, body.host_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Host not found.")
+        db.execute(
+            """
+            INSERT INTO user_attended_host (user_id, host_id) VALUES (?, ?)
+            ON CONFLICT (user_id) DO UPDATE SET host_id = excluded.host_id, set_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, body.host_id),
+        )
+        return AttendedHostInfo(host_id=body.host_id, label=row["label"])
+
+
+@app.get("/users/me/attended-host", response_model=AttendedHostInfo)
+def get_attended_host(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        row = db.execute(
+            """
+            SELECT uah.host_id AS host_id, uh.label AS label FROM user_attended_host uah
+            JOIN user_hosts uh ON uh.user_id = uah.user_id AND uh.host_id = uah.host_id
+            WHERE uah.user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return AttendedHostInfo()
+        return AttendedHostInfo(host_id=row["host_id"], label=row["label"])
+
+
+@app.delete("/users/me/attended-host", response_model=RevokeResponse)
+def clear_attended_host(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        db.execute("DELETE FROM user_attended_host WHERE user_id = ?", (user_id,))
     return RevokeResponse(revoked=True)
 
 
@@ -751,6 +819,186 @@ def list_host_command_templates(authorization: str = Header(default="")):
         for r in rows
     ]
     return HostCommandTemplateListResponse(command_templates=templates)
+
+
+# --- Pending approvals (native-dialog relay) ------------------------------
+# An "ask"-tier command-template call awaiting a human decision, answerable
+# from either the browser's in-chat Approve/Deny UI or a native OS dialog
+# on whichever host the user has designated as their attended host (see
+# above) -- both channels write the same decision here, and whichever
+# answers first wins. Kept in-memory rather than in SQLite, same
+# single-process reasoning as _attached above: a server restart loses any
+# outstanding approval, an accepted rough edge (same one _attached already
+# accepts for live attachments). A single Condition guards the whole store
+# and serves both directions this needs to long-poll: the attended daemon
+# waiting for a new approval targeting it, and the submitter waiting for a
+# decision on the one it created.
+_PENDING_APPROVAL_TTL_SECONDS = 15 * 60
+_LONG_POLL_SECONDS = 25.0
+
+_pending_approvals: dict[str, dict] = {}
+_pending_cond = threading.Condition()
+
+
+def _prune_pending_approvals_locked():
+    """Caller must hold _pending_cond. Drops anything older than the TTL,
+    decided or not -- an undecided one that's aged out is exactly as
+    unreachable as one that was decided and already consumed."""
+    cutoff = time.time() - _PENDING_APPROVAL_TTL_SECONDS
+    stale = [aid for aid, rec in _pending_approvals.items() if rec["created_ts"] < cutoff]
+    for aid in stale:
+        del _pending_approvals[aid]
+
+
+def _pending_approval_info(record: dict) -> PendingApprovalInfo:
+    return PendingApprovalInfo(
+        id=record["id"],
+        template_name=record["template_name"],
+        binary=record["binary"],
+        args=record["args"],
+        host_label=record["host_label"],
+        decision=record["decision"],
+        created_at=record["created_at"],
+    )
+
+
+def _resolve_submitter(authorization: str) -> int | None:
+    """Session token OR device token -> user_id. Only the web app submits
+    today, but this is written so a daemon can submit its own mid-chain
+    asks later (once "hard" action chains exist) without this shape
+    changing."""
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+    if user_id is not None:
+        return user_id
+    attached = _resolve_attached(authorization)
+    return attached["user_id"] if attached else None
+
+
+@app.post("/hosts/pending-approvals", response_model=PendingApprovalCreateResponse, status_code=201)
+def create_pending_approval(body: PendingApprovalCreateRequest, authorization: str = Header(default="")):
+    user_id = _resolve_submitter(authorization)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing token.")
+
+    approval_id = uuid.uuid4().hex
+    with _pending_cond:
+        _prune_pending_approvals_locked()
+        _pending_approvals[approval_id] = {
+            "id": approval_id,
+            "user_id": user_id,
+            "template_name": body.template_name,
+            "binary": body.binary,
+            "args": body.args,
+            "host_label": body.host_label,
+            "decision": None,
+            "created_ts": time.time(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _pending_cond.notify_all()
+    return PendingApprovalCreateResponse(approval_id=approval_id)
+
+
+@app.get("/hosts/pending-approvals/{approval_id}", response_model=PendingApprovalInfo)
+def get_pending_approval(approval_id: str, wait_seconds: float = _LONG_POLL_SECONDS, authorization: str = Header(default="")):
+    """The submitter's long-poll -- waits up to wait_seconds (default
+    _LONG_POLL_SECONDS, clamped to that as a ceiling) for a decision to
+    land, so the caller can immediately re-request rather than fast-polling
+    on a fixed timer. wait_seconds exists for pages/chat.py's
+    st.fragment(run_every=...)-driven poll specifically: blocking the full
+    ~25s there would stall that browser session's script thread (and its
+    own Approve/Deny buttons) for the same duration, so it asks for a short
+    wait (a few seconds) instead -- the daemon's own long-poll (a Go
+    goroutine, not constrained the same way) keeps using the default."""
+    user_id = _resolve_submitter(authorization)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing token.")
+
+    wait_seconds = max(0.0, min(wait_seconds, _LONG_POLL_SECONDS))
+    deadline = time.monotonic() + wait_seconds
+    with _pending_cond:
+        while True:
+            _prune_pending_approvals_locked()
+            record = _pending_approvals.get(approval_id)
+            if record is None or record["user_id"] != user_id:
+                raise HTTPException(status_code=404, detail="Unknown or expired approval.")
+            if record["decision"] is not None:
+                return _pending_approval_info(record)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _pending_approval_info(record)
+            _pending_cond.wait(remaining)
+
+
+@app.get("/hosts/pending-approvals", response_model=PendingApprovalListResponse)
+def list_pending_approvals_for_attended_host(authorization: str = Header(default="")):
+    """The attended daemon's long-poll -- waits up to _LONG_POLL_SECONDS
+    for any undecided approval belonging to a user whose current attended
+    host is this caller's own resolved host_id. Every daemon runs this
+    loop unconditionally; it's this query, not any local state on the
+    daemon, that decides whether it ever receives anything."""
+    attached = _resolve_attached(authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    host_id = attached["host_id"]
+
+    def _matching_records() -> list[dict]:
+        with get_db() as db:
+            attended_user_ids = {
+                r["user_id"]
+                for r in db.execute(
+                    "SELECT user_id FROM user_attended_host WHERE host_id = ?", (host_id,)
+                ).fetchall()
+            }
+        return [
+            rec
+            for rec in _pending_approvals.values()
+            if rec["decision"] is None and rec["user_id"] in attended_user_ids
+        ]
+
+    deadline = time.monotonic() + _LONG_POLL_SECONDS
+    with _pending_cond:
+        while True:
+            _prune_pending_approvals_locked()
+            matches = _matching_records()
+            if matches:
+                return PendingApprovalListResponse(pending_approvals=[_pending_approval_info(r) for r in matches])
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return PendingApprovalListResponse(pending_approvals=[])
+            _pending_cond.wait(remaining)
+
+
+@app.post("/hosts/pending-approvals/{approval_id}/decision", response_model=PendingApprovalInfo)
+def decide_pending_approval(
+    approval_id: str, body: PendingApprovalDecisionRequest, authorization: str = Header(default="")
+):
+    """Only from a daemon that IS currently the attended host for that
+    approval's user -- a daemon that's since been un-designated can't
+    decide someone else's pending approval just because it still holds a
+    valid device token."""
+    attached = _resolve_attached(authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+
+    with _pending_cond:
+        _prune_pending_approvals_locked()
+        record = _pending_approvals.get(approval_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Unknown or expired approval.")
+        with get_db() as db:
+            still_attended = db.execute(
+                "SELECT 1 FROM user_attended_host WHERE user_id = ? AND host_id = ?",
+                (record["user_id"], attached["host_id"]),
+            ).fetchone()
+        if still_attended is None:
+            raise HTTPException(
+                status_code=403, detail="This host is no longer the attended host for that approval."
+            )
+        if record["decision"] is None:
+            record["decision"] = body.decision
+            _pending_cond.notify_all()
+        return _pending_approval_info(record)
 
 
 def _shutdown_hosts_best_effort(targets: list[tuple[str, str]]):
