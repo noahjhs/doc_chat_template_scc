@@ -9,6 +9,14 @@
 # that can actually pair against the dev environment's auth_service/relay.
 # See the DEPLOY_ENV block below for the two file sets this reads from.
 #
+# Signs with a real Developer ID Application identity and submits to
+# Apple's notary service (see the code-signing block below) -- SIGN_IDENTITY
+# and NOTARY_PROFILE override the keychain identity/notarytool credential
+# profile this expects to already exist locally (`security find-identity -v
+# -p codesigning`, `xcrun notarytool store-credentials`), and SKIP_NOTARIZE=1
+# skips the (couple-of-minutes) round trip to Apple for quick local
+# iteration, still properly signed either way.
+#
 # Kept alongside build_macos.sh (the Python/PyInstaller build) rather than
 # replacing it -- both exist side by side until the Go version is fully
 # verified and this repo's distributed binary actually cuts over to it.
@@ -161,34 +169,71 @@ if [ -f build/Casper.icns ]; then
     cp build/Casper.icns "$APP_DIR/Contents/Resources/Casper.icns"
 fi
 
-# Ad-hoc code-sign the whole bundle -- confirmed directly this is a real,
-# necessary fix, not a nicety: Go's linker already ad-hoc-signs the raw
-# executable by itself at link time (a hard requirement for any code to
-# run at all on Apple Silicon), but that per-binary signature doesn't cover
-# the surrounding bundle (Resources/, Info.plist) added after linking.
-# `spctl`/Gatekeeper detects that mismatch on a quarantined (i.e.
-# downloaded) copy and rejects it outright as "damaged" -- an unrecoverable
-# dead end, not just a warning. Re-signing the *whole* bundle here (after
-# every other Contents/ file is in place -- signing has to be the last
-# step, since it seals whatever is present at the time) makes it internally
-# consistent again (`codesign --verify` passes), which downgrades Gatekeeper's
-# reaction to the standard "developer cannot be verified" prompt instead --
-# recoverable via right-click "Open" or a System Settings override, the same
-# experience most unsigned indie Mac apps already have. This does NOT make
-# Gatekeeper (or Chrome's own Safe Browsing download warning) go away
-# entirely -- an ad-hoc signature carries no real, Apple-verified identity.
-# The full fix (no prompts at all) needs a paid Apple Developer ID
-# certificate and notarization, which requires enrolling in Apple's
-# Developer Program -- a real account/cost decision, not something this
-# script can do on its own.
-codesign --force --deep --sign - "$APP_DIR"
+# Overridable (same pattern as DEPLOY_ENV above), defaulting to what's
+# actually set up in this build machine's keychain: a Developer ID
+# Application identity (`security find-identity -v -p codesigning`) and a
+# notarytool credential profile stored via `xcrun notarytool
+# store-credentials "$NOTARY_PROFILE" --apple-id ... --team-id 54L62Z95NJ
+# --password <app-specific password>`.
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Noah Hofmann-Smith (54L62Z95NJ)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-casper-notarize}"
+
+# Real Developer ID signing, replacing the old ad-hoc (`--sign -`)
+# signature: ad-hoc signing only fixed Gatekeeper's "damaged" false
+# positive on a quarantined copy (Go's linker ad-hoc-signs the raw
+# executable at link time -- a hard requirement on Apple Silicon -- but
+# that per-binary signature doesn't cover the surrounding bundle,
+# Resources/Info.plist, added after linking; re-signing the *whole* bundle
+# here, after every other Contents/ file is in place, makes it internally
+# consistent again) -- but it never carried a real, Apple-verified
+# identity, so a downloaded copy still showed Gatekeeper's "developer
+# cannot be verified" prompt. --options runtime (the hardened runtime) is
+# a hard requirement for the notarization step below; signing has to
+# remain the last step before zipping, since it seals whatever's present
+# in the bundle at the time.
+codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_DIR"
 
 cp README_casper.md dist/CasperGo/README.md 2>/dev/null || true
 ZIP_NAME="Casper-macos-go${SUFFIX}.zip"
 rm -f "dist/$ZIP_NAME"
-cd dist
-zip -r "$ZIP_NAME" CasperGo
-cd ..
+( cd dist && zip -r "$ZIP_NAME" CasperGo )
+
+if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
+    echo "SKIP_NOTARIZE=1 -- signed but not submitted for notarization; a downloaded copy will still show Gatekeeper's \"unidentified developer\" prompt."
+else
+    # Submits the already-signed, already-zipped bundle to Apple's notary
+    # service and blocks (--wait) until it's actually processed (on the
+    # order of a couple of minutes, not instant) -- --output-format json
+    # so the result is parsed rather than scraped from human-readable text.
+    # notarytool itself exits nonzero on rejection, so this runs under
+    # `set +e`/`set -e` brackets to capture that exit code (and whatever
+    # output did come back) instead of letting the whole script abort
+    # before the failure can be logged usefully.
+    echo "Submitting to Apple's notary service (this can take a couple of minutes)..."
+    set +e
+    SUBMIT_OUTPUT="$(xcrun notarytool submit "dist/$ZIP_NAME" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)"
+    SUBMIT_EXIT=$?
+    set -e
+    STATUS="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status","unknown"))' "$SUBMIT_OUTPUT" 2>/dev/null || echo "unknown")"
+    SUBMISSION_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$SUBMIT_OUTPUT" 2>/dev/null || echo "")"
+    if [ "$SUBMIT_EXIT" -ne 0 ] || [ "$STATUS" != "Accepted" ]; then
+        echo "Notarization failed (exit $SUBMIT_EXIT, status: $STATUS):" >&2
+        echo "$SUBMIT_OUTPUT" >&2
+        if [ -n "$SUBMISSION_ID" ]; then
+            echo "-- notary log for submission $SUBMISSION_ID --" >&2
+            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" >&2 || true
+        fi
+        exit 1
+    fi
+    echo "Notarization accepted -- stapling..."
+    # Staples the ticket onto the .app itself, not the zip -- stapling only
+    # applies to an .app/.pkg/.dmg, never a zip, so the zip submitted above
+    # doesn't carry it yet. Re-zip afterward so the actual distributed
+    # artifact contains the now-stapled bundle.
+    xcrun stapler staple "$APP_DIR"
+    rm -f "dist/$ZIP_NAME"
+    ( cd dist && zip -r "$ZIP_NAME" CasperGo )
+fi
 
 # Restore the staged embed targets to empty -- go:embed needs these files to
 # exist inside the module tree at compile time (unlike PyInstaller's
