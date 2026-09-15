@@ -98,11 +98,9 @@ def _positional_rows(constraints):
     rows = []
     for c in constraints:
         if c == "*":
-            rows.append({"unconstrained": True, "whitelist": "", "blacklist": ""})
+            rows.append({"whitelist": "", "blacklist": ""})
         else:
-            rows.append(
-                {"unconstrained": False, "whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or ""}
-            )
+            rows.append({"whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or ""})
     return rows
 
 
@@ -110,18 +108,14 @@ def _build_positional_constraints(rows):
     """Mirrors RuleChainRuleCreateRequest's own validators client-side, so
     a mistake shows up immediately here rather than only after a round
     trip to auth_service -- the server re-validates regardless, so this is
-    purely for faster feedback, never the source of truth."""
+    purely for faster feedback, never the source of truth. A row with both
+    whitelist and blacklist left blank is unconstrained ("*") -- no
+    separate checkbox needed."""
     result, errors = [], []
-    for i, row in enumerate(rows):
-        if row.get("unconstrained"):
-            result.append("*")
-            continue
+    for row in rows:
         whitelist = (row.get("whitelist") or "").strip() or None
         blacklist = (row.get("blacklist") or "").strip() or None
-        if whitelist is None and blacklist is None:
-            errors.append(f"Position {i}: provide a whitelist and/or blacklist, or check Unconstrained.")
-            continue
-        result.append({"whitelist": whitelist, "blacklist": blacklist})
+        result.append("*" if whitelist is None and blacklist is None else {"whitelist": whitelist, "blacklist": blacklist})
     if not result:
         errors.append("At least one positional constraint (position 0, the binary) is required.")
     elif isinstance(result[0], dict) and result[0].get("whitelist") == "{roots}":
@@ -200,24 +194,40 @@ def _render_rule_editor(chain, rule):
     option_rows = [] if is_new else _option_rows(rule["option_constraints"])
     tier_default = "ask" if is_new else rule["tier"]
 
+    # The table widget below lets a viewer hide a column via its own header
+    # menu, with no built-in way to bring it back -- bumping this generation
+    # number changes the widget's key, forcing Streamlit to remount it from
+    # scratch (any hidden-column state was only ever held client-side by the
+    # old instance) as an escape hatch for that. Has to live outside the
+    # form below since a plain st.button (unlike form_submit_button) can't
+    # be placed inside one.
+    generation_key = f"_editor_generation_{chain['id']}_{key_suffix}"
+    generation = st.session_state.get(generation_key, 0)
+    if st.button(
+        "↺ Reset table view",
+        key=f"reset_tables_{chain['id']}_{key_suffix}",
+        help="If a column got hidden via the table's own menu and won't come back, this brings it back.",
+    ):
+        st.session_state[generation_key] = generation + 1
+        st.rerun()
+
     with st.form(f"rule_form_{chain['id']}_{key_suffix}"):
         st.caption(
-            "Positional constraints -- row order is argv position (row 0 is the binary itself, "
-            "always required). Check Unconstrained to accept anything at that position."
+            "Positional constraints -- the row number IS the argv position (row 0 is the binary "
+            "itself, always required). Leave both fields blank to leave that position unconstrained."
         )
         positional_edited = st.data_editor(
-            positional_rows or [{"unconstrained": True, "whitelist": "", "blacklist": ""}],
+            positional_rows or [{"whitelist": "", "blacklist": ""}],
             num_rows="dynamic",
-            key=f"positional_editor_{chain['id']}_{key_suffix}",
+            key=f"positional_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
-                "unconstrained": st.column_config.CheckboxColumn("Unconstrained", default=False),
                 "whitelist": st.column_config.TextColumn(
                     "Whitelist (regex, or {roots})", help='Use the literal "{roots}" for "inside an addressable directory".'
                 ),
                 "blacklist": st.column_config.TextColumn("Blacklist (regex)"),
             },
-            column_order=["unconstrained", "whitelist", "blacklist"],
-            hide_index=True,
+            column_order=["whitelist", "blacklist"],
+            hide_index=False,
         )
         st.caption(
             "If an argument is a filesystem path, prefer a whitelist -- ideally {roots} -- over a "
@@ -232,7 +242,7 @@ def _render_rule_editor(chain, rule):
         option_edited = st.data_editor(
             option_rows or [],
             num_rows="dynamic",
-            key=f"option_editor_{chain['id']}_{key_suffix}",
+            key=f"option_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
                 "short": st.column_config.TextColumn("Short (-f)"),
                 "long": st.column_config.TextColumn("Long (--force)"),
