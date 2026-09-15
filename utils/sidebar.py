@@ -444,9 +444,26 @@ def render_sidebar(username):
 
         st.divider()
         with st.container(key="icon_row_env"):
-            env_label_col, env_gear_col = st.columns([5, 1])
+            env_label_col, env_refresh_col, env_gear_col = st.columns([4, 1, 1])
             with env_label_col:
                 st.markdown("**Environment**")
+            with env_refresh_col:
+                # Unlike the "Check again" button further down (only ever
+                # rendered when *zero* hosts are connected, for the initial
+                # pairing race -- see its own comment), this is always
+                # available: the one way to force a fresh /hosts fetch once
+                # already connected, e.g. after a daemon re-pair rotates its
+                # command_key out from under an already-open browser tab's
+                # cached copy (confirmed directly as a real, reachable gap
+                # -- "invalid API key" with no way to refresh without
+                # closing the tab entirely).
+                st.button(
+                    "",
+                    icon=":material/refresh:",
+                    key="env_refresh_button",
+                    help="Refresh host connections",
+                    on_click=_recheck_hosts,
+                )
             with env_gear_col:
                 st.button(
                     "",
