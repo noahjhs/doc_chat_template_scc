@@ -147,12 +147,16 @@ def _option_rows(constraints):
 
 
 def _build_option_constraints(rows):
+    """A row with neither short nor long filled in (e.g. the default blank
+    row the table is seeded with) is treated as an unused placeholder and
+    silently skipped -- option_constraints=[] (no options at all) is
+    perfectly valid, and erroring on the untouched seed row would make a
+    brand-new rule with no options unsaveable."""
     result, errors = [], []
     for i, row in enumerate(rows):
         short = (row.get("short") or "").strip() or None
         long = (row.get("long") or "").strip() or None
         if not short and not long:
-            errors.append(f"Option row {i + 1}: provide a short and/or long form.")
             continue
         mode = row.get("pattern_mode") or PATTERN_MODE_NO_VALUE
         if mode == PATTERN_MODE_NO_VALUE:
@@ -190,17 +194,23 @@ def _render_rule_editor(chain, rule):
     row order IS argv position (row 0 = the binary)."""
     is_new = rule is None
     key_suffix = "new" if is_new else rule["id"]
-    positional_rows = [] if is_new else _positional_rows(rule["positional_constraints"])
+    blank_positional_row = {"whitelist": "", "blacklist": ""}
+    blank_option_row = {"short": "", "long": "", "pattern_mode": PATTERN_MODE_NO_VALUE, "whitelist": "", "blacklist": ""}
+    saved_positional_rows = [blank_positional_row] if is_new else (_positional_rows(rule["positional_constraints"]) or [blank_positional_row])
     option_rows = [] if is_new else _option_rows(rule["option_constraints"])
     tier_default = "ask" if is_new else rule["tier"]
 
-    # The table widget below lets a viewer hide a column via its own header
-    # menu, with no built-in way to bring it back -- bumping this generation
-    # number changes the widget's key, forcing Streamlit to remount it from
-    # scratch (any hidden-column state was only ever held client-side by the
-    # old instance) as an escape hatch for that. Has to live outside the
-    # form below since a plain st.button (unlike form_submit_button) can't
-    # be placed inside one.
+    # The table widgets below let a viewer hide a column via their own
+    # header menu, with no built-in way to bring it back -- bumping this
+    # generation number changes the widgets' key, forcing Streamlit to
+    # remount them from scratch (any hidden-column state was only ever held
+    # client-side by the old instance) as an escape hatch for that. Also
+    # what makes the row-count resize below actually take effect: Streamlit
+    # widget state persists across reruns keyed by `key`, so just changing
+    # a data_editor's seed `data` argument on a later rerun has no effect
+    # unless its key also changes. Has to live outside the form below
+    # since a plain st.button/number_input (unlike form_submit_button)
+    # can't be placed inside one.
     generation_key = f"_editor_generation_{chain['id']}_{key_suffix}"
     generation = st.session_state.get(generation_key, 0)
     if st.button(
@@ -211,13 +221,47 @@ def _render_rule_editor(chain, rule):
         st.session_state[generation_key] = generation + 1
         st.rerun()
 
+    # A resize-by-count control instead of requiring N clicks on the
+    # table's own "+" affordance to reach position N (e.g. constraining
+    # argument 5 used to mean adding 5 rows one at a time) -- changing this
+    # pads with blank/unconstrained rows or truncates, then forces a
+    # remount (see generation comment above) so the new row count actually
+    # shows up. Note: since this necessarily remounts the table, it
+    # replays from the last *saved* values, not any not-yet-saved in-grid
+    # edits made since -- a real but minor rough edge of Streamlit's
+    # widget-state model.
+    working_key = f"_positional_working_{chain['id']}_{key_suffix}"
+    working_rows = st.session_state.get(working_key, saved_positional_rows)
+    count_key = f"_positional_row_count_{chain['id']}_{key_suffix}"
+    if count_key not in st.session_state:
+        st.session_state[count_key] = len(working_rows)
+
+    def _resize_positional_rows():
+        target = st.session_state[count_key]
+        current = st.session_state.get(working_key, saved_positional_rows)
+        if target > len(current):
+            current = current + [dict(blank_positional_row) for _ in range(target - len(current))]
+        else:
+            current = current[:target]
+        st.session_state[working_key] = current
+        st.session_state[generation_key] = st.session_state.get(generation_key, 0) + 1
+
+    st.number_input(
+        "Number of positional argument rows (row 0 = binary)",
+        min_value=1,
+        step=1,
+        key=count_key,
+        on_change=_resize_positional_rows,
+    )
+    working_rows = st.session_state.get(working_key, saved_positional_rows)
+
     with st.form(f"rule_form_{chain['id']}_{key_suffix}"):
         st.caption(
             "Positional constraints -- the row number IS the argv position (row 0 is the binary "
             "itself, always required). Leave both fields blank to leave that position unconstrained."
         )
         positional_edited = st.data_editor(
-            positional_rows or [{"whitelist": "", "blacklist": ""}],
+            working_rows,
             num_rows="dynamic",
             key=f"positional_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
@@ -235,12 +279,13 @@ def _render_rule_editor(chain, rule):
         )
 
         st.caption(
-            "Options -- at least one of short/long is required per row. \"No value\" means the option "
-            "must be present with no value; \"Any value\" accepts the option with or without a value; "
-            "\"Specific pattern\" requires a value matching the whitelist/blacklist."
+            "Options -- at least one of short/long is required per row (leave both blank to skip an "
+            "unused row). \"No value\" means the option must be present with no value; \"Any value\" "
+            "accepts the option with or without a value; \"Specific pattern\" requires a value matching "
+            "the whitelist/blacklist."
         )
         option_edited = st.data_editor(
-            option_rows or [],
+            option_rows or [blank_option_row],
             num_rows="dynamic",
             key=f"option_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
@@ -267,8 +312,14 @@ def _render_rule_editor(chain, rule):
         submitted = save_col.form_submit_button("Save rule", type="primary")
         cancelled = cancel_col.form_submit_button("Cancel")
 
-    if cancelled:
+    def _clear_editor_state():
         st.session_state.pop(f"_editing_rule_{chain['id']}_{key_suffix}", None)
+        st.session_state.pop(working_key, None)
+        st.session_state.pop(count_key, None)
+        st.session_state.pop(generation_key, None)
+
+    if cancelled:
+        _clear_editor_state()
         st.rerun()
 
     if submitted:
@@ -301,7 +352,7 @@ def _render_rule_editor(chain, rule):
             if result and result.get("error"):
                 st.error(result["error"])
             else:
-                st.session_state.pop(f"_editing_rule_{chain['id']}_{key_suffix}", None)
+                _clear_editor_state()
                 st.session_state.pop("_adding_rule_" + str(chain["id"]), None)
                 _refresh()
                 st.rerun()
