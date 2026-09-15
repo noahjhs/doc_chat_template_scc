@@ -1,6 +1,8 @@
 import base64
 import json
+import os.path
 
+import re2
 import requests
 import streamlit as st
 from openai import OpenAI
@@ -15,6 +17,7 @@ from utils.auth import (
     upload_storage,
 )
 from utils.branding import NAME
+from utils.rule_chains import describe_rule
 from utils.sidebar import (
     COMMAND_CATEGORIES,
     GIT_ACTIONS,
@@ -206,67 +209,84 @@ TRANSFER_TOOL = {
     },
 }
 
-def _build_command_template_tool(local_agent_configs):
-    """Collects every command template enabled on any connected host in the
+def _build_rule_chain_tool(local_agent_configs):
+    """Collects every rule chain enabled on any connected host in the
     active Environment (deduped by id) into one tool -- conditional
-    per-template argument enums aren't expressible in a flat JSON Schema
-    tool definition the way host selection's flat enum is (see
-    LOCAL_AGENT_TOOL's own 'host' field), so the available templates and
-    their allowed argument options are described in prose in the tool's
-    own description instead. The daemon
-    (agent/internal/commands/templates.go) is what actually validates the
-    binary+args combination server-side regardless of what this
-    description says -- a wrong guess here just comes back as a clear
-    rejection the model can retry from, same posture as an unrecognized
-    run_local_command action. Returns None (no tool at all) when no
-    connected host has any command templates enabled, mirroring how
-    LOCAL_AGENT_TOOL/TRANSFER_TOOL are only added when local_agent_configs
-    is non-empty."""
+    per-chain rule enums aren't expressible in a flat JSON Schema tool
+    definition the way host selection's flat enum is (see LOCAL_AGENT_TOOL's
+    own 'host' field), so the available chains and their rules are
+    described in prose in the tool's own description instead. The daemon
+    (agent/internal/commands/rulechains.go) is what actually validates the
+    proposed call server-side regardless of what this description says --
+    a wrong guess here just comes back as a clear rejection the model can
+    retry from, same posture as an unrecognized run_local_command action.
+    Returns None (no tool at all) when no connected host has any rule
+    chains enabled, mirroring how LOCAL_AGENT_TOOL/TRANSFER_TOOL are only
+    added when local_agent_configs is non-empty."""
     seen = {}
     for config in local_agent_configs.values():
-        for template in config.get("command_templates") or []:
-            seen[template["id"]] = template
+        for chain in config.get("rule_chains") or []:
+            seen[chain["id"]] = chain
     if not seen:
         return None
     lines = []
-    for template in sorted(seen.values(), key=lambda t: t["id"]):
-        options = ", ".join(repr(p["pattern"]) for p in template["allowed_args"])
-        lines.append(
-            f"- template_id={template['id']} name={template['name']!r} "
-            f"binary={template['binary']!r} tier={template['tier']} allowed args: {options}"
-        )
+    for chain in sorted(seen.values(), key=lambda c: c["id"]):
+        lines.append(f"- rule_chain_id={chain['id']} name={chain['name']!r}:")
+        for rule in chain["rules"]:
+            lines.append(f"    {describe_rule(rule)}")
     description = (
-        "Run one of the user's pre-approved command templates on a connected "
-        "machine -- a fixed binary with a fixed set of allowed argument "
-        "options, not arbitrary shell access. Available templates on hosts "
-        "in the active Environment:\n" + "\n".join(lines) + "\n"
-        "Only the exact argument option listed above for a given template_id "
-        "is allowed -- anything else is rejected. A template whose tier is "
-        "'ask' pauses for the user's explicit approval in chat before it "
-        "actually runs; 'allow' runs immediately; 'deny' always rejects it "
-        "without running or prompting -- don't bother retrying a 'deny' call."
+        "Run a command against one of the user's pre-approved rule chains on "
+        "a connected machine -- not arbitrary shell access. Supply the "
+        "binary and its arguments as positional_args (index 0 MUST be the "
+        "binary itself) plus any options; the daemon checks the call "
+        "against the chain's rules IN ORDER, first match wins -- if nothing "
+        "matches, the call is rejected outright, don't retry it unchanged. "
+        "Available rule chains on hosts in the active Environment:\n" + "\n".join(lines) + "\n"
+        "A matched rule's tier controls what happens next: 'ask' pauses for "
+        "the user's explicit approval in chat before it actually runs; "
+        "'allow' runs immediately; 'deny' always rejects it without running "
+        "or prompting -- don't bother retrying a 'deny' call either."
     )
     return {
         "type": "function",
-        "name": "run_command_template",
+        "name": "run_rule_chain_call",
         "description": description,
         "parameters": {
             "type": "object",
             "properties": {
-                "template_id": {
+                "rule_chain_id": {
                     "type": "integer",
-                    "description": "The id of the command template to run, from the list above.",
+                    "description": "The id of the rule chain to check this call against, from the list above.",
                 },
-                "args": {
-                    "type": "string",
-                    "description": "One of that template's exact allowed argument options, verbatim.",
+                "positional_args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The command's positional arguments in order -- index 0 MUST be the binary/executable name itself.",
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "short": {"type": "string", "description": "The option's short form, e.g. 'f' for -f."},
+                            "long": {
+                                "type": "string",
+                                "description": "The option's long form, e.g. 'force' for --force.",
+                            },
+                            "value": {
+                                "type": "string",
+                                "description": "The option's value, if any -- omit entirely for a valueless option.",
+                            },
+                        },
+                    },
+                    "description": (
+                        "Any options (not positional args) the command should be invoked with. "
+                        "At least one of short/long is required per entry."
+                    ),
                 },
                 "path": {
                     "type": "string",
-                    "description": (
-                        "Optional -- which addressable directory to run in, for a "
-                        "path-scoped template. Defaults to the currently selected directory."
-                    ),
+                    "description": "Optional -- which addressable directory to run in. Defaults to the currently selected directory.",
                 },
                 "host": {
                     "type": "string",
@@ -278,17 +298,17 @@ def _build_command_template_tool(local_agent_configs):
                     ),
                 },
             },
-            "required": ["template_id", "args"],
+            "required": ["rule_chain_id", "positional_args"],
         },
     }
 
 
-COMMAND_TEMPLATE_TOOL = _build_command_template_tool(local_agent_configs)
+RULE_CHAIN_TOOL = _build_rule_chain_tool(local_agent_configs)
 
 active_tools = (
     TOOLS
     + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs else [])
-    + ([COMMAND_TEMPLATE_TOOL] if COMMAND_TEMPLATE_TOOL else [])
+    + ([RULE_CHAIN_TOOL] if RULE_CHAIN_TOOL else [])
 )
 
 def _build_welcome_message():
@@ -449,36 +469,145 @@ def call_transfer_file(local_agent_configs, source, source_path, destination, de
     return f"Transferred {source_path!r} from {source} to {destination_path!r} on {destination}."
 
 
-def _find_command_template(local_agent_configs, host, template_id):
-    """Looks up a command template's cached metadata (name/binary/tier/
-    allowed_args) by id, scoped to the given host -- needed before
-    dispatch, both for decide_tier() below and to build a human-readable
-    label for the approval UI/status message."""
+def _find_rule_chain(local_agent_configs, host, rule_chain_id):
+    """Looks up a rule chain's cached metadata (name/rules) by id, scoped
+    to the given host -- needed before dispatch, both for decide_tier()
+    below and to build a human-readable label for the approval UI/status
+    message."""
     config = local_agent_configs.get(host)
     if config is None:
         return None
-    for template in config.get("command_templates") or []:
-        if template.get("id") == template_id:
-            return template
+    for chain in config.get("rule_chains") or []:
+        if chain.get("id") == rule_chain_id:
+            return chain
     return None
 
 
-def decide_tier(template, args, recent_messages):
-    """v1: just the template's own stored tier. args/recent_messages are
-    accepted but unused for now -- see the "Resources" plan's "Forward
-    compatibility: intent-based authorization" section for why this
-    signature carries them regardless: a later intent-evaluation layer
-    would need exactly this input (the proposed call plus the
-    conversation that prompted it), and threading it through now avoids
-    re-plumbing the pause/resume mechanism below when that's built."""
-    return (template or {}).get("tier", "ask")
+def _describe_call_args(positional_args, options):
+    """Human-readable rendering of a proposed call's arguments (everything
+    but the binary itself, which the caller shows separately) -- used for
+    the status label, the approval prompt, and the native-dialog relay
+    message, so all three describe the same call the same way."""
+    parts = list((positional_args or [])[1:])
+    for opt in options or []:
+        name = f"--{opt['long']}" if opt.get("long") else f"-{opt.get('short')}"
+        parts.append(f"{name} {opt['value']}" if opt.get("value") is not None else name)
+    return " ".join(parts)
 
 
-def call_command_template(local_agent_configs, template_id, args_str, host=None, default_host=None, path=None):
+def _value_in_roots(value, roots):
+    """Best-effort client-side approximation of the Go daemon's
+    authoritative {roots} containment check (agent/internal/commands/
+    rulechains.go's valueInRoots) -- a plain string-prefix test against the
+    cached workspace list, no symlink/".."/case-sensitivity resolution
+    (this runs in the browser/server tier, with no real filesystem access
+    to the remote host). A relative value can't be resolved against a
+    remote cwd from here either, so it's treated as possibly in-bounds
+    whenever there's at least one root -- this can only make decide_tier
+    ask when the daemon would actually allow, never the reverse, which is
+    exactly why a "{roots}" rule is forbidden from carrying tier "allow"
+    at authoring time (see auth_service's own RuleChainRuleCreateRequest
+    validator) -- the daemon's own check is always the authoritative one."""
+    if not value:
+        return False
+    if not os.path.isabs(value):
+        return bool(roots)
+    return any(value == root or value.startswith(root.rstrip("/") + "/") for root in roots)
+
+
+def _pattern_matches(value, pattern, roots):
+    """Python port of the Go daemon's valueMatchesPattern -- pattern is
+    "*" (always matches) or a {"whitelist":.., "blacklist":..} object
+    (never None here; a None *option* pattern -- "no value allowed" -- is
+    handled by the caller before this is reached, since it's a presence/
+    absence check, not a value-matching one). Uses google-re2 (the same
+    RE2 engine Go's stdlib regexp targets), not stdlib re, to preserve the
+    no-catastrophic-backtracking property the whole schema is built
+    around."""
+    if pattern == "*":
+        return True
+    whitelist = pattern.get("whitelist")
+    blacklist = pattern.get("blacklist")
+    if whitelist == "{roots}":
+        if not _value_in_roots(value, roots):
+            return False
+    elif whitelist and not re2.search(whitelist, value):
+        return False
+    if blacklist and re2.search(blacklist, value):
+        return False
+    return True
+
+
+def _find_option(options, short, long):
+    for opt in options:
+        if (short and opt.get("short") == short) or (long and opt.get("long") == long):
+            return opt
+    return None
+
+
+def _rule_matches(rule, positional_args, options, roots):
+    """Python port of the Go daemon's ruleMatches -- see
+    agent/internal/commands/rulechains.go for the authoritative version
+    this mirrors."""
+    for i, pattern in enumerate(rule["positional_constraints"]):
+        if pattern == "*":
+            continue
+        if i >= len(positional_args):
+            return False  # a real constraint with nothing supplied to check against
+        if not _pattern_matches(positional_args[i], pattern, roots):
+            return False
+    for constraint in rule["option_constraints"]:
+        supplied = _find_option(options, constraint.get("short"), constraint.get("long"))
+        if supplied is None:
+            return False
+        pattern = constraint.get("pattern")
+        value = supplied.get("value")
+        if pattern is None:
+            if value is not None:
+                return False
+        elif pattern == "*":
+            pass
+        elif value is None or not _pattern_matches(value, pattern, roots):
+            return False
+    return True
+
+
+def match_rule_chain_rule(rule_chain, positional_args, options, roots):
+    """Python port of the Go daemon's matchRule -- first-match-wins over
+    rule_chain["rules"] (already ordered by position, as returned by
+    GET /hosts), returning the matched rule or None (terminal deny)."""
+    if not rule_chain:
+        return None
+    for rule in rule_chain.get("rules") or []:
+        if _rule_matches(rule, positional_args, options, roots):
+            return rule
+    return None
+
+
+def decide_tier(rule_chain, args, roots, recent_messages):
+    """Finds the first matching rule (see match_rule_chain_rule) and
+    returns its tier, or "deny" if nothing matches -- the same "absence
+    means deny" posture the daemon itself falls back to. Must run here,
+    client-side, synchronously, before the daemon is ever called, so
+    "deny" never reaches it and "ask" can pause for approval before
+    dispatch -- see the plan's note on why {roots} rules can never be
+    tier "allow", given this can only approximate directory containment.
+    recent_messages is accepted but unused for now -- see the "Resources"
+    plan's "Forward compatibility: intent-based authorization" section for
+    why this signature carries it regardless: a later intent-evaluation
+    layer would need exactly this input, and threading it through now
+    avoids re-plumbing the pause/resume mechanism below when that's built."""
+    rule = match_rule_chain_rule(rule_chain, args.get("positional_args") or [], args.get("options") or [], roots)
+    return rule["tier"] if rule else "deny"
+
+
+def call_rule_chain_call(
+    local_agent_configs, rule_chain_id, positional_args, options, host=None, default_host=None, path=None
+):
     """Mirrors call_local_agent's shape/error posture exactly, for the
-    daemon's run_command_template action. Never raises."""
+    daemon's run_rule_chain_call action. Never raises."""
     if not local_agent_configs:
-        return "Command template error: no connected machines available."
+        return "Rule chain error: no connected machines available."
     if host is None:
         if len(local_agent_configs) == 1:
             host = next(iter(local_agent_configs))
@@ -486,25 +615,31 @@ def call_command_template(local_agent_configs, template_id, args_str, host=None,
             host = default_host
         else:
             available = ", ".join(local_agent_configs)
-            return f"Command template error: multiple machines connected ({available}) -- specify which one via 'host'."
+            return f"Rule chain error: multiple machines connected ({available}) -- specify which one via 'host'."
     config = local_agent_configs.get(host)
     if config is None:
         available = ", ".join(local_agent_configs)
-        return f"Command template error: unknown host {host!r}. Available: {available}."
+        return f"Rule chain error: unknown host {host!r}. Available: {available}."
     try:
         response = requests.post(
             f"{config['url']}/api/command",
-            json={"action": "run_command_template", "template_id": template_id, "args": args_str, "path": path},
+            json={
+                "action": "run_rule_chain_call",
+                "rule_chain_id": rule_chain_id,
+                "positional_args": positional_args,
+                "options": options,
+                "path": path,
+            },
             headers={"X-API-Key": config["api_key"]},
             timeout=15,
         )
         if response.status_code == 401:
-            return "Command template error: invalid API key."
+            return "Rule chain error: invalid API key."
         if response.status_code >= 400:
-            return f"Command template error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
+            return f"Rule chain error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
         return json.dumps(response.json())
     except requests.RequestException as e:
-        return f"Command template error: {e}"
+        return f"Rule chain error: {e}"
 
 
 def describe_local_command(action, args):
@@ -571,18 +706,21 @@ def show_transfer_calls(calls):
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
-def show_command_template_calls(calls):
-    """Render a demo-friendly summary of command template invocations
-    (including denied ones -- see _process_turn's own "Denied by user."
-    synthesized output, appended here the same as a real dispatch result
-    so a denial stays visible in the transcript, not just to the model)."""
+def show_rule_chain_calls(calls):
+    """Render a demo-friendly summary of rule chain invocations (including
+    denied ones -- see _process_turn's own "Denied by user." synthesized
+    output, appended here the same as a real dispatch result so a denial
+    stays visible in the transcript, not just to the model)."""
     if not calls:
         return
-    label = f"🔧 {len(calls)} command template call{'s' if len(calls) != 1 else ''}"
+    label = f"🔧 {len(calls)} rule chain call{'s' if len(calls) != 1 else ''}"
     with st.expander(label):
         for entry in calls:
             args = entry.get("args", {})
-            prefix = f"$ template #{args.get('template_id')} {args.get('args', '')}".rstrip()
+            positional_args = args.get("positional_args") or []
+            binary = positional_args[0] if positional_args else ""
+            call_args = _describe_call_args(positional_args, args.get("options") or [])
+            prefix = f"$ chain #{args.get('rule_chain_id')} {binary} {call_args}".rstrip()
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
@@ -595,7 +733,7 @@ def _render_message(message):
         show_code_interpreter(message.get("code_blocks", []))
         show_local_agent_calls(message.get("local_agent_calls", []))
         show_transfer_calls(message.get("transfer_calls", []))
-        show_command_template_calls(message.get("command_template_calls", []))
+        show_rule_chain_calls(message.get("rule_chain_calls", []))
 
 
 # One-shot: True only on the render right after the welcome pair is first
@@ -654,7 +792,7 @@ def capture_response_meta(stream, meta):
 
 def _dispatch_tool_call(call, local_agent_configs, selected_host_label, aggregate):
     """Executes ONE already-decided tool call -- never an ask-tier
-    run_command_template still awaiting approval; _process_turn below
+    run_rule_chain_call still awaiting approval; _process_turn below
     intercepts those before they ever reach here -- and returns its output
     string, appending a demo-friendly entry to the relevant aggregate[...]
     list as a side effect, same as the old inline dispatch did."""
@@ -688,22 +826,25 @@ def _dispatch_tool_call(call, local_agent_configs, selected_host_label, aggregat
             )
             st.code(output, language="text")
         aggregate["transfer_calls"].append({"args": args, "output": output})
-    elif call["name"] == "run_command_template":
+    elif call["name"] == "run_rule_chain_call":
         host = args.get("host") or selected_host_label
-        template = _find_command_template(local_agent_configs, host, args.get("template_id"))
-        template_name = template["name"] if template else f"#{args.get('template_id')}"
-        label = f"🔧 Run {template_name}: {args.get('args', '')}"
+        rule_chain = _find_rule_chain(local_agent_configs, host, args.get("rule_chain_id"))
+        chain_name = rule_chain["name"] if rule_chain else f"#{args.get('rule_chain_id')}"
+        positional_args = args.get("positional_args") or []
+        call_args = _describe_call_args(positional_args, args.get("options") or [])
+        label = f"🔧 Run {chain_name}: {' '.join(positional_args)} {call_args}".rstrip()
         with st.status(label):
-            output = call_command_template(
+            output = call_rule_chain_call(
                 local_agent_configs,
-                args.get("template_id"),
-                args.get("args", ""),
+                args.get("rule_chain_id"),
+                positional_args,
+                args.get("options") or [],
                 host=args.get("host"),
                 default_host=selected_host_label,
                 path=args.get("path"),
             )
             st.code(output, language="text")
-        aggregate["command_template_calls"].append({"args": args, "output": output})
+        aggregate["rule_chain_calls"].append({"args": args, "output": output})
     else:
         output = f"Unknown tool: {call['name']}"
     return output
@@ -718,7 +859,7 @@ def _new_turn(prompt):
             "code_blocks": [],
             "local_agent_calls": [],
             "transfer_calls": [],
-            "command_template_calls": [],
+            "rule_chain_calls": [],
             "image": None,
         },
         "full_response": "",
@@ -771,25 +912,28 @@ def _process_turn(local_agent_configs, selected_host_label):
         while turn["pending_calls"]:
             call = turn["pending_calls"][0]
             denied_output = None
-            if call["name"] == "run_command_template":
+            if call["name"] == "run_rule_chain_call":
                 args = json.loads(call["arguments"])
                 host = args.get("host") or selected_host_label
-                template = _find_command_template(local_agent_configs, host, args.get("template_id"))
-                call_tier = decide_tier(template, args, st.session_state.messages)
+                rule_chain = _find_rule_chain(local_agent_configs, host, args.get("rule_chain_id"))
+                roots = (local_agent_configs.get(host) or {}).get("workspace") or []
+                call_tier = decide_tier(rule_chain, args, roots, st.session_state.messages)
                 if call_tier == "deny":
-                    # A structural rejection stored on the template itself --
+                    # A structural rejection -- either no matching rule at
+                    # all, or the matched rule is itself tier "deny" --
                     # never dispatched, and deliberately never even shown as
                     # an in-chat/native-dialog prompt (unlike "ask", there's
                     # no decision for a human to make here). Distinct from a
                     # human clicking Deny on an "ask"-tier call below, though
                     # both resolve through the same denied_output path.
-                    denied_output = "Denied by policy (this command template is set to deny)."
+                    denied_output = "Denied by policy (no matching rule allows this call)."
                 elif call_tier == "ask":
                     decisions = st.session_state.setdefault("_approval_decisions", {})
                     decision = decisions.get(call["call_id"])
                     if decision is None:
                         approval_id = None
-                        if template:
+                        positional_args = args.get("positional_args") or []
+                        if rule_chain and positional_args:
                             # Additive, alongside (not instead of) the
                             # in-chat Approve/Deny UI below -- lets a native
                             # dialog on the user's attended host (see
@@ -801,16 +945,16 @@ def _process_turn(local_agent_configs, selected_host_label):
                             submitted = submit_pending_approval(
                                 AUTH_DOMAIN,
                                 current_token(),
-                                template["name"],
-                                template["binary"],
-                                args.get("args", ""),
+                                rule_chain["name"],
+                                positional_args[0],
+                                _describe_call_args(positional_args, args.get("options") or []),
                                 host,
                             )
                             approval_id = (submitted or {}).get("approval_id")
                         st.session_state["_pending_approval"] = {
                             "call_id": call["call_id"],
                             "host": host,
-                            "template": template,
+                            "rule_chain": rule_chain,
                             "args": args,
                             "approval_id": approval_id,
                         }
@@ -821,7 +965,7 @@ def _process_turn(local_agent_configs, selected_host_label):
 
             if denied_output is not None:
                 output = denied_output
-                turn["aggregate"]["command_template_calls"].append(
+                turn["aggregate"]["rule_chain_calls"].append(
                     {"args": json.loads(call["arguments"]), "output": output}
                 )
             else:
@@ -842,7 +986,7 @@ def _process_turn(local_agent_configs, selected_host_label):
     show_code_interpreter(aggregate["code_blocks"])
     show_local_agent_calls(aggregate["local_agent_calls"])
     show_transfer_calls(aggregate["transfer_calls"])
-    show_command_template_calls(aggregate["command_template_calls"])
+    show_rule_chain_calls(aggregate["rule_chain_calls"])
 
     st.session_state.messages.append(
         {
@@ -854,7 +998,7 @@ def _process_turn(local_agent_configs, selected_host_label):
             "code_blocks": aggregate["code_blocks"],
             "local_agent_calls": aggregate["local_agent_calls"],
             "transfer_calls": aggregate["transfer_calls"],
-            "command_template_calls": aggregate["command_template_calls"],
+            "rule_chain_calls": aggregate["rule_chain_calls"],
         }
     )
     del st.session_state["_turn"]
@@ -878,21 +1022,24 @@ if "_turn" in st.session_state:
 
     if not finished:
         pending = st.session_state["_pending_approval"]
-        template = pending["template"]
-        template_label = template["name"] if template else f"template #{pending['args'].get('template_id')}"
+        rule_chain = pending["rule_chain"]
+        chain_label = rule_chain["name"] if rule_chain else f"rule chain #{pending['args'].get('rule_chain_id')}"
+        positional_args = pending["args"].get("positional_args") or []
+        call_args = _describe_call_args(positional_args, pending["args"].get("options") or [])
+        call_line = f"{' '.join(positional_args)} {call_args}".strip()
         with st.chat_message("assistant"):
             st.warning(
-                f"The assistant wants to run **{template_label}** "
-                f"(`{pending['args'].get('args', '')}`) on **{pending['host']}**. Allow it?"
+                f"The assistant wants to run **{chain_label}** "
+                f"(`{call_line}`) on **{pending['host']}**. Allow it?"
             )
             approve_col, deny_col = st.columns(2)
             with approve_col:
-                if st.button("Approve", key="approve_command_template", type="primary"):
+                if st.button("Approve", key="approve_rule_chain", type="primary"):
                     st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "allow"
                     del st.session_state["_pending_approval"]
                     st.rerun()
             with deny_col:
-                if st.button("Deny", key="deny_command_template"):
+                if st.button("Deny", key="deny_rule_chain"):
                     st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "deny"
                     del st.session_state["_pending_approval"]
                     st.rerun()

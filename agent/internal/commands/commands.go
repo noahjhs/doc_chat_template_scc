@@ -40,13 +40,27 @@ type Request struct {
 	// transferred files need to survive round-tripping arbitrary binary
 	// content intact through JSON, which requires valid UTF-8.
 	Content string `json:"content,omitempty"`
-	// TemplateID/Args are only used by run_command_template (see
-	// templates.go) -- TemplateID picks which cached CommandTemplate to
-	// run, Args must exactly match one of its AllowedArgs entries. Path
-	// (above) is reused by run_command_template too, when the template is
-	// PathScoped, to pick which confined directory to run in.
-	TemplateID int    `json:"template_id,omitempty"`
-	Args       string `json:"args,omitempty"`
+	// RuleChainID/PositionalArgs/Options are only used by run_rule_chain_call
+	// (see rulechains.go). No argv string, ever -- the model supplies
+	// STRUCTURED arguments (PositionalArgs index 0 is the binary itself,
+	// mapping 1:1 onto a rule's positional constraint list; Options is a
+	// list of named entries, not raw tokens), and the daemon is what
+	// constructs the actual argv for exec.Command, once, only after a rule
+	// has matched -- see rulechains.go's buildArgv. Path (above) is reused
+	// by run_rule_chain_call too, to pick which confined directory to run
+	// in (now unconditional whenever given -- see runRunRuleChainCall).
+	RuleChainID    int             `json:"rule_chain_id,omitempty"`
+	PositionalArgs []string        `json:"positional_args,omitempty"`
+	Options        []RequestOption `json:"options,omitempty"`
+}
+
+// RequestOption is one model-supplied option entry for run_rule_chain_call --
+// Value is nil for a valueless option (e.g. "--force"), matching
+// OptionConstraint.Pattern's own nil-means-"no value" convention.
+type RequestOption struct {
+	Short string  `json:"short,omitempty"`
+	Long  string  `json:"long,omitempty"`
+	Value *string `json:"value,omitempty"`
 }
 
 // ApplyDefaults matches CommandRequest's Pydantic field defaults (lines=10,
@@ -93,11 +107,11 @@ func (e *ActionError) Error() string { return e.Detail }
 // "+" button in the web app (see runAddDirectory), which is now the only
 // way roots ever grows.
 type Handler struct {
-	mu                        sync.Mutex
-	roots                     []string
-	cwd                       string
-	templates                 []CommandTemplate // see templates.go -- the daemon's own cached copy of enabled command templates, fetched from auth_service
-	refreshCommandTemplatesFn func()            // see templates.go's SetRefreshCommandTemplatesFunc
+	mu                  sync.Mutex
+	roots               []string
+	cwd                 string
+	ruleChains          []RuleChain // see rulechains.go -- the daemon's own cached copy of enabled rule chains, fetched from auth_service
+	refreshRuleChainsFn func()      // see rulechains.go's SetRefreshRuleChainsFunc
 
 	// Both injected at construction (see cmd/casper/main.go) -- kept out of
 	// this package since they're daemon-orchestration concerns (an
@@ -910,12 +924,12 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 		return h.runListDirectories(req)
 	case "add_directory":
 		return h.runAddDirectory(req)
-	case "list_command_templates":
-		return h.runListCommandTemplates(req)
-	case "run_command_template":
-		return h.runRunCommandTemplate(req)
-	case "refresh_command_templates":
-		return h.runRefreshCommandTemplates(req)
+	case "list_rule_chains":
+		return h.runListRuleChains(req)
+	case "run_rule_chain_call":
+		return h.runRunRuleChainCall(req)
+	case "refresh_rule_chains":
+		return h.runRefreshRuleChains(req)
 	default:
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

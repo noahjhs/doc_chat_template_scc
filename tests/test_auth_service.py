@@ -479,100 +479,214 @@ def test_profile_is_per_user(client):
     assert b_profile["email"] == ""
 
 
-def _create_template(client, headers, name="npm scripts", **overrides):
-    body = {
-        "name": name,
-        "binary": "npm",
-        "allowed_args": [{"pattern": "run build"}, {"pattern": "run test"}],
-        "tier": "ask",
-        "path_scoped": True,
-    }
-    body.update(overrides)
-    return client.post("/command-templates", json=body, headers=headers)
+def _create_rule_chain(client, headers, name="npm scripts"):
+    return client.post("/rule-chains", json={"name": name}, headers=headers)
 
 
-def test_command_template_crud(client):
+def _add_rule(client, headers, chain_id, positional_constraints, option_constraints=None, tier="ask"):
+    return client.post(
+        f"/rule-chains/{chain_id}/rules",
+        json={
+            "positional_constraints": positional_constraints,
+            "option_constraints": option_constraints or [],
+            "tier": tier,
+        },
+        headers=headers,
+    )
+
+
+def test_rule_chain_crud(client):
     signup = _signup(client, "carol")
     headers = {"Authorization": f"Bearer {signup['token']}"}
 
-    created = _create_template(client, headers)
+    created = _create_rule_chain(client, headers)
     assert created.status_code == 201
     body = created.json()
     assert body["name"] == "npm scripts"
-    assert body["binary"] == "npm"
-    assert body["allowed_args"] == [
-        {"pattern": "run build", "slots": {}}, {"pattern": "run test", "slots": {}}
-    ]
-    assert body["tier"] == "ask"
-    assert body["path_scoped"] is True
+    assert body["rules"] == []
     assert body["host_ids"] == []
 
-    dup = _create_template(client, headers, name="NPM SCRIPTS")  # case-insensitive
+    dup = _create_rule_chain(client, headers, name="NPM SCRIPTS")  # case-insensitive
     assert dup.status_code == 409
 
-    listed = client.get("/command-templates", headers=headers).json()["command_templates"]
-    assert [t["id"] for t in listed] == [body["id"]]
+    listed = client.get("/rule-chains", headers=headers).json()["rule_chains"]
+    assert [c["id"] for c in listed] == [body["id"]]
 
-    updated = client.patch(
-        f"/command-templates/{body['id']}", json={"tier": "allow"}, headers=headers
-    ).json()
-    assert updated["tier"] == "allow"
-    assert updated["binary"] == "npm"  # untouched fields survive a partial update
+    renamed = client.patch(f"/rule-chains/{body['id']}", json={"name": "npm"}, headers=headers)
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "npm"
 
-    deleted = client.delete(f"/command-templates/{body['id']}", headers=headers)
+    deleted = client.delete(f"/rule-chains/{body['id']}", headers=headers)
     assert deleted.status_code == 200
-    assert client.get("/command-templates", headers=headers).json()["command_templates"] == []
+    assert client.get("/rule-chains", headers=headers).json()["rule_chains"] == []
 
 
-def test_command_template_accepts_deny_tier(client):
-    signup = _signup(client, "dave3")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    created = _create_template(client, headers, tier="deny")
-    assert created.status_code == 201
-    assert created.json()["tier"] == "deny"
-
-    updated = client.patch(
-        f"/command-templates/{created.json()['id']}", json={"tier": "deny"}, headers=headers
-    )
-    assert updated.status_code == 200
-    assert updated.json()["tier"] == "deny"
-
-
-def test_command_template_rejects_empty_allowed_args(client):
+def test_rule_chain_rule_crud(client):
     signup = _signup(client, "dave2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    r = _create_template(client, headers, allowed_args=[])
+    chain = _create_rule_chain(client, headers).json()
+
+    created = _add_rule(
+        client, headers, chain["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="allow"
+    )
+    assert created.status_code == 201
+    rule = created.json()
+    assert rule["position"] == 0
+    assert rule["positional_constraints"] == [
+        {"whitelist": "^npm$", "blacklist": None}, {"whitelist": "^run$", "blacklist": None}
+    ]
+    assert rule["tier"] == "allow"
+
+    updated = client.patch(
+        f"/rule-chains/{chain['id']}/rules/{rule['id']}", json={"tier": "ask"}, headers=headers
+    )
+    assert updated.status_code == 200
+    assert updated.json()["tier"] == "ask"
+    # untouched fields survive a partial update
+    assert updated.json()["positional_constraints"] == rule["positional_constraints"]
+
+    deleted = client.delete(f"/rule-chains/{chain['id']}/rules/{rule['id']}", headers=headers)
+    assert deleted.status_code == 200
+    assert client.get("/rule-chains", headers=headers).json()["rule_chains"][0]["rules"] == []
+
+
+def test_rule_chain_rule_reorder(client):
+    signup = _signup(client, "erin3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^a$"}]).json()
+    r2 = _add_rule(client, headers, chain["id"], [{"whitelist": "^b$"}]).json()
+    r3 = _add_rule(client, headers, chain["id"], [{"whitelist": "^c$"}]).json()
+
+    reordered = client.put(
+        f"/rule-chains/{chain['id']}/rules/reorder",
+        json={"rule_ids": [r3["id"], r1["id"], r2["id"]]},
+        headers=headers,
+    )
+    assert reordered.status_code == 200
+    assert [r["id"] for r in reordered.json()["rules"]] == [r3["id"], r1["id"], r2["id"]]
+    assert [r["position"] for r in reordered.json()["rules"]] == [0, 1, 2]
+
+
+def test_rule_chain_rule_reorder_rejects_non_permutation(client):
+    signup = _signup(client, "frank3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^a$"}]).json()
+    _add_rule(client, headers, chain["id"], [{"whitelist": "^b$"}])
+
+    missing_one = client.put(
+        f"/rule-chains/{chain['id']}/rules/reorder", json={"rule_ids": [r1["id"]]}, headers=headers
+    )
+    assert missing_one.status_code == 400
+
+    unknown_id = client.put(
+        f"/rule-chains/{chain['id']}/rules/reorder", json={"rule_ids": [r1["id"], 999999]}, headers=headers
+    )
+    assert unknown_id.status_code == 400
+
+
+def test_rule_chain_rule_requires_position_zero(client):
+    signup = _signup(client, "gina3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    assert _add_rule(client, headers, chain["id"], []).status_code == 422
+
+
+def test_rule_chain_rule_accepts_wildcard_at_any_position(client):
+    signup = _signup(client, "hank3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    # "*" at position 0 (any binary) and mid-list (skip position 1, still
+    # constrain position 2) both accepted.
+    created = _add_rule(client, headers, chain["id"], ["*", "*", {"whitelist": "^build$"}])
+    assert created.status_code == 201
+    assert created.json()["positional_constraints"] == ["*", "*", {"whitelist": "^build$", "blacklist": None}]
+
+
+def test_rule_chain_rule_rejects_roots_on_position_zero(client):
+    signup = _signup(client, "ivan3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    r = _add_rule(client, headers, chain["id"], [{"whitelist": "{roots}"}])
     assert r.status_code == 422
 
 
-def test_command_template_host_attachment_and_hosts_listing(client):
+def test_rule_chain_rule_rejects_roots_with_allow_tier(client):
+    signup = _signup(client, "judy3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    denied = _add_rule(client, headers, chain["id"], ["*", {"whitelist": "{roots}"}], tier="allow")
+    assert denied.status_code == 422
+    allowed = _add_rule(client, headers, chain["id"], ["*", {"whitelist": "{roots}"}], tier="ask")
+    assert allowed.status_code == 201
+
+
+def test_rule_chain_rule_rejects_invalid_regex(client):
+    signup = _signup(client, "kevin1")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    r = _add_rule(client, headers, chain["id"], [{"whitelist": "["}])
+    assert r.status_code == 422
+    assert "Invalid regex" in r.json()["detail"]
+
+
+def test_rule_chain_rule_option_pattern_states_round_trip(client):
+    signup = _signup(client, "laura1")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    created = _add_rule(
+        client,
+        headers,
+        chain["id"],
+        ["*"],
+        option_constraints=[
+            {"long": "force", "pattern": None},  # must be present, no value
+            {"short": "v", "pattern": "*"},  # must be present, any/no value
+            {"long": "output", "pattern": {"whitelist": ".+"}},  # must be present, value matching
+        ],
+    )
+    assert created.status_code == 201
+    options = created.json()["option_constraints"]
+    assert options[0] == {"short": None, "long": "force", "pattern": None}
+    assert options[1] == {"short": "v", "long": None, "pattern": "*"}
+    assert options[2] == {"short": None, "long": "output", "pattern": {"whitelist": ".+", "blacklist": None}}
+
+
+def test_rule_chain_option_constraint_requires_short_or_long(client):
+    signup = _signup(client, "mallory1")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    r = _add_rule(client, headers, chain["id"], ["*"], option_constraints=[{"pattern": "*"}])
+    assert r.status_code == 422
+
+
+def test_rule_chain_host_attachment_and_hosts_listing(client):
     signup = _signup(client, "erin2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     pair = client.post(
         "/hosts/pair", json={"routing_key": "rk-erin2-1", "hostname": "erins-mac"}, headers=headers
     ).json()
-    template = _create_template(client, headers).json()
+    chain = _create_rule_chain(client, headers).json()
+    _add_rule(client, headers, chain["id"], [{"whitelist": "^npm$"}])
 
-    attached = client.put(
-        f"/command-templates/{template['id']}/hosts/{pair['host_id']}", headers=headers
-    ).json()
+    attached = client.put(f"/rule-chains/{chain['id']}/hosts/{pair['host_id']}", headers=headers).json()
     assert attached["host_ids"] == [pair["host_id"]]
 
     hosts = client.get("/hosts", headers=headers).json()["hosts"]
     (host,) = [h for h in hosts if h["host_id"] == pair["host_id"]]
-    assert len(host["command_templates"]) == 1
-    assert host["command_templates"][0]["name"] == "npm scripts"
+    assert len(host["rule_chains"]) == 1
+    assert host["rule_chains"][0]["name"] == "npm scripts"
+    assert len(host["rule_chains"][0]["rules"]) == 1
 
-    detached = client.delete(
-        f"/command-templates/{template['id']}/hosts/{pair['host_id']}", headers=headers
-    ).json()
+    detached = client.delete(f"/rule-chains/{chain['id']}/hosts/{pair['host_id']}", headers=headers).json()
     assert detached["host_ids"] == []
     hosts_after = client.get("/hosts", headers=headers).json()["hosts"]
     (host_after,) = [h for h in hosts_after if h["host_id"] == pair["host_id"]]
-    assert host_after["command_templates"] == []
+    assert host_after["rule_chains"] == []
 
 
-def test_command_template_daemon_facing_fetch(client):
+def test_rule_chain_daemon_facing_fetch(client):
     signup = _signup(client, "frank2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     pair_a = client.post(
@@ -581,46 +695,56 @@ def test_command_template_daemon_facing_fetch(client):
     pair_b = client.post(
         "/hosts/pair", json={"routing_key": "rk-frank2-b", "hostname": "b"}, headers=headers
     ).json()
-    template = _create_template(client, headers).json()
-    client.put(f"/command-templates/{template['id']}/hosts/{pair_a['host_id']}", headers=headers)
+    chain = _create_rule_chain(client, headers).json()
+    r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}]).json()
+    r2 = _add_rule(client, headers, chain["id"], ["*"], tier="deny").json()
+    client.put(f"/rule-chains/{chain['id']}/hosts/{pair_a['host_id']}", headers=headers)
 
     device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
     device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
 
-    fetched_a = client.get("/hosts/command-templates", headers=device_headers_a).json()
-    assert len(fetched_a["command_templates"]) == 1
-    assert fetched_a["command_templates"][0]["binary"] == "npm"
-    assert fetched_a["command_templates"][0]["allowed_args"] == [
-        {"pattern": "run build", "slots": {}}, {"pattern": "run test", "slots": {}}
+    fetched_a = client.get("/hosts/rule-chains", headers=device_headers_a).json()
+    assert len(fetched_a["rule_chains"]) == 1
+    fetched_rules = fetched_a["rule_chains"][0]["rules"]
+    assert [r["id"] for r in fetched_rules] == [r1["id"], r2["id"]]  # rule order survives
+    assert fetched_rules[0]["positional_constraints"] == [
+        {"whitelist": "^npm$", "blacklist": None}, {"whitelist": "^run$", "blacklist": None}
     ]
 
     # Not attached to host B -- device_token B sees nothing.
-    fetched_b = client.get("/hosts/command-templates", headers=device_headers_b).json()
-    assert fetched_b["command_templates"] == []
+    fetched_b = client.get("/hosts/rule-chains", headers=device_headers_b).json()
+    assert fetched_b["rule_chains"] == []
 
-    no_auth = client.get("/hosts/command-templates")
+    no_auth = client.get("/hosts/rule-chains")
     assert no_auth.status_code == 401
 
 
-def test_command_template_is_per_user(client):
+def test_rule_chain_is_per_user(client):
     a = _signup(client, "gina2")
     b = _signup(client, "hank2")
     headers_a = {"Authorization": f"Bearer {a['token']}"}
     headers_b = {"Authorization": f"Bearer {b['token']}"}
-    _create_template(client, headers_a)
-    assert client.get("/command-templates", headers=headers_b).json()["command_templates"] == []
+    _create_rule_chain(client, headers_a)
+    assert client.get("/rule-chains", headers=headers_b).json()["rule_chains"] == []
 
 
-def test_command_template_ownership_enforced(client):
+def test_rule_chain_ownership_enforced(client):
     a = _signup(client, "ivan2")
     b = _signup(client, "judy2")
     headers_a = {"Authorization": f"Bearer {a['token']}"}
     headers_b = {"Authorization": f"Bearer {b['token']}"}
-    template = _create_template(client, headers_a).json()
-    assert client.patch(
-        f"/command-templates/{template['id']}", json={"tier": "allow"}, headers=headers_b
-    ).status_code == 404
-    assert client.delete(f"/command-templates/{template['id']}", headers=headers_b).status_code == 404
+    chain = _create_rule_chain(client, headers_a).json()
+    rule = _add_rule(client, headers_a, chain["id"], [{"whitelist": "^npm$"}]).json()
+
+    assert client.patch(f"/rule-chains/{chain['id']}", json={"name": "x"}, headers=headers_b).status_code == 404
+    assert client.delete(f"/rule-chains/{chain['id']}", headers=headers_b).status_code == 404
+    assert (
+        client.patch(
+            f"/rule-chains/{chain['id']}/rules/{rule['id']}", json={"tier": "allow"}, headers=headers_b
+        ).status_code
+        == 404
+    )
+    assert client.delete(f"/rule-chains/{chain['id']}/rules/{rule['id']}", headers=headers_b).status_code == 404
 
 
 def _pending_approval_body(**overrides):

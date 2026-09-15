@@ -260,9 +260,9 @@ def _fetch_local_json(config, action, **kwargs):
             # ActionError -> 400 mapping) -- response.raise_for_status()'s
             # exception message would just be "400 Client Error: Bad
             # Request for url: ...", silently dropping the daemon's actual
-            # reason (e.g. "Unknown or no longer enabled command
-            # template."), same fix as pages/chat.py's call_local_agent/
-            # call_command_template.
+            # reason (e.g. "Unknown or no longer enabled rule chain."),
+            # same fix as pages/chat.py's call_local_agent/
+            # call_rule_chain_call.
             try:
                 detail = response.json().get("detail")
             except ValueError:
@@ -354,10 +354,10 @@ def _build_local_agent_configs(connected_hosts):
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
             "workspace": h.get("workspace") or [],
-            # Command templates enabled on this specific host -- see
-            # auth_service's HostInfo.command_templates. pages/chat.py
-            # builds its run_command_template tool schema from these.
-            "command_templates": h.get("command_templates") or [],
+            # Rule chains enabled on this specific host -- see
+            # auth_service's HostInfo.rule_chains. pages/chat.py
+            # builds its run_rule_chain_call tool schema from these.
+            "rule_chains": h.get("rule_chains") or [],
         }
     return configs
 

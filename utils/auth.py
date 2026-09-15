@@ -353,46 +353,75 @@ def update_profile(auth_domain, token, **fields):
     return _auth_write("PATCH", auth_domain, token, "/profile", fields)
 
 
-def list_command_templates(auth_domain, token):
-    """GET /command-templates. Returns {"command_templates": [...]}, or
+def list_rule_chains(auth_domain, token):
+    """GET /rule-chains. Returns {"rule_chains": [...]}, or {"error": str}."""
+    return _auth_write("GET", auth_domain, token, "/rule-chains")
+
+
+def create_rule_chain(auth_domain, token, name):
+    """POST /rule-chains -- name only, creates an empty shell (rules=[]).
+    Returns the new chain, or {"error": str}."""
+    return _auth_write("POST", auth_domain, token, "/rule-chains", {"name": name})
+
+
+def rename_rule_chain(auth_domain, token, rule_chain_id, name):
+    """PATCH /rule-chains/{id}. Returns the updated chain, or {"error": str}."""
+    return _auth_write("PATCH", auth_domain, token, f"/rule-chains/{rule_chain_id}", {"name": name})
+
+
+def delete_rule_chain(auth_domain, token, rule_chain_id):
+    """DELETE /rule-chains/{id}. Returns {"revoked": True}, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/rule-chains/{rule_chain_id}")
+
+
+def add_rule_chain_to_host(auth_domain, token, rule_chain_id, host_id):
+    """PUT /rule-chains/{id}/hosts/{host_id}. Returns the updated chain, or
     {"error": str}."""
-    return _auth_write("GET", auth_domain, token, "/command-templates")
+    return _auth_write("PUT", auth_domain, token, f"/rule-chains/{rule_chain_id}/hosts/{host_id}")
 
 
-def create_command_template(auth_domain, token, name, binary, allowed_args, tier="ask", path_scoped=True):
-    """POST /command-templates. allowed_args is a list of {"pattern": str}
-    dicts (v1 never sets "slots" -- see models.CommandTemplateArgPattern).
-    Returns the new template (with host_ids=[]), or {"error": str}."""
+def remove_rule_chain_from_host(auth_domain, token, rule_chain_id, host_id):
+    """DELETE /rule-chains/{id}/hosts/{host_id}. Returns the updated chain,
+    or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/rule-chains/{rule_chain_id}/hosts/{host_id}")
+
+
+def create_rule_chain_rule(auth_domain, token, rule_chain_id, positional_constraints, option_constraints, tier):
+    """POST /rule-chains/{id}/rules -- positional_constraints is a list of
+    "*" | {"whitelist": str, "blacklist": str} entries (list index IS the
+    argv position, index 0 the binary); option_constraints is a list of
+    {"short": str|None, "long": str|None, "pattern": "*" | {...} | None}
+    entries (pattern None means "must be present with no value"). Returns
+    the new rule, or {"error": str}."""
     return _auth_write(
         "POST",
         auth_domain,
         token,
-        "/command-templates",
-        {"name": name, "binary": binary, "allowed_args": allowed_args, "tier": tier, "path_scoped": path_scoped},
+        f"/rule-chains/{rule_chain_id}/rules",
+        {"positional_constraints": positional_constraints, "option_constraints": option_constraints, "tier": tier},
     )
 
 
-def update_command_template(auth_domain, token, template_id, **fields):
-    """PATCH /command-templates/{id} -- merge-updates only the given fields
-    (any subset). Returns the updated template, or {"error": str}."""
-    return _auth_write("PATCH", auth_domain, token, f"/command-templates/{template_id}", fields)
+def update_rule_chain_rule(auth_domain, token, rule_chain_id, rule_id, **fields):
+    """PATCH /rule-chains/{id}/rules/{rule_id} -- merge-updates only the
+    given fields (any subset of positional_constraints/option_constraints/
+    tier). Returns the updated rule, or {"error": str}."""
+    return _auth_write("PATCH", auth_domain, token, f"/rule-chains/{rule_chain_id}/rules/{rule_id}", fields)
 
 
-def delete_command_template(auth_domain, token, template_id):
-    """DELETE /command-templates/{id}. Returns {"revoked": True}, or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/command-templates/{template_id}")
+def delete_rule_chain_rule(auth_domain, token, rule_chain_id, rule_id):
+    """DELETE /rule-chains/{id}/rules/{rule_id}. Returns {"revoked": True},
+    or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/rule-chains/{rule_chain_id}/rules/{rule_id}")
 
 
-def add_command_template_to_host(auth_domain, token, template_id, host_id):
-    """PUT /command-templates/{id}/hosts/{host_id}. Returns the updated
-    template, or {"error": str}."""
-    return _auth_write("PUT", auth_domain, token, f"/command-templates/{template_id}/hosts/{host_id}")
-
-
-def remove_command_template_from_host(auth_domain, token, template_id, host_id):
-    """DELETE /command-templates/{id}/hosts/{host_id}. Returns the updated
-    template, or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/command-templates/{template_id}/hosts/{host_id}")
+def reorder_rule_chain_rules(auth_domain, token, rule_chain_id, rule_ids):
+    """PUT /rule-chains/{id}/rules/reorder -- rule_ids must be exactly a
+    permutation of the chain's current rule ids. Returns the updated chain
+    (rules now in the new order), or {"error": str}."""
+    return _auth_write(
+        "PUT", auth_domain, token, f"/rule-chains/{rule_chain_id}/rules/reorder", {"rule_ids": rule_ids}
+    )
 
 
 def get_attended_host(auth_domain, token):

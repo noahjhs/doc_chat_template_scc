@@ -16,26 +16,23 @@ from db import get_db, init_db
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from models import (
     AttendedHostInfo,
     AttendedHostUpdateRequest,
     AuthResponse,
-    CommandTemplateCreateRequest,
-    CommandTemplateInfo,
-    CommandTemplateListResponse,
-    CommandTemplateUpdateRequest,
     EnvironmentCreateRequest,
     EnvironmentInfo,
     EnvironmentListResponse,
     EnvironmentRenameRequest,
-    HostCommandTemplateInfo,
-    HostCommandTemplateListResponse,
     HostInfo,
     HostListResponse,
     HostPairRequest,
     HostPairResponse,
     HostPresenceReport,
     HostRenameRequest,
+    HostRuleChainInfo,
+    HostRuleChainListResponse,
     HostVerifyResponse,
     LoginRequest,
     PendingApprovalCreateRequest,
@@ -46,6 +43,14 @@ from models import (
     ProfileInfo,
     ProfileUpdateRequest,
     RevokeResponse,
+    RuleChainCreateRequest,
+    RuleChainInfo,
+    RuleChainListResponse,
+    RuleChainRenameRequest,
+    RuleChainRuleCreateRequest,
+    RuleChainRuleInfo,
+    RuleChainRuleReorderRequest,
+    RuleChainRuleUpdateRequest,
     SignOutAllResponse,
     SignupRequest,
     StorageDeleteResponse,
@@ -69,14 +74,35 @@ def _validation_error_handler(request: Request, exc: RequestValidationError):
     thus every settings-page st.error(result["error"])) actually expects.
     Added for ProfileUpdateRequest's email/phone validators, but applies
     service-wide since every 422 here benefits the same way."""
-    first = exc.errors()[0]
-    message = first.get("msg", "Invalid request.")
-    # pydantic v2 prefixes a validator's own raised ValueError text with
-    # "Value error, " in the formatted message -- stripped so e.g. "Enter a
-    # valid email address." isn't shown as "Value error, Enter a valid
-    # email address."
-    message = message.removeprefix("Value error, ")
-    return JSONResponse(status_code=422, content={"detail": message})
+    return JSONResponse(status_code=422, content={"detail": _first_validation_message(exc.errors())})
+
+
+def _first_validation_message(errors: list[dict]) -> str:
+    """Shared by the global RequestValidationError handler above and by any
+    handler that manually re-validates a merged PATCH body through a
+    *CreateRequest model (see update_rule_chain_rule).
+
+    Prefers a "value_error" entry (a validator's own deliberately-written
+    message, e.g. RuleChainPattern's "Invalid regex ...") over a generic
+    structural one (e.g. "literal_error") when both are present -- which
+    happens for any `Literal["*"] | SomeModel` union field (see
+    RuleChainRuleCreateRequest.positional_constraints/OptionConstraint.pattern):
+    a genuinely-invalid SomeModel payload fails BOTH union branches (it's
+    not the literal "*", *and* the model's own validator rejects it), and
+    pydantic reports every attempted branch's error in declaration order --
+    so without this, a real "invalid regex" mistake would confusingly
+    surface as "Input should be '*'" (the *other* branch's unrelated
+    failure) purely because that branch happened to be declared first.
+    Confirmed directly: this exact case was the trigger for adding this.
+
+    pydantic v2 prefixes a validator's own raised ValueError text with
+    "Value error, " in the formatted message, stripped so e.g. "Enter a
+    valid email address." isn't shown as "Value error, Enter a valid email
+    address.\""""
+    if not errors:
+        return "Invalid request."
+    best = next((e for e in errors if e.get("type") == "value_error"), errors[0])
+    return best.get("msg", "Invalid request.").removeprefix("Value error, ")
 
 
 # --- Rate limiting -----------------------------------------------------
@@ -327,35 +353,52 @@ def _environment_info(db, environment_id: int, name: str) -> EnvironmentInfo:
     return EnvironmentInfo(id=environment_id, name=name, host_ids=host_ids)
 
 
-def _user_owns_command_template(db, user_id: int, template_id: int) -> bool:
+def _user_owns_rule_chain(db, user_id: int, rule_chain_id: int) -> bool:
+    return (
+        db.execute("SELECT 1 FROM rule_chains WHERE id = ? AND user_id = ?", (rule_chain_id, user_id)).fetchone()
+        is not None
+    )
+
+
+def _user_owns_rule_chain_rule(db, user_id: int, rule_chain_id: int, rule_id: int) -> bool:
     return (
         db.execute(
-            "SELECT 1 FROM command_templates WHERE id = ? AND user_id = ?", (template_id, user_id)
+            "SELECT 1 FROM rule_chain_rules rcr JOIN rule_chains rc ON rc.id = rcr.rule_chain_id "
+            "WHERE rcr.id = ? AND rcr.rule_chain_id = ? AND rc.user_id = ?",
+            (rule_id, rule_chain_id, user_id),
         ).fetchone()
         is not None
     )
 
 
-def _command_template_info(db, template_id: int) -> CommandTemplateInfo:
-    row = db.execute(
-        "SELECT id, name, binary, allowed_args, tier, path_scoped FROM command_templates WHERE id = ?",
-        (template_id,),
-    ).fetchone()
+def _rule_chain_rule_info(row) -> RuleChainRuleInfo:
+    return RuleChainRuleInfo(
+        id=row["id"],
+        position=row["position"],
+        positional_constraints=json.loads(row["positional_constraints"]),
+        option_constraints=json.loads(row["option_constraints"]),
+        tier=row["tier"],
+    )
+
+
+def _rule_chain_rules(db, rule_chain_id: int) -> list[RuleChainRuleInfo]:
+    rows = db.execute(
+        "SELECT id, position, positional_constraints, option_constraints, tier "
+        "FROM rule_chain_rules WHERE rule_chain_id = ? ORDER BY position",
+        (rule_chain_id,),
+    ).fetchall()
+    return [_rule_chain_rule_info(r) for r in rows]
+
+
+def _rule_chain_info(db, rule_chain_id: int) -> RuleChainInfo:
+    row = db.execute("SELECT id, name FROM rule_chains WHERE id = ?", (rule_chain_id,)).fetchone()
     host_ids = [
         r["host_id"]
         for r in db.execute(
-            "SELECT host_id FROM command_template_hosts WHERE command_template_id = ?", (template_id,)
+            "SELECT host_id FROM rule_chain_hosts WHERE rule_chain_id = ?", (rule_chain_id,)
         ).fetchall()
     ]
-    return CommandTemplateInfo(
-        id=row["id"],
-        name=row["name"],
-        binary=row["binary"],
-        allowed_args=json.loads(row["allowed_args"]),
-        tier=row["tier"],
-        path_scoped=bool(row["path_scoped"]),
-        host_ids=host_ids,
-    )
+    return RuleChainInfo(id=row["id"], name=row["name"], rules=_rule_chain_rules(db, rule_chain_id), host_ids=host_ids)
 
 
 # --- Host pairing / presence (daemon-initiated, device_token-gated) ------
@@ -443,33 +486,38 @@ def list_hosts(authorization: str = Header(default="")):
             """,
             (user_id,),
         ).fetchall()
-        template_rows = db.execute(
+        chain_host_rows = db.execute(
             """
-            SELECT cth.host_id, ct.id, ct.name, ct.binary, ct.allowed_args, ct.tier, ct.path_scoped
-            FROM command_template_hosts cth JOIN command_templates ct ON ct.id = cth.command_template_id
-            WHERE ct.user_id = ? ORDER BY ct.name COLLATE NOCASE
+            SELECT rch.host_id, rc.id, rc.name
+            FROM rule_chain_hosts rch JOIN rule_chains rc ON rc.id = rch.rule_chain_id
+            WHERE rc.user_id = ? ORDER BY rc.name COLLATE NOCASE
+            """,
+            (user_id,),
+        ).fetchall()
+        rule_rows = db.execute(
+            """
+            SELECT rcr.rule_chain_id, rcr.id, rcr.position, rcr.positional_constraints,
+                   rcr.option_constraints, rcr.tier
+            FROM rule_chain_rules rcr JOIN rule_chains rc ON rc.id = rcr.rule_chain_id
+            WHERE rc.user_id = ? ORDER BY rcr.position
             """,
             (user_id,),
         ).fetchall()
     envs_by_host: dict[int, list[int]] = {}
     for r in env_rows:
         envs_by_host.setdefault(r["host_id"], []).append(r["environment_id"])
+    rules_by_chain: dict[int, list[RuleChainRuleInfo]] = {}
+    for r in rule_rows:
+        rules_by_chain.setdefault(r["rule_chain_id"], []).append(_rule_chain_rule_info(r))
     # Attached regardless of live connection state -- like environment_ids
     # above (persisted config), not like workspace/local_agent_url below
-    # (live daemon-reported state) -- a disconnected host's attached
-    # templates are still meaningful to show (e.g. in the Resources page's
+    # (live daemon-reported state) -- a disconnected host's attached rule
+    # chains are still meaningful to show (e.g. in the Resources page's
     # host-attachment grid).
-    templates_by_host: dict[int, list[HostCommandTemplateInfo]] = {}
-    for r in template_rows:
-        templates_by_host.setdefault(r["host_id"], []).append(
-            HostCommandTemplateInfo(
-                id=r["id"],
-                name=r["name"],
-                binary=r["binary"],
-                allowed_args=json.loads(r["allowed_args"]),
-                tier=r["tier"],
-                path_scoped=bool(r["path_scoped"]),
-            )
+    chains_by_host: dict[int, list[HostRuleChainInfo]] = {}
+    for r in chain_host_rows:
+        chains_by_host.setdefault(r["host_id"], []).append(
+            HostRuleChainInfo(id=r["id"], name=r["name"], rules=rules_by_chain.get(r["id"], []))
         )
     with _attached_lock:
         attached_snapshot = {k: dict(v) for k, v in _attached.items()}
@@ -485,7 +533,7 @@ def list_hosts(authorization: str = Header(default="")):
                 workspace=att["workspace"] if connected else [],
                 command_key=att["command_key"] if mine else None,
                 environment_ids=envs_by_host.get(r["id"], []),
-                command_templates=templates_by_host.get(r["id"], []),
+                rule_chains=chains_by_host.get(r["id"], []),
             )
         )
     return HostListResponse(hosts=hosts_out)
@@ -681,144 +729,241 @@ def remove_host_from_environment(environment_id: int, host_id: int, authorizatio
         return _environment_info(db, environment_id, env["name"])
 
 
-# --- Command templates (browser-initiated CRUD, session-token-gated) -----
-# See the "Resources: command templates" plan -- a user-authored, reusable
-# rule for how the assistant may invoke one CLI command on a host. Which
-# hosts it's enabled on is separate (command_template_hosts), mirroring
-# environments/environment_hosts immediately above.
-@app.get("/command-templates", response_model=CommandTemplateListResponse)
-def list_command_templates(authorization: str = Header(default="")):
+# --- Rule Chains (browser-initiated CRUD, session-token-gated) -----------
+# A user-authored, reusable, ORDERED list of rules for how the assistant
+# may invoke CLI commands on a host -- see db.py's own schema comment for
+# the full rule shape. Which hosts a chain is enabled on is separate
+# (rule_chain_hosts), mirroring environments/environment_hosts above.
+@app.get("/rule-chains", response_model=RuleChainListResponse)
+def list_rule_chains(authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         rows = db.execute(
-            "SELECT id FROM command_templates WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,)
+            "SELECT id FROM rule_chains WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,)
         ).fetchall()
-        return CommandTemplateListResponse(command_templates=[_command_template_info(db, r["id"]) for r in rows])
+        return RuleChainListResponse(rule_chains=[_rule_chain_info(db, r["id"]) for r in rows])
 
 
-@app.post("/command-templates", response_model=CommandTemplateInfo, status_code=201)
-def create_command_template(body: CommandTemplateCreateRequest, authorization: str = Header(default="")):
+@app.post("/rule-chains", response_model=RuleChainInfo, status_code=201)
+def create_rule_chain(body: RuleChainCreateRequest, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         existing = db.execute(
-            "SELECT id FROM command_templates WHERE user_id = ? AND name = ? COLLATE NOCASE", (user_id, body.name)
+            "SELECT id FROM rule_chains WHERE user_id = ? AND name = ? COLLATE NOCASE", (user_id, body.name)
         ).fetchone()
         if existing:
-            raise HTTPException(status_code=409, detail="A command template with that name already exists.")
-        allowed_args_json = json.dumps([p.model_dump() for p in body.allowed_args])
-        template_id = db.execute(
-            "INSERT INTO command_templates (user_id, name, binary, allowed_args, tier, path_scoped) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, body.name, body.binary, allowed_args_json, body.tier, int(body.path_scoped)),
-        ).lastrowid
-        return _command_template_info(db, template_id)
+            raise HTTPException(status_code=409, detail="A rule chain with that name already exists.")
+        rule_chain_id = db.execute("INSERT INTO rule_chains (user_id, name) VALUES (?, ?)", (user_id, body.name)).lastrowid
+        return _rule_chain_info(db, rule_chain_id)
 
 
-@app.patch("/command-templates/{template_id}", response_model=CommandTemplateInfo)
-def update_command_template(
-    template_id: int, body: CommandTemplateUpdateRequest, authorization: str = Header(default="")
+@app.patch("/rule-chains/{rule_chain_id}", response_model=RuleChainInfo)
+def rename_rule_chain(rule_chain_id: int, body: RuleChainRenameRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
+            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        db.execute("UPDATE rule_chains SET name = ? WHERE id = ?", (body.name, rule_chain_id))
+        return _rule_chain_info(db, rule_chain_id)
+
+
+@app.delete("/rule-chains/{rule_chain_id}", response_model=RevokeResponse)
+def delete_rule_chain(rule_chain_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
+            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        db.execute("DELETE FROM rule_chain_hosts WHERE rule_chain_id = ?", (rule_chain_id,))
+        db.execute("DELETE FROM rule_chain_rules WHERE rule_chain_id = ?", (rule_chain_id,))
+        db.execute("DELETE FROM rule_chains WHERE id = ?", (rule_chain_id,))
+    return RevokeResponse(revoked=True)
+
+
+@app.put("/rule-chains/{rule_chain_id}/hosts/{host_id}", response_model=RuleChainInfo)
+def add_rule_chain_to_host(rule_chain_id: int, host_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_rule_chain(db, user_id, rule_chain_id) or not _user_owns_host(db, user_id, host_id):
+            raise HTTPException(status_code=404, detail="Rule chain or host not found.")
+        db.execute(
+            "INSERT OR IGNORE INTO rule_chain_hosts (rule_chain_id, host_id) VALUES (?, ?)",
+            (rule_chain_id, host_id),
+        )
+        return _rule_chain_info(db, rule_chain_id)
+
+
+@app.delete("/rule-chains/{rule_chain_id}/hosts/{host_id}", response_model=RuleChainInfo)
+def remove_rule_chain_from_host(rule_chain_id: int, host_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
+            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        db.execute(
+            "DELETE FROM rule_chain_hosts WHERE rule_chain_id = ? AND host_id = ?", (rule_chain_id, host_id)
+        )
+        return _rule_chain_info(db, rule_chain_id)
+
+
+def _serialize_positional_constraints(constraints) -> str:
+    return json.dumps([c if c == "*" else c.model_dump() for c in constraints])
+
+
+def _serialize_option_constraints(constraints) -> str:
+    def _pattern_out(p):
+        return p if (p is None or p == "*") else p.model_dump()
+
+    return json.dumps([{"short": c.short, "long": c.long, "pattern": _pattern_out(c.pattern)} for c in constraints])
+
+
+@app.post("/rule-chains/{rule_chain_id}/rules", response_model=RuleChainRuleInfo, status_code=201)
+def create_rule_chain_rule(
+    rule_chain_id: int, body: RuleChainRuleCreateRequest, authorization: str = Header(default="")
 ):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_command_template(db, user_id, template_id):
-            raise HTTPException(status_code=404, detail="Command template not found.")
-        updates = body.model_dump(exclude_unset=True)
-        if "allowed_args" in updates:
-            updates["allowed_args"] = json.dumps(updates["allowed_args"])
-        if "path_scoped" in updates:
-            updates["path_scoped"] = int(updates["path_scoped"])
-        if updates:
-            db.execute(
-                f"UPDATE command_templates SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
-                (*updates.values(), template_id),
-            )
-        return _command_template_info(db, template_id)
+        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
+            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        next_position = db.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM rule_chain_rules WHERE rule_chain_id = ?",
+            (rule_chain_id,),
+        ).fetchone()["next_position"]
+        rule_id = db.execute(
+            "INSERT INTO rule_chain_rules "
+            "(rule_chain_id, position, positional_constraints, option_constraints, tier) VALUES (?, ?, ?, ?, ?)",
+            (
+                rule_chain_id,
+                next_position,
+                _serialize_positional_constraints(body.positional_constraints),
+                _serialize_option_constraints(body.option_constraints),
+                body.tier,
+            ),
+        ).lastrowid
+        row = db.execute(
+            "SELECT id, position, positional_constraints, option_constraints, tier "
+            "FROM rule_chain_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        return _rule_chain_rule_info(row)
 
 
-@app.delete("/command-templates/{template_id}", response_model=RevokeResponse)
-def delete_command_template(template_id: int, authorization: str = Header(default="")):
+@app.patch("/rule-chains/{rule_chain_id}/rules/{rule_id}", response_model=RuleChainRuleInfo)
+def update_rule_chain_rule(
+    rule_chain_id: int, rule_id: int, body: RuleChainRuleUpdateRequest, authorization: str = Header(default="")
+):
+    """Re-validates the MERGED (current row + patch) shape by reconstructing
+    it through RuleChainRuleCreateRequest -- a partial patch can't be
+    cross-field-validated (position 0, "{roots}"+tier) in isolation, same
+    merge-then-revalidate trick this service uses for every other partial
+    update (see e.g. ProfileUpdateRequest's own docstring)."""
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_command_template(db, user_id, template_id):
-            raise HTTPException(status_code=404, detail="Command template not found.")
-        db.execute("DELETE FROM command_template_hosts WHERE command_template_id = ?", (template_id,))
-        db.execute("DELETE FROM command_templates WHERE id = ?", (template_id,))
+        if not _user_owns_rule_chain_rule(db, user_id, rule_chain_id, rule_id):
+            raise HTTPException(status_code=404, detail="Rule not found.")
+        current = db.execute(
+            "SELECT positional_constraints, option_constraints, tier FROM rule_chain_rules WHERE id = ?", (rule_id,)
+        ).fetchone()
+        merged = {
+            "positional_constraints": json.loads(current["positional_constraints"]),
+            "option_constraints": json.loads(current["option_constraints"]),
+            "tier": current["tier"],
+        }
+        merged.update(body.model_dump(exclude_unset=True))
+        try:
+            validated = RuleChainRuleCreateRequest(**merged)
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=_first_validation_message(e.errors())) from e
+        db.execute(
+            "UPDATE rule_chain_rules SET positional_constraints = ?, option_constraints = ?, tier = ? WHERE id = ?",
+            (
+                _serialize_positional_constraints(validated.positional_constraints),
+                _serialize_option_constraints(validated.option_constraints),
+                validated.tier,
+                rule_id,
+            ),
+        )
+        row = db.execute(
+            "SELECT id, position, positional_constraints, option_constraints, tier "
+            "FROM rule_chain_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        return _rule_chain_rule_info(row)
+
+
+@app.delete("/rule-chains/{rule_chain_id}/rules/{rule_id}", response_model=RevokeResponse)
+def delete_rule_chain_rule(rule_chain_id: int, rule_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        if not _user_owns_rule_chain_rule(db, user_id, rule_chain_id, rule_id):
+            raise HTTPException(status_code=404, detail="Rule not found.")
+        db.execute("DELETE FROM rule_chain_rules WHERE id = ?", (rule_id,))
     return RevokeResponse(revoked=True)
 
 
-@app.put("/command-templates/{template_id}/hosts/{host_id}", response_model=CommandTemplateInfo)
-def add_command_template_to_host(template_id: int, host_id: int, authorization: str = Header(default="")):
+@app.put("/rule-chains/{rule_chain_id}/rules/reorder", response_model=RuleChainInfo)
+def reorder_rule_chain_rules(
+    rule_chain_id: int, body: RuleChainRuleReorderRequest, authorization: str = Header(default="")
+):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_command_template(db, user_id, template_id) or not _user_owns_host(db, user_id, host_id):
-            raise HTTPException(status_code=404, detail="Command template or host not found.")
-        db.execute(
-            "INSERT OR IGNORE INTO command_template_hosts (command_template_id, host_id) VALUES (?, ?)",
-            (template_id, host_id),
-        )
-        return _command_template_info(db, template_id)
+        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
+            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        current_ids = {
+            r["id"] for r in db.execute("SELECT id FROM rule_chain_rules WHERE rule_chain_id = ?", (rule_chain_id,)).fetchall()
+        }
+        if len(body.rule_ids) != len(current_ids) or set(body.rule_ids) != current_ids:
+            raise HTTPException(
+                status_code=400, detail="rule_ids must be exactly a permutation of the chain's current rules."
+            )
+        for position, rule_id in enumerate(body.rule_ids):
+            db.execute("UPDATE rule_chain_rules SET position = ? WHERE id = ?", (position, rule_id))
+        return _rule_chain_info(db, rule_chain_id)
 
 
-@app.delete("/command-templates/{template_id}/hosts/{host_id}", response_model=CommandTemplateInfo)
-def remove_command_template_from_host(template_id: int, host_id: int, authorization: str = Header(default="")):
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_command_template(db, user_id, template_id):
-            raise HTTPException(status_code=404, detail="Command template not found.")
-        db.execute(
-            "DELETE FROM command_template_hosts WHERE command_template_id = ? AND host_id = ?",
-            (template_id, host_id),
-        )
-        return _command_template_info(db, template_id)
-
-
-# --- Command templates (daemon-facing fetch, device_token-gated) ---------
+# --- Rule Chains (daemon-facing fetch, device_token-gated) ---------------
 # What THIS host's own enforcement copy should be -- independent of GET
 # /hosts's browser-facing copy above (same underlying data, different
 # credential/audience). The daemon fetches this for itself rather than
-# trusting the browser/model to have applied a template correctly -- see
-# the plan's "the daemon does not need to understand tier to execute
-# safely" note; this endpoint hands over the structural fields it *does*
-# need to enforce (binary/allowed_args/path_scoped), plus tier just for
-# the daemon's own list_command_templates action to report back verbatim.
-@app.get("/hosts/command-templates", response_model=HostCommandTemplateListResponse)
-def list_host_command_templates(authorization: str = Header(default="")):
+# trusting the browser/model to have applied a rule correctly -- every rule
+# is structurally re-enforced daemon-side regardless of what tier
+# pages/chat.py already decided client-side.
+@app.get("/hosts/rule-chains", response_model=HostRuleChainListResponse)
+def list_host_rule_chains(authorization: str = Header(default="")):
     attached = _resolve_attached(authorization)
     if attached is None:
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with get_db() as db:
-        rows = db.execute(
+        chain_rows = db.execute(
             """
-            SELECT ct.id, ct.name, ct.binary, ct.allowed_args, ct.tier, ct.path_scoped
-            FROM command_template_hosts cth JOIN command_templates ct ON ct.id = cth.command_template_id
-            WHERE cth.host_id = ? AND ct.user_id = ? ORDER BY ct.name COLLATE NOCASE
+            SELECT rc.id, rc.name
+            FROM rule_chain_hosts rch JOIN rule_chains rc ON rc.id = rch.rule_chain_id
+            WHERE rch.host_id = ? AND rc.user_id = ? ORDER BY rc.name COLLATE NOCASE
             """,
             (attached["host_id"], attached["user_id"]),
         ).fetchall()
-    templates = [
-        HostCommandTemplateInfo(
-            id=r["id"],
-            name=r["name"],
-            binary=r["binary"],
-            allowed_args=json.loads(r["allowed_args"]),
-            tier=r["tier"],
-            path_scoped=bool(r["path_scoped"]),
-        )
-        for r in rows
-    ]
-    return HostCommandTemplateListResponse(command_templates=templates)
+        rule_chains = [
+            HostRuleChainInfo(id=r["id"], name=r["name"], rules=_rule_chain_rules(db, r["id"])) for r in chain_rows
+        ]
+    return HostRuleChainListResponse(rule_chains=rule_chains)
 
 
 # --- Pending approvals (native-dialog relay) ------------------------------

@@ -80,22 +80,17 @@ CREATE TABLE IF NOT EXISTS user_profile (
     allow_configure_local_agents INTEGER NOT NULL DEFAULT 0
 );
 
--- A user-authored, reusable rule for how the assistant may invoke one CLI
--- command -- see the "Resources: command templates" plan. Which hosts it's
--- actually enabled on is a separate many-to-many (command_template_hosts
--- below), mirroring environment_hosts' relationship to environments.
+-- SUPERSEDED by rule_chains/rule_chain_rules below -- kept only because
+-- there's no migration mechanism and real rows exist on deployed
+-- instances. No app code reads or writes these anymore.
 CREATE TABLE IF NOT EXISTS command_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
     name TEXT NOT NULL,
     binary TEXT NOT NULL,
-    -- JSON list of {"pattern": str, "slots": {}} objects (see
-    -- models.CommandTemplateArgPattern) -- v1 only ever stores/enforces
-    -- zero-slot (exact-match) patterns; "slots" is reserved for future
-    -- parameterized authorization, not migrated in later.
     allowed_args TEXT NOT NULL,
-    tier TEXT NOT NULL DEFAULT 'ask',       -- 'allow' | 'ask' | 'deny' -- 'deny' is a structural rejection, enforced entirely client-side in pages/chat.py's _process_turn (same as 'ask' already was) before ever calling the daemon: unlike an unmatched/unknown template (which also means deny, by absence), this is an explicit "never even prompt" rule on a template the assistant otherwise has visibility into
-    path_scoped INTEGER NOT NULL DEFAULT 1, -- confined to the host's own addressable directories via the daemon's existing resolvePath/roots machinery
+    tier TEXT NOT NULL DEFAULT 'ask',
+    path_scoped INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (user_id, name COLLATE NOCASE)
 );
@@ -107,6 +102,58 @@ CREATE TABLE IF NOT EXISTS command_template_hosts (
     PRIMARY KEY (command_template_id, host_id)
 );
 CREATE INDEX IF NOT EXISTS idx_command_template_hosts_host_id ON command_template_hosts(host_id);
+
+-- A user-authored, reusable, ORDERED list of rules for how the assistant
+-- may invoke CLI commands on a host -- replaces command_templates' flat
+-- exact-match allowlist with sequential first-match-wins evaluation (see
+-- rule_chain_rules below). "Rule Chain" is deliberately not called
+-- "Toolset" -- that name is reserved for a later round's user-facing view
+-- of the effective, composed permission set after rule chains are spliced
+-- together up a configuration hierarchy that doesn't exist yet. Which
+-- hosts a chain is enabled on is a separate many-to-many
+-- (rule_chain_hosts), mirroring environment_hosts/command_template_hosts.
+CREATE TABLE IF NOT EXISTS rule_chains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, name COLLATE NOCASE)
+);
+CREATE INDEX IF NOT EXISTS idx_rule_chains_user_id ON rule_chains(user_id);
+
+CREATE TABLE IF NOT EXISTS rule_chain_hosts (
+    rule_chain_id INTEGER NOT NULL REFERENCES rule_chains(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    PRIMARY KEY (rule_chain_id, host_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rule_chain_hosts_host_id ON rule_chain_hosts(host_id);
+
+-- One row per rule (not a JSON list column on rule_chains) -- rules are
+-- individually created/edited/deleted/reordered from the UI, so a child
+-- table gives per-rule CRUD and a plain ORDER BY position without a
+-- read-modify-write of the whole list on every single-rule edit.
+CREATE TABLE IF NOT EXISTS rule_chain_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_chain_id INTEGER NOT NULL REFERENCES rule_chains(id),
+    position INTEGER NOT NULL,             -- this rule's place in the CHAIN's eval order (unrelated to argv positions)
+    -- JSON list of "*" | {"whitelist":.., "blacklist":..} -- list index IS
+    -- the argv position (index 0 = the binary itself); a value beyond the
+    -- list's length is unconstrained; "*" marks an in-list entry
+    -- unconstrained too (needed to constrain a later position without
+    -- pinning every earlier one). "{roots}" is a reserved whitelist value
+    -- (see models.RuleChainPattern) meaning "must resolve to a path inside
+    -- this host's own addressable directories" -- expanded by the Go
+    -- daemon via its existing resolvePath/roots machinery, not a regex.
+    positional_constraints TEXT NOT NULL,
+    -- JSON list of {"short":.., "long":.., "pattern": "*" | {...} | null}
+    -- -- "options" (not "flags"): pattern absent means the option must be
+    -- present with NO value; "*" means present with any/no value; a real
+    -- {whitelist,blacklist} object means present WITH a value matching it.
+    option_constraints TEXT NOT NULL,
+    tier TEXT NOT NULL,                    -- 'allow' | 'ask' | 'deny' -- no default; every rule states its own
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_rule_chain_rules_chain_id ON rule_chain_rules(rule_chain_id, position);
 
 -- Which one of a user's known hosts they're currently physically at --
 -- used to route a pending approval's native-dialog prompt to the right

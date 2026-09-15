@@ -190,7 +190,7 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	d.setCredentials(deviceToken, commandKey)
 	d.srv.SetAPIKey(commandKey)
 	d.logf("Paired as %s", username)
-	go d.refreshCommandTemplates(deviceToken)
+	go d.refreshRuleChains(deviceToken)
 	// Re-pairing always turns the daemon back on -- a user who just went
 	// through the sign-in flow expects to end up connected, regardless of
 	// whatever the toggle was left at before.
@@ -216,28 +216,28 @@ func (d *daemonState) handlePairURL(rawURL string) {
 func (d *daemonState) resumeSession(deviceToken, commandKey string) {
 	d.setCredentials(deviceToken, commandKey)
 	d.srv.SetAPIKey(commandKey)
-	go d.refreshCommandTemplates(deviceToken)
+	go d.refreshRuleChains(deviceToken)
 	d.setEnabled(d.isEnabled())
 }
 
-// refreshCommandTemplates fetches this installation's own enabled command
-// templates from the auth service and replaces the daemon's cached copy
-// (see commands.Handler.SetCommandTemplates) -- called after pairing and
-// after resuming a cached session, both natural points credentials become
-// available, plus on demand via the "refresh_command_templates" action
-// (not model-visible, same posture as add_directory -- only the web app's
-// own Resources page triggers it) so an edit made there doesn't wait for
-// the next pairing/restart to take effect. Best-effort: a fetch failure
-// just leaves whatever was cached before in place (or empty, on first
-// fetch) -- v1 has no push/websocket mechanism, so a stale cache only
-// self-heals on the next of these three triggers.
-func (d *daemonState) refreshCommandTemplates(deviceToken string) {
-	templates, err := config.FetchCommandTemplates(d.authDomain, deviceToken)
+// refreshRuleChains fetches this installation's own enabled rule chains
+// from the auth service and replaces the daemon's cached copy (see
+// commands.Handler.SetRuleChains) -- called after pairing and after
+// resuming a cached session, both natural points credentials become
+// available, plus on demand via the "refresh_rule_chains" action (not
+// model-visible, same posture as add_directory -- only the web app's own
+// Resources page triggers it) so an edit made there doesn't wait for the
+// next pairing/restart to take effect. Best-effort: a fetch failure just
+// leaves whatever was cached before in place (or empty, on first fetch) --
+// v1 has no push/websocket mechanism, so a stale cache only self-heals on
+// the next of these three triggers.
+func (d *daemonState) refreshRuleChains(deviceToken string) {
+	ruleChains, err := config.FetchRuleChains(d.authDomain, deviceToken)
 	if err != nil {
-		d.logf("Couldn't fetch command templates: %s", err)
+		d.logf("Couldn't fetch rule chains: %s", err)
 		return
 	}
-	d.cmdHandler.SetCommandTemplates(templates)
+	d.cmdHandler.SetRuleChains(ruleChains)
 }
 
 // runApprovalRelayLoop long-polls auth_service's GET /hosts/pending-approvals

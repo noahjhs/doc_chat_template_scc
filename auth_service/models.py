@@ -1,7 +1,8 @@
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+import re2
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SignupRequest(BaseModel):
@@ -52,30 +53,152 @@ class HostPresenceReport(BaseModel):
     workspace: list[str] = []
 
 
-class CommandTemplateArgPattern(BaseModel):
-    """One allowed argv option for a CommandTemplate. "slots" is reserved
-    for future parameterized authorization (see the Resources plan's
-    "Forward compatibility: intent-based authorization" section) -- v1
-    always sends/stores an empty dict, and only ever enforces a zero-slot,
-    exact-match "pattern" (e.g. "run build") anywhere in this codebase."""
+class RuleChainPattern(BaseModel):
+    """A whitelist/blacklist pair evaluated as RE2 regex (google-re2, real
+    Python bindings to the same RE2 library Go's stdlib regexp targets --
+    chosen specifically for RE2's guaranteed-linear-time matching, since
+    these patterns evaluate agent-influenced input) against one argument
+    value. Matches if (whitelist absent OR the value matches it) AND
+    (blacklist absent OR the value does NOT match it). whitelist may
+    instead be the literal reserved string "{roots}", meaning "must
+    resolve to a path inside this host's own addressable directories" --
+    expanded by the Go daemon via its existing resolvePath/roots
+    machinery, never compiled as a regex.
 
-    pattern: str = Field(min_length=1, max_length=500)
-    slots: dict = Field(default_factory=dict)
+    Distinct from the bare wildcard "*" used directly as a
+    positional_constraints list entry or an option's pattern field (see
+    RuleChainRuleCreateRequest/OptionConstraint below) -- "*" means "no
+    constraint at all", not a value of this type."""
+
+    whitelist: str | None = Field(default=None, max_length=500)
+    blacklist: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.whitelist is None and self.blacklist is None:
+            raise ValueError('Provide at least one of whitelist/blacklist (or use "*" for no constraint).')
+        if self.blacklist == "{roots}":
+            raise ValueError('"{roots}" is only meaningful as a whitelist, not a blacklist.')
+        for value in (self.whitelist, self.blacklist):
+            if value is None or value == "{roots}":
+                continue
+            try:
+                re2.compile(value)
+            except re2.error as e:
+                # re2's own error message comes through as bytes (its args[0]) --
+                # decoded here so the surfaced message isn't literally "b'...'".
+                detail = e.args[0].decode("utf-8", "replace") if e.args and isinstance(e.args[0], bytes) else str(e)
+                raise ValueError(f"Invalid regex {value!r}: {detail}") from e
+        return self
 
 
-class HostCommandTemplateInfo(BaseModel):
-    """The subset of a command template relevant once it's already known
-    to be attached to a specific host -- embedded in HostInfo below
+class OptionConstraint(BaseModel):
+    """One option (called "options", not "flags" -- they can carry values)
+    a rule constrains, identified by its short and/or long form (at least
+    one required). pattern is either absent (the option must be present
+    with NO value -- a plain boolean flag), the literal wildcard "*" (must
+    be present, any value or none accepted), or a real RuleChainPattern
+    (must be present WITH a value satisfying it)."""
+
+    short: str | None = Field(default=None, max_length=16)
+    long: str | None = Field(default=None, max_length=64)
+    pattern: Literal["*"] | RuleChainPattern | None = None
+
+    @model_validator(mode="after")
+    def _short_or_long(self):
+        if not self.short and not self.long:
+            raise ValueError("At least one of short/long is required.")
+        return self
+
+
+def _pattern_uses_roots(entry) -> bool:
+    return isinstance(entry, RuleChainPattern) and entry.whitelist == "{roots}"
+
+
+class RuleChainRuleCreateRequest(BaseModel):
+    """One rule within a Rule Chain -- see rule_chain_rules' own schema
+    comment in db.py for the full shape. positional_constraints' list
+    index IS the argv position (index 0 = the binary, always required);
+    entries beyond this list, or explicitly marked "*", are unconstrained."""
+
+    positional_constraints: list[Literal["*"] | RuleChainPattern] = Field(min_length=1)
+    option_constraints: list[OptionConstraint] = Field(default_factory=list)
+    tier: Literal["allow", "ask", "deny"] = "ask"
+
+    @model_validator(mode="after")
+    def _validate_rule(self):
+        if _pattern_uses_roots(self.positional_constraints[0]):
+            raise ValueError('Position 0 (the binary) can never use "{roots}" -- it is never a path.')
+        uses_roots = any(_pattern_uses_roots(c) for c in self.positional_constraints) or any(
+            _pattern_uses_roots(oc.pattern) for oc in self.option_constraints
+        )
+        if uses_roots and self.tier == "allow":
+            raise ValueError(
+                'A rule using "{roots}" cannot have tier "allow" -- only "ask" or "deny" '
+                "(the client-side tier decision can only approximate directory containment; "
+                "only the daemon can check it authoritatively)."
+            )
+        return self
+
+
+class RuleChainRuleUpdateRequest(BaseModel):
+    """PATCH /rule-chains/{id}/rules/{rule_id}'s body -- every field
+    optional, same merge-only-what's-present convention as
+    ProfileUpdateRequest. Cross-field validation (position 0, "{roots}"
+    rules) is re-applied by main.py reconstructing the MERGED result
+    through RuleChainRuleCreateRequest -- a partial patch can't be
+    validated in isolation."""
+
+    positional_constraints: list[Literal["*"] | RuleChainPattern] | None = Field(default=None, min_length=1)
+    option_constraints: list[OptionConstraint] | None = None
+    tier: Literal["allow", "ask", "deny"] | None = None
+
+
+class RuleChainRuleInfo(BaseModel):
+    id: int
+    position: int
+    positional_constraints: list[Literal["*"] | RuleChainPattern]
+    option_constraints: list[OptionConstraint]
+    tier: str
+
+
+class RuleChainRuleReorderRequest(BaseModel):
+    rule_ids: list[int] = Field(min_length=1)
+
+
+class HostRuleChainInfo(BaseModel):
+    """The subset of a rule chain relevant once it's already known to be
+    attached to a specific host -- embedded in HostInfo below
     (browser-facing, via GET /hosts) and returned by the daemon-facing
-    GET /hosts/command-templates. No host_ids on either: both callers
-    already know which host they're asking about."""
+    GET /hosts/rule-chains. No host_ids on either: both callers already
+    know which host they're asking about."""
 
     id: int
     name: str
-    binary: str
-    allowed_args: list[CommandTemplateArgPattern]
-    tier: str
-    path_scoped: bool
+    rules: list[RuleChainRuleInfo] = []
+
+
+class HostRuleChainListResponse(BaseModel):
+    rule_chains: list[HostRuleChainInfo]
+
+
+class RuleChainCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class RuleChainRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class RuleChainInfo(BaseModel):
+    id: int
+    name: str
+    rules: list[RuleChainRuleInfo] = []
+    host_ids: list[int] = []
+
+
+class RuleChainListResponse(BaseModel):
+    rule_chains: list[RuleChainInfo]
 
 
 class HostInfo(BaseModel):
@@ -87,7 +210,7 @@ class HostInfo(BaseModel):
     workspace: list[str] = []
     command_key: str | None = None
     environment_ids: list[int] = []
-    command_templates: list[HostCommandTemplateInfo] = []
+    rule_chains: list[HostRuleChainInfo] = []
 
 
 class HostListResponse(BaseModel):
@@ -114,43 +237,6 @@ class EnvironmentInfo(BaseModel):
 
 class EnvironmentListResponse(BaseModel):
     environments: list[EnvironmentInfo]
-
-
-class CommandTemplateCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=64)
-    binary: str = Field(min_length=1, max_length=200)
-    allowed_args: list[CommandTemplateArgPattern] = Field(min_length=1)
-    tier: Literal["allow", "ask", "deny"] = "ask"
-    path_scoped: bool = True
-
-
-class CommandTemplateUpdateRequest(BaseModel):
-    """PATCH /command-templates/{id}'s body -- every field optional, same
-    merge-only-what's-present convention as ProfileUpdateRequest."""
-
-    name: str | None = Field(default=None, min_length=1, max_length=64)
-    binary: str | None = Field(default=None, min_length=1, max_length=200)
-    allowed_args: list[CommandTemplateArgPattern] | None = Field(default=None, min_length=1)
-    tier: Literal["allow", "ask", "deny"] | None = None
-    path_scoped: bool | None = None
-
-
-class CommandTemplateInfo(BaseModel):
-    id: int
-    name: str
-    binary: str
-    allowed_args: list[CommandTemplateArgPattern]
-    tier: str
-    path_scoped: bool
-    host_ids: list[int] = []
-
-
-class CommandTemplateListResponse(BaseModel):
-    command_templates: list[CommandTemplateInfo]
-
-
-class HostCommandTemplateListResponse(BaseModel):
-    command_templates: list[HostCommandTemplateInfo]
 
 
 class SignOutAllResponse(BaseModel):
