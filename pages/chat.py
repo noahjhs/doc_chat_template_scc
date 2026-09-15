@@ -348,6 +348,23 @@ if "previous_response_id" not in st.session_state:
     st.session_state.previous_response_id = None
 
 
+def _daemon_error_detail(response, fallback):
+    """Pulls the daemon's own {"detail": str} out of a non-2xx /api/command
+    response (see agent/internal/server's ActionError -> 400 mapping),
+    falling back to a plain status line when the body isn't JSON or has no
+    "detail" -- used instead of response.raise_for_status(), whose
+    exception message is just "400 Client Error: Bad Request for url:
+    ..." and silently drops the daemon's actual reason (e.g. "Unknown or
+    no longer enabled command template." vs. "Those arguments aren't
+    allowed for this command template.") -- confirmed directly this was
+    swallowing genuinely useful diagnostic detail."""
+    try:
+        detail = response.json().get("detail")
+    except ValueError:
+        detail = None
+    return detail or fallback
+
+
 def call_local_agent(local_agent_configs, action, host=None, default_host=None, **kwargs):
     """Call one of the user's connected local agent servers; never raises,
     so a connection failure (or an ambiguous/unknown host) just gets
@@ -380,7 +397,8 @@ def call_local_agent(local_agent_configs, action, host=None, default_host=None, 
         )
         if response.status_code == 401:
             return "Local agent error: invalid API key."
-        response.raise_for_status()
+        if response.status_code >= 400:
+            return f"Local agent error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
         return json.dumps(response.json())
     except requests.RequestException as e:
         return f"Local agent error: {e}"
@@ -482,7 +500,8 @@ def call_command_template(local_agent_configs, template_id, args_str, host=None,
         )
         if response.status_code == 401:
             return "Command template error: invalid API key."
-        response.raise_for_status()
+        if response.status_code >= 400:
+            return f"Command template error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
         return json.dumps(response.json())
     except requests.RequestException as e:
         return f"Command template error: {e}"

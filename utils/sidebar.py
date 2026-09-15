@@ -255,7 +255,19 @@ def _fetch_local_json(config, action, **kwargs):
         )
         if response.status_code == 401:
             return {"success": False, "stdout": "", "stderr": "Invalid API key."}
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # The daemon's own {"detail": str} (see agent/internal/server's
+            # ActionError -> 400 mapping) -- response.raise_for_status()'s
+            # exception message would just be "400 Client Error: Bad
+            # Request for url: ...", silently dropping the daemon's actual
+            # reason (e.g. "Unknown or no longer enabled command
+            # template."), same fix as pages/chat.py's call_local_agent/
+            # call_command_template.
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            return {"success": False, "stdout": "", "stderr": detail or f"HTTP {response.status_code}"}
         return response.json()
     except requests.RequestException as e:
         return {"success": False, "stdout": "", "stderr": str(e)}
