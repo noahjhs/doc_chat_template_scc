@@ -102,18 +102,13 @@ def _cell_str(value):
     return "" if pd.isna(value) else str(value)
 
 
-def _display_blacklist(value):
-    """A stored blacklist is never actually absent -- a "not specified"
-    one defaults server-side to BLACKLIST_MATCHES_NOTHING (see
-    RuleChainPattern's own docstring for why blacklist can't just default
-    to "" the way whitelist does). Shown as a blank cell here so editing
-    round-trips cleanly -- a rule the author never gave a blacklist to
-    shows an empty field, not a cryptic regex they never typed."""
-    return "" if not value or value == BLACKLIST_MATCHES_NOTHING else value
-
-
 def _positional_rows(constraints):
-    return [{"whitelist": c.get("whitelist") or "", "blacklist": _display_blacklist(c.get("blacklist"))} for c in constraints]
+    # Shown as-is, sentinel included -- no hiding it as a blank cell. The
+    # table's own TextColumn `default` (see _render_rule_editor) already
+    # pre-populates a brand-new row with this same literal text, so what's
+    # in the box always matches what's stored; no separate "friendly
+    # display" translation layer to keep in sync with that.
+    return [{"whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or BLACKLIST_MATCHES_NOTHING} for c in constraints]
 
 
 def _build_positional_constraints(rows):
@@ -125,14 +120,15 @@ def _build_positional_constraints(rows):
     takes -- a row with both left blank means "value not required" (a
     missing value is matched as "", which an empty whitelist always
     matches and the default blacklist never does), no "*" sentinel
-    needed. Sends real values for both fields (never null) -- auth_service
-    no longer accepts null here, it always wants a real (possibly
-    default) string."""
+    needed. Sends exactly what's in the box (after stripping), never
+    None and never silently substituting a default at save time -- the
+    table's own TextColumn `default` is what makes a blank blacklist
+    cell actually contain BLACKLIST_MATCHES_NOTHING already, so there's
+    nothing left to paper over here; a row where the author deliberately
+    cleared it to truly empty is sent as "" as asked, blacklist-matches-
+    everything consequence and all."""
     result = [
-        {
-            "whitelist": _cell_str(row.get("whitelist")).strip(),
-            "blacklist": _cell_str(row.get("blacklist")).strip() or BLACKLIST_MATCHES_NOTHING,
-        }
+        {"whitelist": _cell_str(row.get("whitelist")).strip(), "blacklist": _cell_str(row.get("blacklist")).strip()}
         for row in rows
     ]
     errors = []
@@ -153,7 +149,7 @@ def _option_rows(constraints):
                 "short": c.get("short") or "",
                 "long": c.get("long") or "",
                 "whitelist": pattern.get("whitelist") or "",
-                "blacklist": _display_blacklist(pattern.get("blacklist")),
+                "blacklist": pattern.get("blacklist") or BLACKLIST_MATCHES_NOTHING,
             }
         )
     return rows
@@ -168,9 +164,9 @@ def _build_option_constraints(rows):
     Both whitelist/blacklist left blank means any/no value is accepted; a
     missing value is matched as the empty string (see
     utils/rule_chains.py or the daemon's ruleMatches), so a whitelist of
-    "^$" requires the option be present with NO value. Sends real values
-    for both fields (never null) -- auth_service always wants a real
-    (possibly default) string."""
+    "^$" requires the option be present with NO value. Sends exactly
+    what's in the box (after stripping) for both fields, same WYSIWYG
+    posture as _build_positional_constraints above."""
     result = []
     for row in rows:
         short = _cell_str(row.get("short")).strip() or None
@@ -178,7 +174,7 @@ def _build_option_constraints(rows):
         if not short and not long:
             continue
         whitelist = _cell_str(row.get("whitelist")).strip()
-        blacklist = _cell_str(row.get("blacklist")).strip() or BLACKLIST_MATCHES_NOTHING
+        blacklist = _cell_str(row.get("blacklist")).strip()
         result.append({"short": short, "long": long, "pattern": {"whitelist": whitelist, "blacklist": blacklist}})
     return result, []
 
@@ -199,7 +195,7 @@ def _render_rule_editor(chain, rule):
     doesn't matter."""
     is_new = rule is None
     key_suffix = "new" if is_new else rule["id"]
-    blank_positional_row = {"whitelist": "", "blacklist": ""}
+    blank_positional_row = {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING}
     # Position 0 (the binary) is optional, same as every other position --
     # an empty list here is a fully legitimate, intentional "unconstrained"
     # state, not a placeholder needing a phantom blank row.
@@ -265,26 +261,53 @@ def _render_rule_editor(chain, rule):
     with st.form(f"rule_form_{chain['id']}_{key_suffix}"):
         st.caption(
             "Positional constraints -- the row number IS the argv position (row 0 is the binary "
-            "itself). Leave both fields blank, or leave the row out entirely, to leave that position "
-            "unconstrained."
+            'itself). A new row starts with whitelist blank and blacklist pre-filled with "'
+            + BLACKLIST_MATCHES_NOTHING
+            + '" -- leave both as they are, or leave the row out entirely, to leave that position '
+            "unconstrained. Both fields are used exactly as typed, so clearing the blacklist to "
+            "truly empty makes it match (and reject) every value, not \"no blacklist\"."
         )
         # A plain list of row dicts renders with no columns at all once it's
         # empty (Streamlit can't infer a schema from zero rows) -- same
         # issue the options table used to hit. An explicitly-columned empty
         # DataFrame keeps the headers (and the "+" add-row affordance)
         # showing even at a genuine 0-row count.
+        #
+        # "position" is a real (disabled) column, not the pandas index --
+        # the index's own displayed value for a row added via the table's
+        # native "+" affordance isn't configurable the way a column's is
+        # (see the TextColumn `default` comment below), so it's shown as
+        # literal "None" the same way an un-configured text cell was.
+        # Recomputed fresh from row order on every render; there's no way
+        # to reorder rows within this table (only the resize control and
+        # deleting change row count/order), so it's always accurate except
+        # transiently for a row just added via the native "+", until the
+        # next full reseed (Save, or the resize control above).
+        positional_seed = [dict(row, position=i) for i, row in enumerate(working_rows)]
         positional_edited = st.data_editor(
-            pd.DataFrame(working_rows, columns=["whitelist", "blacklist"]),
+            pd.DataFrame(positional_seed, columns=["position", "whitelist", "blacklist"]),
             num_rows="dynamic",
             key=f"positional_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
+                "position": st.column_config.NumberColumn("Position", disabled=True, default=0),
+                # `default` is what a row added via the table's own native
+                # "+" affordance gets for this column -- undocumented
+                # anywhere obvious, but confirmed directly: it's None
+                # otherwise, which renders as the literal text "None"
+                # rather than a blank, editable cell. Setting it here to
+                # the exact same value an unedited row is seeded with
+                # elsewhere (_positional_rows/blank_positional_row) means
+                # a native-added row looks identical to one added via the
+                # resize control above.
                 "whitelist": st.column_config.TextColumn(
-                    "Whitelist (regex, or {roots})", help='Use the literal "{roots}" for "inside an addressable directory".'
+                    "Whitelist (regex, or {roots})",
+                    help='Use the literal "{roots}" for "inside an addressable directory".',
+                    default="",
                 ),
-                "blacklist": st.column_config.TextColumn("Blacklist (regex)"),
+                "blacklist": st.column_config.TextColumn("Blacklist (regex)", default=BLACKLIST_MATCHES_NOTHING),
             },
-            column_order=["whitelist", "blacklist"],
-            hide_index=False,
+            column_order=["position", "whitelist", "blacklist"],
+            hide_index=True,
         )
         st.caption(
             "If an argument is a filesystem path, prefer a whitelist -- ideally {roots} -- over a "
@@ -293,19 +316,23 @@ def _render_rule_editor(chain, rule):
 
         st.caption(
             "Options -- at least one of short/long is required per row. Including a row always "
-            "requires that option to be present; leave whitelist/blacklist blank to accept it with "
-            'any (or no) value, or enter "^$" as the whitelist to require it be present with NO '
-            "value (an absent value is matched as the empty string)."
+            "requires that option to be present; leave whitelist blank and blacklist as its "
+            "pre-filled default to accept any (or no) value, or enter \"^$\" as the whitelist to "
+            "require it be present with NO value (an absent value is matched as the empty string)."
         )
         option_edited = st.data_editor(
             pd.DataFrame(saved_option_rows, columns=["short", "long", "whitelist", "blacklist"]),
             num_rows="dynamic",
             key=f"option_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
-                "short": st.column_config.TextColumn("Short (-f)"),
-                "long": st.column_config.TextColumn("Long (--force)"),
-                "whitelist": st.column_config.TextColumn("Whitelist (regex)"),
-                "blacklist": st.column_config.TextColumn("Blacklist (regex)"),
+                # default="" on every text column here too -- see the
+                # positional table's own comment above for why (otherwise
+                # a row added via the table's native "+" shows literal
+                # "None" in every cell instead of a blank, editable one).
+                "short": st.column_config.TextColumn("Short (-f)", default=""),
+                "long": st.column_config.TextColumn("Long (--force)", default=""),
+                "whitelist": st.column_config.TextColumn("Whitelist (regex)", default=""),
+                "blacklist": st.column_config.TextColumn("Blacklist (regex)", default=BLACKLIST_MATCHES_NOTHING),
             },
             column_order=["short", "long", "whitelist", "blacklist"],
             hide_index=True,
