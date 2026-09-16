@@ -7,6 +7,10 @@ import pytest
 
 AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
 
+# Must match auth_service/models.py's own RuleChainPattern.blacklist
+# default exactly -- a blank blacklist round-trips as this, not None.
+BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
+
 
 @pytest.fixture()
 def client():
@@ -533,7 +537,8 @@ def test_rule_chain_rule_crud(client):
     rule = created.json()
     assert rule["position"] == 0
     assert rule["positional_constraints"] == [
-        {"whitelist": "^npm$", "blacklist": None}, {"whitelist": "^run$", "blacklist": None}
+        {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^run$", "blacklist": BLACKLIST_MATCHES_NOTHING},
     ]
     assert rule["tier"] == "allow"
 
@@ -609,9 +614,9 @@ def test_rule_chain_rule_accepts_blank_pattern_at_any_position(client):
     created = _add_rule(client, headers, chain["id"], [{}, {}, {"whitelist": "^build$"}])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == [
-        {"whitelist": None, "blacklist": None},
-        {"whitelist": None, "blacklist": None},
-        {"whitelist": "^build$", "blacklist": None},
+        {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^build$", "blacklist": BLACKLIST_MATCHES_NOTHING},
     ]
 
 
@@ -626,8 +631,8 @@ def test_rule_chain_rule_positional_value_not_allowed(client):
     created = _add_rule(client, headers, chain["id"], [{"whitelist": "^rm$"}, {"whitelist": "^$"}])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == [
-        {"whitelist": "^rm$", "blacklist": None},
-        {"whitelist": "^$", "blacklist": None},
+        {"whitelist": "^rm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^$", "blacklist": BLACKLIST_MATCHES_NOTHING},
     ]
 
 
@@ -659,10 +664,11 @@ def test_rule_chain_rule_rejects_invalid_regex(client):
 
 
 def test_rule_chain_rule_option_pattern_states_round_trip(client):
-    # There's only ever one pattern shape now -- {whitelist, blacklist} --
-    # not a three-way None/"*"/object choice. A blank pattern (both fields
-    # None) means "any/no value accepted"; a supplied option with no value
-    # is matched as "" at enforcement time, so "^$" as the whitelist means
+    # There's only ever one pattern shape now -- {whitelist, blacklist},
+    # both always real strings (never None) -- not a three-way choice. A
+    # blank pattern (default whitelist=""/blacklist=BLACKLIST_MATCHES_NOTHING)
+    # means "any/no value accepted"; a supplied option with no value is
+    # matched as "" at enforcement time, so "^$" as the whitelist means
     # "must be present with NO value" without needing a dedicated state.
     signup = _signup(client, "laura1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
@@ -680,9 +686,21 @@ def test_rule_chain_rule_option_pattern_states_round_trip(client):
     )
     assert created.status_code == 201
     options = created.json()["option_constraints"]
-    assert options[0] == {"short": None, "long": "force", "pattern": {"whitelist": "^$", "blacklist": None}}
-    assert options[1] == {"short": "v", "long": None, "pattern": {"whitelist": None, "blacklist": None}}
-    assert options[2] == {"short": None, "long": "output", "pattern": {"whitelist": ".+", "blacklist": None}}
+    assert options[0] == {
+        "short": None,
+        "long": "force",
+        "pattern": {"whitelist": "^$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+    }
+    assert options[1] == {
+        "short": "v",
+        "long": None,
+        "pattern": {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
+    }
+    assert options[2] == {
+        "short": None,
+        "long": "output",
+        "pattern": {"whitelist": ".+", "blacklist": BLACKLIST_MATCHES_NOTHING},
+    }
 
 
 def test_rule_chain_option_constraint_requires_short_or_long(client):
@@ -740,7 +758,8 @@ def test_rule_chain_daemon_facing_fetch(client):
     fetched_rules = fetched_a["rule_chains"][0]["rules"]
     assert [r["id"] for r in fetched_rules] == [r1["id"], r2["id"]]  # rule order survives
     assert fetched_rules[0]["positional_constraints"] == [
-        {"whitelist": "^npm$", "blacklist": None}, {"whitelist": "^run$", "blacklist": None}
+        {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^run$", "blacklist": BLACKLIST_MATCHES_NOTHING},
     ]
 
     # Not attached to host B -- device_token B sees nothing.

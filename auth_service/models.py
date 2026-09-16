@@ -53,44 +53,63 @@ class HostPresenceReport(BaseModel):
     workspace: list[str] = []
 
 
+# The "matches nothing" sentinel a blank blacklist defaults to -- a
+# character class requiring one character that's simultaneously not
+# whitespace (\s) and not non-whitespace (\S), which is every character,
+# so it can never match, not even a zero-width match against "". Confirmed
+# directly under google-re2. Keeps RuleChainPattern's two fields fully
+# symmetric: both are always real, always-compiled regex strings, never
+# None -- an absent whitelist ("") already matches everything on its own
+# (an empty RE2 pattern matches everything), but an absent blacklist can't
+# use the same trick, since a literal "" blacklist would match (and so
+# reject) everything instead of nothing. Mirrored in
+# utils/rule_chains.py's own copy of this constant (a separate,
+# independently-deployed service -- see that module's comment for why it
+# can't just be imported from here).
+BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
+
+
 class RuleChainPattern(BaseModel):
     """A whitelist/blacklist pair evaluated as RE2 regex (google-re2, real
     Python bindings to the same RE2 library Go's stdlib regexp targets --
     chosen specifically for RE2's guaranteed-linear-time matching, since
     these patterns evaluate agent-influenced input) against one argument
-    value. Matches if (whitelist absent OR the value matches it) AND
-    (blacklist absent OR the value does NOT match it). whitelist may
-    instead be the literal reserved string "{roots}", meaning "must
-    resolve to a path inside this host's own addressable directories" --
-    expanded by the Go daemon via its existing resolvePath/roots
-    machinery, never compiled as a regex.
+    value. Matches if (the value matches whitelist) AND (the value does
+    NOT match blacklist). whitelist may instead be the literal reserved
+    string "{roots}", meaning "must resolve to a path inside this host's
+    own addressable directories" -- expanded by the Go daemon via its
+    existing resolvePath/roots machinery, never compiled as a regex.
 
-    Both fields are optional -- an absent whitelist/blacklist behaves
-    exactly like an empty-string regex would (RE2 matches everything with
-    an empty pattern). This is the ONLY shape a constraint takes, for both
-    a positional_constraints list entry and an OptionConstraint's pattern
-    (see RuleChainRuleCreateRequest/OptionConstraint below) -- no "*" or
-    other sentinel needed, because a MISSING value (a positional argument
-    beyond what was supplied, or an option present with no value) is
-    matched as "" for this purpose. That gives exactly the three states
-    "value required"/"not required"/"not allowed" for free:
-      - fully blank ({whitelist: null, blacklist: null}): "" already
-        satisfies an empty pattern, so this matches whether a value was
-        actually supplied or not -- "value not required".
+    Both fields are always real regex strings, never absent/null -- a
+    blank whitelist defaults to "" (an empty RE2 pattern matches
+    everything, so "not specified" and "matches anything" coincide for
+    free) and a blank blacklist defaults to BLACKLIST_MATCHES_NOTHING
+    (which can never match, so "not specified" and "never rejects"
+    likewise coincide). This is the ONLY shape a constraint takes, for
+    both a positional_constraints list entry and an OptionConstraint's
+    pattern (see RuleChainRuleCreateRequest/OptionConstraint below) -- no
+    "*" or other sentinel needed, because a MISSING value (a positional
+    argument beyond what was supplied, or an option present with no
+    value) is matched as "" for this purpose. That gives exactly the
+    three states "value required"/"not required"/"not allowed" for free:
+      - fully blank (default whitelist/blacklist): "" already satisfies
+        an empty whitelist and never satisfies BLACKLIST_MATCHES_NOTHING,
+        so this matches whether a value was actually supplied or not --
+        "value not required".
       - whitelist "^$" (matches only ""): satisfied only by a missing
         value (or an explicit empty string) -- "value not allowed".
-      - any other real pattern: "" won't usually satisfy it, so a value
+      - any other real whitelist: "" won't usually satisfy it, so a value
         must actually have been supplied -- "value required"."""
 
-    whitelist: str | None = Field(default=None, max_length=500)
-    blacklist: str | None = Field(default=None, max_length=500)
+    whitelist: str = Field(default="", max_length=500)
+    blacklist: str = Field(default=BLACKLIST_MATCHES_NOTHING, max_length=500)
 
     @model_validator(mode="after")
     def _validate(self):
         if self.blacklist == "{roots}":
             raise ValueError('"{roots}" is only meaningful as a whitelist, not a blacklist.')
         for value in (self.whitelist, self.blacklist):
-            if value is None or value == "{roots}":
+            if value == "{roots}":
                 continue
             try:
                 re2.compile(value)

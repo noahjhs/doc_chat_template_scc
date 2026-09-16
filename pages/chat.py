@@ -519,11 +519,18 @@ def _pattern_matches(value, pattern, roots):
     """Python port of the Go daemon's valueMatchesPattern -- pattern is
     always a real {"whitelist":.., "blacklist":..} object, the one shape
     both positional_constraints entries and OptionConstraint.pattern take
-    (no "*" sentinel anywhere). Both fields absent/blank means "matches
-    any/no value", same as an empty-string RE2 pattern would. Uses
-    google-re2 (the same RE2 engine Go's stdlib regexp targets), not
-    stdlib re, to preserve the no-catastrophic-backtracking property the
-    whole schema is built around."""
+    (no "*" sentinel anywhere). A blank whitelist defaults to "" -- falsy,
+    so the `elif whitelist` guard below short-circuits it, same as an
+    absent whitelist used to. A blank blacklist can't use the same trick
+    (a literal "" blacklist would reject every value instead of none), so
+    it instead defaults to auth_service's own BLACKLIST_MATCHES_NOTHING
+    ("[^\\s\\S]", a character class that can never match anything,
+    confirmed directly) -- truthy, so `if blacklist` below does run the
+    regex, but that regex itself never matches, arriving at the same
+    "never rejects" outcome by a different path. Uses google-re2 (the
+    same RE2 engine Go's stdlib regexp targets), not stdlib re, to
+    preserve the no-catastrophic-backtracking property the whole schema
+    is built around."""
     whitelist = pattern.get("whitelist")
     blacklist = pattern.get("blacklist")
     if whitelist == "{roots}":

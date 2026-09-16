@@ -82,6 +82,51 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	}
 }
 
+func TestFetchRuleChainsDecodesCurrentBlacklistDefault(t *testing.T) {
+	// auth_service now always sends a real blacklist string, never null --
+	// a "not specified" one defaults to BLACKLIST_MATCHES_NOTHING
+	// ("[^\s\S]", a character class that can never match anything). This
+	// compiles to a real, non-nil regexp (unlike the legacy nil-blacklist
+	// case covered above), so confirm it actually behaves as "never
+	// matches, so never rejects" rather than assuming it from the string
+	// alone.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"rule_chains": []map[string]any{
+				{
+					"id":   1,
+					"name": "test",
+					"rules": []map[string]any{
+						{
+							"id":                     1,
+							"positional_constraints": []any{map[string]any{"whitelist": "", "blacklist": `[^\s\S]`}},
+							"option_constraints":     []map[string]any{},
+							"tier":                   "allow",
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	ruleChains, err := FetchRuleChains(testAuthDomain(server), "dev-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	pc := ruleChains[0].Rules[0].PositionalConstraints[0]
+	if pc.Whitelist == nil || !pc.Whitelist.MatchString("anything") {
+		t.Fatalf("expected the empty whitelist to compile and match everything, got %+v", pc)
+	}
+	if pc.Blacklist == nil {
+		t.Fatalf("expected the blacklist default to compile to a real (non-nil) regexp, got %+v", pc)
+	}
+	if pc.Blacklist.MatchString("") || pc.Blacklist.MatchString("anything") {
+		t.Fatalf("expected the blacklist default to never match anything, got %+v", pc)
+	}
+}
+
 func TestFetchRuleChainsSkipsRuleWithUncompilablePattern(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

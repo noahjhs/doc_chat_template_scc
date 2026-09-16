@@ -17,7 +17,7 @@ from utils.auth import (
     require_app_subdomain,
     update_rule_chain_rule,
 )
-from utils.rule_chains import describe_rule
+from utils.rule_chains import BLACKLIST_MATCHES_NOTHING, describe_rule
 from utils.sidebar import _fetch_local_json, handle_sign_out_if_requested, render_sidebar
 from utils.topbar import render_topbar
 
@@ -102,8 +102,18 @@ def _cell_str(value):
     return "" if pd.isna(value) else str(value)
 
 
+def _display_blacklist(value):
+    """A stored blacklist is never actually absent -- a "not specified"
+    one defaults server-side to BLACKLIST_MATCHES_NOTHING (see
+    RuleChainPattern's own docstring for why blacklist can't just default
+    to "" the way whitelist does). Shown as a blank cell here so editing
+    round-trips cleanly -- a rule the author never gave a blacklist to
+    shows an empty field, not a cryptic regex they never typed."""
+    return "" if not value or value == BLACKLIST_MATCHES_NOTHING else value
+
+
 def _positional_rows(constraints):
-    return [{"whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or ""} for c in constraints]
+    return [{"whitelist": c.get("whitelist") or "", "blacklist": _display_blacklist(c.get("blacklist"))} for c in constraints]
 
 
 def _build_positional_constraints(rows):
@@ -113,12 +123,15 @@ def _build_positional_constraints(rows):
     purely for faster feedback, never the source of truth. Every row is
     just {whitelist, blacklist}, the one shape a positional constraint
     takes -- a row with both left blank means "value not required" (a
-    missing value is matched as "", which an empty pattern always
-    matches), no "*" sentinel needed."""
+    missing value is matched as "", which an empty whitelist always
+    matches and the default blacklist never does), no "*" sentinel
+    needed. Sends real values for both fields (never null) -- auth_service
+    no longer accepts null here, it always wants a real (possibly
+    default) string."""
     result = [
         {
-            "whitelist": _cell_str(row.get("whitelist")).strip() or None,
-            "blacklist": _cell_str(row.get("blacklist")).strip() or None,
+            "whitelist": _cell_str(row.get("whitelist")).strip(),
+            "blacklist": _cell_str(row.get("blacklist")).strip() or BLACKLIST_MATCHES_NOTHING,
         }
         for row in rows
     ]
@@ -140,7 +153,7 @@ def _option_rows(constraints):
                 "short": c.get("short") or "",
                 "long": c.get("long") or "",
                 "whitelist": pattern.get("whitelist") or "",
-                "blacklist": pattern.get("blacklist") or "",
+                "blacklist": _display_blacklist(pattern.get("blacklist")),
             }
         )
     return rows
@@ -155,15 +168,17 @@ def _build_option_constraints(rows):
     Both whitelist/blacklist left blank means any/no value is accepted; a
     missing value is matched as the empty string (see
     utils/rule_chains.py or the daemon's ruleMatches), so a whitelist of
-    "^$" requires the option be present with NO value."""
+    "^$" requires the option be present with NO value. Sends real values
+    for both fields (never null) -- auth_service always wants a real
+    (possibly default) string."""
     result = []
     for row in rows:
         short = _cell_str(row.get("short")).strip() or None
         long = _cell_str(row.get("long")).strip() or None
         if not short and not long:
             continue
-        whitelist = _cell_str(row.get("whitelist")).strip() or None
-        blacklist = _cell_str(row.get("blacklist")).strip() or None
+        whitelist = _cell_str(row.get("whitelist")).strip()
+        blacklist = _cell_str(row.get("blacklist")).strip() or BLACKLIST_MATCHES_NOTHING
         result.append({"short": short, "long": long, "pattern": {"whitelist": whitelist, "blacklist": blacklist}})
     return result, []
 
