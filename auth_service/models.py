@@ -65,18 +65,24 @@ class RuleChainPattern(BaseModel):
     expanded by the Go daemon via its existing resolvePath/roots
     machinery, never compiled as a regex.
 
+    Both fields are optional -- an absent whitelist/blacklist behaves
+    exactly like an empty-string regex would (RE2 matches everything with
+    an empty pattern), so a fully blank {whitelist: null, blacklist:
+    null} means "matches any value" (see OptionConstraint below, whose
+    pattern is always exactly one of these -- to require NO value, use a
+    whitelist of "^$", which only matches the empty string; a supplied
+    option with no value is matched as "" for this purpose).
+
     Distinct from the bare wildcard "*" used directly as a
-    positional_constraints list entry or an option's pattern field (see
-    RuleChainRuleCreateRequest/OptionConstraint below) -- "*" means "no
-    constraint at all", not a value of this type."""
+    positional_constraints list entry (see RuleChainRuleCreateRequest
+    below) -- "*" means the position isn't even required to be present,
+    not just "any value accepted"."""
 
     whitelist: str | None = Field(default=None, max_length=500)
     blacklist: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def _validate(self):
-        if self.whitelist is None and self.blacklist is None:
-            raise ValueError('Provide at least one of whitelist/blacklist (or use "*" for no constraint).')
         if self.blacklist == "{roots}":
             raise ValueError('"{roots}" is only meaningful as a whitelist, not a blacklist.')
         for value in (self.whitelist, self.blacklist):
@@ -95,14 +101,15 @@ class RuleChainPattern(BaseModel):
 class OptionConstraint(BaseModel):
     """One option (called "options", not "flags" -- they can carry values)
     a rule constrains, identified by its short and/or long form (at least
-    one required). pattern is either absent (the option must be present
-    with NO value -- a plain boolean flag), the literal wildcard "*" (must
-    be present, any value or none accepted), or a real RuleChainPattern
-    (must be present WITH a value satisfying it)."""
+    one required). Including an OptionConstraint at all means that option
+    must be PRESENT; pattern (always a RuleChainPattern, see its own
+    docstring) is checked against its value -- or against "" if it was
+    present with no value -- so a blank pattern accepts any/no value, and
+    a whitelist of "^$" requires no value specifically."""
 
     short: str | None = Field(default=None, max_length=16)
     long: str | None = Field(default=None, max_length=64)
-    pattern: Literal["*"] | RuleChainPattern | None = None
+    pattern: RuleChainPattern = Field(default_factory=RuleChainPattern)
 
     @model_validator(mode="after")
     def _short_or_long(self):

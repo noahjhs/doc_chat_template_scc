@@ -65,15 +65,18 @@ func TestRuleMatches_WildcardSkipsEarlyPosition(t *testing.T) {
 	}
 }
 
-func TestRuleMatches_OptionPresenceOnlyRequiresNoValue(t *testing.T) {
+func TestRuleMatches_OptionEmptyStringWhitelistRequiresNoValue(t *testing.T) {
+	// There's no separate nil/no-value state anymore -- a missing value is
+	// matched as "", so a whitelist of "^$" (matches only the empty
+	// string) is how a rule requires an option be present with NO value.
 	h, _ := newTestHandler(t)
 	rule := Rule{
 		PositionalConstraints: []RuleChainPattern{wildcard()},
-		OptionConstraints:     []OptionConstraint{{Long: "force", Pattern: nil}},
+		OptionConstraints:     []OptionConstraint{{Long: "force", Pattern: mustWhitelist("^$")}},
 	}
 	noValue := "no"
 	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "force", Value: nil}}) {
-		t.Fatal("expected a match -- option present with no value")
+		t.Fatal("expected a match -- option present with no value, matched as \"\"")
 	}
 	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "force", Value: &noValue}}) {
 		t.Fatal("expected no match -- a value was supplied but the constraint requires none")
@@ -83,12 +86,11 @@ func TestRuleMatches_OptionPresenceOnlyRequiresNoValue(t *testing.T) {
 	}
 }
 
-func TestRuleMatches_OptionWildcardAcceptsAnyOrNoValue(t *testing.T) {
+func TestRuleMatches_OptionBlankPatternAcceptsAnyOrNoValue(t *testing.T) {
 	h, _ := newTestHandler(t)
-	w := wildcard()
 	rule := Rule{
 		PositionalConstraints: []RuleChainPattern{wildcard()},
-		OptionConstraints:     []OptionConstraint{{Short: "v", Pattern: &w}},
+		OptionConstraints:     []OptionConstraint{{Short: "v", Pattern: RuleChainPattern{}}},
 	}
 	anything := "anything"
 	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Short: "v", Value: nil}}) {
@@ -101,10 +103,9 @@ func TestRuleMatches_OptionWildcardAcceptsAnyOrNoValue(t *testing.T) {
 
 func TestRuleMatches_OptionValuePattern(t *testing.T) {
 	h, _ := newTestHandler(t)
-	p := mustWhitelist("^json$")
 	rule := Rule{
 		PositionalConstraints: []RuleChainPattern{wildcard()},
-		OptionConstraints:     []OptionConstraint{{Long: "format", Pattern: &p}},
+		OptionConstraints:     []OptionConstraint{{Long: "format", Pattern: mustWhitelist("^json$")}},
 	}
 	jsonValue := "json"
 	xmlValue := "xml"
@@ -115,7 +116,7 @@ func TestRuleMatches_OptionValuePattern(t *testing.T) {
 		t.Fatal("expected no match -- value doesn't satisfy the pattern")
 	}
 	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: nil}}) {
-		t.Fatal("expected no match -- a pattern requires SOME value, not none")
+		t.Fatal("expected no match -- a missing value is matched as \"\", which doesn't satisfy \"^json$\" either")
 	}
 }
 

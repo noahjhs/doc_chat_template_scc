@@ -123,21 +123,13 @@ def _build_positional_constraints(rows):
 def _option_rows(constraints):
     rows = []
     for c in constraints:
-        pattern = c.get("pattern")
-        if pattern is None:
-            allow_value, whitelist, blacklist = False, "", ""
-        elif pattern == "*":
-            allow_value, whitelist, blacklist = True, "", ""
-        else:
-            allow_value = True
-            whitelist, blacklist = pattern.get("whitelist") or "", pattern.get("blacklist") or ""
+        pattern = c.get("pattern") or {}
         rows.append(
             {
                 "short": c.get("short") or "",
                 "long": c.get("long") or "",
-                "allow_value": allow_value,
-                "whitelist": whitelist,
-                "blacklist": blacklist,
+                "whitelist": pattern.get("whitelist") or "",
+                "blacklist": pattern.get("blacklist") or "",
             }
         )
     return rows
@@ -146,30 +138,23 @@ def _option_rows(constraints):
 def _build_option_constraints(rows):
     """A row with neither short nor long filled in is treated as an unused
     placeholder and silently skipped -- option_constraints=[] (no options
-    at all) is perfectly valid, and erroring on an empty row would make a
-    brand-new rule with no options unsaveable.
-
-    "Allow value?" unchecked means the option must be present with NO
-    value; _render_option_editor already keeps whitelist/blacklist empty
-    whenever it's unchecked (disabled while unchecked, and unchecking is
-    blocked while they're non-empty), so this only has to trust that
-    invariant rather than re-derive it. Checked with both fields left
-    blank means any/no value is accepted; checked with either filled
-    means a value is required matching them."""
-    result, errors = [], []
+    at all) is perfectly valid. Unlike positional_constraints, an included
+    option entry always requires that option to be PRESENT -- only the
+    value it's allowed to carry is what's optional to constrain here.
+    Both whitelist/blacklist left blank means any/no value is accepted; a
+    missing value is matched as the empty string (see
+    utils/rule_chains.py or the daemon's ruleMatches), so a whitelist of
+    "^$" requires the option be present with NO value."""
+    result = []
     for row in rows:
         short = (row.get("short") or "").strip() or None
         long = (row.get("long") or "").strip() or None
         if not short and not long:
             continue
-        if not row.get("allow_value"):
-            pattern = None
-        else:
-            whitelist = (row.get("whitelist") or "").strip() or None
-            blacklist = (row.get("blacklist") or "").strip() or None
-            pattern = "*" if whitelist is None and blacklist is None else {"whitelist": whitelist, "blacklist": blacklist}
-        result.append({"short": short, "long": long, "pattern": pattern})
-    return result, errors
+        whitelist = (row.get("whitelist") or "").strip() or None
+        blacklist = (row.get("blacklist") or "").strip() or None
+        result.append({"short": short, "long": long, "pattern": {"whitelist": whitelist, "blacklist": blacklist}})
+    return result, []
 
 
 def _uses_roots(positional_constraints, option_constraints):
@@ -183,133 +168,14 @@ def _uses_roots(positional_constraints, option_constraints):
     return False
 
 
-def _option_field_key(chain_id, key_suffix, field, row_id):
-    return f"opt_{field}_{chain_id}_{key_suffix}_{row_id}"
-
-
-def _init_option_rows(chain, rule, key_suffix):
-    """Seeds session_state for the custom per-row option editor below the
-    first time a rule is opened for editing this session -- a later rerun
-    (e.g. toggling a checkbox) leaves whatever's already there alone."""
-    rows_key = f"_option_row_ids_{chain['id']}_{key_suffix}"
-    if rows_key in st.session_state:
-        return
-    initial = [] if rule is None else _option_rows(rule["option_constraints"])
-    row_ids = list(range(len(initial)))
-    for row_id, entry in zip(row_ids, initial):
-        st.session_state[_option_field_key(chain["id"], key_suffix, "short", row_id)] = entry["short"]
-        st.session_state[_option_field_key(chain["id"], key_suffix, "long", row_id)] = entry["long"]
-        st.session_state[_option_field_key(chain["id"], key_suffix, "allow", row_id)] = entry["allow_value"]
-        st.session_state[_option_field_key(chain["id"], key_suffix, "whitelist", row_id)] = entry["whitelist"]
-        st.session_state[_option_field_key(chain["id"], key_suffix, "blacklist", row_id)] = entry["blacklist"]
-    st.session_state[rows_key] = row_ids
-    st.session_state[f"_option_next_id_{chain['id']}_{key_suffix}"] = len(row_ids)
-
-
-def _render_option_editor(chain, key_suffix):
-    """Custom per-row option editor -- deliberately NOT st.data_editor.
-    data_editor's `disabled` param can only disable a whole COLUMN
-    uniformly for every row; there's no way for it to gate one row's
-    whitelist/blacklist cells based on that SAME row's own "Allow value?"
-    cell, which is exactly what was asked for (grey out -- and block
-    entry into -- whitelist/blacklist while unchecked, and block
-    unchecking while they're non-empty). Real per-row widgets can do
-    that, and -- living outside the rule form below -- react immediately:
-    toggling the checkbox greys the fields out on the same rerun, not
-    just after Save is clicked. Returns the current rows as plain dicts,
-    read live from session_state, for the Save handler to build
-    option_constraints from."""
-    rows_key = f"_option_row_ids_{chain['id']}_{key_suffix}"
-    next_id_key = f"_option_next_id_{chain['id']}_{key_suffix}"
-    row_ids = st.session_state[rows_key]
-
-    st.caption(
-        "Options -- at least one of short/long is required per row. Check \"Allow value?\" to require "
-        "the option to carry a value (optionally constrained below); leave it unchecked for a plain "
-        "valueless flag. The box can't be unchecked while whitelist/blacklist still have something in "
-        "them -- clear those first."
-    )
-    if row_ids:
-        header_cols = st.columns([2, 2, 1.3, 2.7, 2.7, 0.6])
-        for col, label in zip(
-            header_cols, ["Short (-f)", "Long (--force)", "Allow value?", "Whitelist (regex)", "Blacklist (regex)", ""]
-        ):
-            col.caption(label)
-
-    for row_id in list(row_ids):
-        short_key = _option_field_key(chain["id"], key_suffix, "short", row_id)
-        long_key = _option_field_key(chain["id"], key_suffix, "long", row_id)
-        allow_key = _option_field_key(chain["id"], key_suffix, "allow", row_id)
-        whitelist_key = _option_field_key(chain["id"], key_suffix, "whitelist", row_id)
-        blacklist_key = _option_field_key(chain["id"], key_suffix, "blacklist", row_id)
-        guard_key = f"_opt_guard_{chain['id']}_{key_suffix}_{row_id}"
-
-        def _guard_uncheck(allow_key=allow_key, whitelist_key=whitelist_key, blacklist_key=blacklist_key, guard_key=guard_key):
-            # Widgets can't render output from inside an on_change callback
-            # (same reasoning as settings_security.py's _make_permission_
-            # on_change) -- this only flips a flag; the warning itself is
-            # shown below, on the rerun the callback triggers.
-            if not st.session_state[allow_key] and (
-                (st.session_state.get(whitelist_key) or "").strip() or (st.session_state.get(blacklist_key) or "").strip()
-            ):
-                st.session_state[allow_key] = True
-                st.session_state[guard_key] = True
-
-        cols = st.columns([2, 2, 1.3, 2.7, 2.7, 0.6])
-        cols[0].text_input("Short", key=short_key, label_visibility="collapsed", placeholder="-f")
-        cols[1].text_input("Long", key=long_key, label_visibility="collapsed", placeholder="--force")
-        cols[2].checkbox("Allow value?", key=allow_key, on_change=_guard_uncheck, label_visibility="collapsed")
-        allow_value = st.session_state[allow_key]
-        cols[3].text_input("Whitelist", key=whitelist_key, disabled=not allow_value, label_visibility="collapsed")
-        cols[4].text_input("Blacklist", key=blacklist_key, disabled=not allow_value, label_visibility="collapsed")
-        if cols[5].button("✕", key=f"opt_remove_{chain['id']}_{key_suffix}_{row_id}", help="Remove this option row"):
-            st.session_state[rows_key] = [r for r in row_ids if r != row_id]
-            for field in ("short", "long", "allow", "whitelist", "blacklist"):
-                st.session_state.pop(_option_field_key(chain["id"], key_suffix, field, row_id), None)
-            st.rerun()
-        if st.session_state.pop(guard_key, False):
-            st.caption('⚠️ Clear the whitelist/blacklist before unchecking "Allow value?".')
-
-    if st.button("+ Add option", key=f"add_option_{chain['id']}_{key_suffix}"):
-        next_id = st.session_state[next_id_key]
-        st.session_state[_option_field_key(chain["id"], key_suffix, "short", next_id)] = ""
-        st.session_state[_option_field_key(chain["id"], key_suffix, "long", next_id)] = ""
-        st.session_state[_option_field_key(chain["id"], key_suffix, "allow", next_id)] = False
-        st.session_state[_option_field_key(chain["id"], key_suffix, "whitelist", next_id)] = ""
-        st.session_state[_option_field_key(chain["id"], key_suffix, "blacklist", next_id)] = ""
-        st.session_state[rows_key] = row_ids + [next_id]
-        st.session_state[next_id_key] = next_id + 1
-        st.rerun()
-
-    return [
-        {
-            "short": st.session_state.get(_option_field_key(chain["id"], key_suffix, "short", row_id), ""),
-            "long": st.session_state.get(_option_field_key(chain["id"], key_suffix, "long", row_id), ""),
-            "allow_value": st.session_state.get(_option_field_key(chain["id"], key_suffix, "allow", row_id), False),
-            "whitelist": st.session_state.get(_option_field_key(chain["id"], key_suffix, "whitelist", row_id), ""),
-            "blacklist": st.session_state.get(_option_field_key(chain["id"], key_suffix, "blacklist", row_id), ""),
-        }
-        for row_id in st.session_state[rows_key]
-    ]
-
-
-def _clear_option_editor_state(chain, key_suffix):
-    rows_key = f"_option_row_ids_{chain['id']}_{key_suffix}"
-    for row_id in st.session_state.get(rows_key, []):
-        for field in ("short", "long", "allow", "whitelist", "blacklist"):
-            st.session_state.pop(_option_field_key(chain["id"], key_suffix, field, row_id), None)
-    st.session_state.pop(rows_key, None)
-    st.session_state.pop(f"_option_next_id_{chain['id']}_{key_suffix}", None)
-
-
 def _render_rule_editor(chain, rule):
     """The create-or-edit form for one rule -- rule is None when creating
     a brand-new one (appended to the end of the chain), otherwise the
-    existing rule being edited. Positional constraints use
+    existing rule being edited. Both positional and option constraints use
     st.data_editor(num_rows="dynamic") so adding/removing a row directly
     changes the constraint list's length -- for positional constraints,
-    row order IS argv position (row 0 = the binary). Options use a custom
-    per-row widget layout instead -- see _render_option_editor for why."""
+    row order IS argv position (row 0 = the binary); option row order
+    doesn't matter."""
     is_new = rule is None
     key_suffix = "new" if is_new else rule["id"]
     blank_positional_row = {"whitelist": "", "blacklist": ""}
@@ -317,8 +183,8 @@ def _render_rule_editor(chain, rule):
     # an empty list here is a fully legitimate, intentional "unconstrained"
     # state, not a placeholder needing a phantom blank row.
     saved_positional_rows = [] if is_new else _positional_rows(rule["positional_constraints"])
+    saved_option_rows = [] if is_new else _option_rows(rule["option_constraints"])
     tier_default = "ask" if is_new else rule["tier"]
-    _init_option_rows(chain, rule, key_suffix)
 
     # The table widgets below let a viewer hide a column via their own
     # header menu, with no built-in way to bring it back -- bumping this
@@ -375,11 +241,6 @@ def _render_rule_editor(chain, rule):
     )
     working_rows = st.session_state.get(working_key, saved_positional_rows)
 
-    # Lives outside the form (like the controls above) so toggling a
-    # checkbox reacts immediately instead of only taking effect once Save
-    # is clicked.
-    current_option_rows = _render_option_editor(chain, key_suffix)
-
     with st.form(f"rule_form_{chain['id']}_{key_suffix}"):
         st.caption(
             "Positional constraints -- the row number IS the argv position (row 0 is the binary "
@@ -409,6 +270,26 @@ def _render_rule_editor(chain, rule):
             "blacklist alone; a blacklist can be bypassed via symlinks, \"..\", or alternate path spellings."
         )
 
+        st.caption(
+            "Options -- at least one of short/long is required per row. Including a row always "
+            "requires that option to be present; leave whitelist/blacklist blank to accept it with "
+            'any (or no) value, or enter "^$" as the whitelist to require it be present with NO '
+            "value (an absent value is matched as the empty string)."
+        )
+        option_edited = st.data_editor(
+            pd.DataFrame(saved_option_rows, columns=["short", "long", "whitelist", "blacklist"]),
+            num_rows="dynamic",
+            key=f"option_editor_{chain['id']}_{key_suffix}_{generation}",
+            column_config={
+                "short": st.column_config.TextColumn("Short (-f)"),
+                "long": st.column_config.TextColumn("Long (--force)"),
+                "whitelist": st.column_config.TextColumn("Whitelist (regex)"),
+                "blacklist": st.column_config.TextColumn("Blacklist (regex)"),
+            },
+            column_order=["short", "long", "whitelist", "blacklist"],
+            hide_index=True,
+        )
+
         tier = st.radio(
             "Tier",
             options=TIER_OPTIONS,
@@ -427,7 +308,6 @@ def _render_rule_editor(chain, rule):
         st.session_state.pop(working_key, None)
         st.session_state.pop(count_key, None)
         st.session_state.pop(generation_key, None)
-        _clear_option_editor_state(chain, key_suffix)
 
     if cancelled:
         _clear_editor_state()
@@ -437,7 +317,7 @@ def _render_rule_editor(chain, rule):
         # data_editor returns the same type it was given -- a DataFrame in,
         # a DataFrame out -- so convert back to plain dicts before building.
         positional_constraints, errors = _build_positional_constraints(positional_edited.to_dict("records"))
-        option_constraints, option_errors = _build_option_constraints(current_option_rows)
+        option_constraints, option_errors = _build_option_constraints(option_edited.to_dict("records"))
         errors += option_errors
         if _uses_roots(positional_constraints, option_constraints) and tier == "allow":
             errors.append(

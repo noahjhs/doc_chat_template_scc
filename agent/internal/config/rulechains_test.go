@@ -24,9 +24,10 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 								map[string]any{"whitelist": "{roots}"},
 							},
 							"option_constraints": []map[string]any{
-								{"short": "f", "long": "force", "pattern": nil},
-								{"long": "verbose", "pattern": "*"},
+								{"short": "f", "long": "force", "pattern": map[string]any{"whitelist": "^$"}},
+								{"long": "verbose", "pattern": map[string]any{}},
 								{"long": "output", "pattern": map[string]any{"whitelist": ".+"}},
+								{"long": "legacy", "pattern": nil}, // stale row from before this was always a real object
 							},
 							"tier": "ask",
 						},
@@ -58,17 +59,22 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	}
 
 	oc := rule.OptionConstraints
-	if len(oc) != 3 {
-		t.Fatalf("expected 3 option constraints, got %d", len(oc))
+	if len(oc) != 4 {
+		t.Fatalf("expected 4 option constraints, got %d", len(oc))
 	}
-	if oc[0].Pattern != nil {
-		t.Fatalf("expected a nil pattern (no value allowed) for --force, got %+v", oc[0].Pattern)
+	if oc[0].Pattern.Whitelist == nil || !oc[0].Pattern.Whitelist.MatchString("") || oc[0].Pattern.Whitelist.MatchString("x") {
+		t.Fatalf("expected --force's pattern (\"^$\") to require an empty value, got %+v", oc[0].Pattern)
 	}
-	if oc[1].Pattern == nil || !oc[1].Pattern.Wildcard {
-		t.Fatalf("expected a wildcard pattern for --verbose, got %+v", oc[1].Pattern)
+	if oc[1].Pattern.Wildcard || oc[1].Pattern.Whitelist != nil || oc[1].Pattern.Blacklist != nil {
+		t.Fatalf("expected a blank (any/no value) pattern for --verbose, got %+v", oc[1].Pattern)
 	}
-	if oc[2].Pattern == nil || oc[2].Pattern.Whitelist == nil || !oc[2].Pattern.Whitelist.MatchString("x") {
+	if oc[2].Pattern.Whitelist == nil || !oc[2].Pattern.Whitelist.MatchString("x") {
 		t.Fatalf("expected --output's pattern to compile and match, got %+v", oc[2].Pattern)
+	}
+	// A literal JSON null (a stale pre-this-change row) decodes to the same
+	// blank/matches-anything pattern a {} object would -- never a crash.
+	if oc[3].Pattern.Wildcard || oc[3].Pattern.Whitelist != nil || oc[3].Pattern.Blacklist != nil {
+		t.Fatalf("expected a legacy null pattern to decode as blank (matches any/no value), got %+v", oc[3].Pattern)
 	}
 }
 

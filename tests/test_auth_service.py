@@ -637,6 +637,11 @@ def test_rule_chain_rule_rejects_invalid_regex(client):
 
 
 def test_rule_chain_rule_option_pattern_states_round_trip(client):
+    # There's only ever one pattern shape now -- {whitelist, blacklist} --
+    # not a three-way None/"*"/object choice. A blank pattern (both fields
+    # None) means "any/no value accepted"; a supplied option with no value
+    # is matched as "" at enforcement time, so "^$" as the whitelist means
+    # "must be present with NO value" without needing a dedicated state.
     signup = _signup(client, "laura1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     chain = _create_rule_chain(client, headers).json()
@@ -646,15 +651,15 @@ def test_rule_chain_rule_option_pattern_states_round_trip(client):
         chain["id"],
         ["*"],
         option_constraints=[
-            {"long": "force", "pattern": None},  # must be present, no value
-            {"short": "v", "pattern": "*"},  # must be present, any/no value
+            {"long": "force", "pattern": {"whitelist": "^$"}},  # must be present, no value
+            {"short": "v", "pattern": {}},  # must be present, any/no value
             {"long": "output", "pattern": {"whitelist": ".+"}},  # must be present, value matching
         ],
     )
     assert created.status_code == 201
     options = created.json()["option_constraints"]
-    assert options[0] == {"short": None, "long": "force", "pattern": None}
-    assert options[1] == {"short": "v", "long": None, "pattern": "*"}
+    assert options[0] == {"short": None, "long": "force", "pattern": {"whitelist": "^$", "blacklist": None}}
+    assert options[1] == {"short": "v", "long": None, "pattern": {"whitelist": None, "blacklist": None}}
     assert options[2] == {"short": None, "long": "output", "pattern": {"whitelist": ".+", "blacklist": None}}
 
 
@@ -662,7 +667,7 @@ def test_rule_chain_option_constraint_requires_short_or_long(client):
     signup = _signup(client, "mallory1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     chain = _create_rule_chain(client, headers).json()
-    r = _add_rule(client, headers, chain["id"], ["*"], option_constraints=[{"pattern": "*"}])
+    r = _add_rule(client, headers, chain["id"], ["*"], option_constraints=[{}])
     assert r.status_code == 422
 
 

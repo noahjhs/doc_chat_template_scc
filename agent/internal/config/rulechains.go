@@ -22,6 +22,14 @@ type patternWire struct {
 }
 
 func (p *patternWire) UnmarshalJSON(data []byte) error {
+	// A stale/legacy row could still have a literal JSON null here (the
+	// old tri-state OptionConstraint.pattern representation) -- decodes to
+	// the zero value (no wildcard, no whitelist/blacklist), which compiles
+	// to "matches any/no value", the same safe fallback a blank {} object
+	// gets under the current representation.
+	if string(data) == "null" {
+		return nil
+	}
 	var asString string
 	if err := json.Unmarshal(data, &asString); err == nil {
 		p.isWildcard = asString == "*"
@@ -74,9 +82,9 @@ func (p patternWire) compile() (commands.RuleChainPattern, error) {
 }
 
 type optionConstraintWire struct {
-	Short   string       `json:"short"`
-	Long    string       `json:"long"`
-	Pattern *patternWire `json:"pattern"` // nil (JSON null) = "must be present with no value"
+	Short   string      `json:"short"`
+	Long    string      `json:"long"`
+	Pattern patternWire `json:"pattern"` // always a real (possibly blank) pattern -- see OptionConstraint's own doc comment
 }
 
 type ruleWire struct {
@@ -108,15 +116,11 @@ func compileRule(w ruleWire) (commands.Rule, error) {
 	}
 	options := make([]commands.OptionConstraint, 0, len(w.OptionConstraints))
 	for _, ow := range w.OptionConstraints {
-		oc := commands.OptionConstraint{Short: ow.Short, Long: ow.Long}
-		if ow.Pattern != nil {
-			compiled, err := ow.Pattern.compile()
-			if err != nil {
-				return commands.Rule{}, fmt.Errorf("option %s/%s: %w", ow.Short, ow.Long, err)
-			}
-			oc.Pattern = &compiled
+		compiled, err := ow.Pattern.compile()
+		if err != nil {
+			return commands.Rule{}, fmt.Errorf("option %s/%s: %w", ow.Short, ow.Long, err)
 		}
-		options = append(options, oc)
+		options = append(options, commands.OptionConstraint{Short: ow.Short, Long: ow.Long, Pattern: compiled})
 	}
 	return commands.Rule{ID: w.ID, PositionalConstraints: positional, OptionConstraints: options, Tier: w.Tier}, nil
 }

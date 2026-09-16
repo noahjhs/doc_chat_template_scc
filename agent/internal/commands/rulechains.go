@@ -12,21 +12,30 @@ import (
 // for a single positional or option argument value -- see
 // auth_service/models.py's RuleChainPattern for the full reasoning (RE2,
 // "{roots}"). Compiled once at fetch/decode time (see
-// config/rulechains.go's FetchRuleChains), never per-match.
+// config/rulechains.go's FetchRuleChains), never per-match. Wildcard is
+// only ever set for a positional_constraints list entry that was the
+// literal "*" (meaning the position needn't even be present) -- an
+// OptionConstraint's Pattern is always a real (possibly fully blank)
+// pattern, never Wildcard; a blank Whitelist/Blacklist there already
+// means "matches any/no value" on its own, the same as an empty-string
+// RE2 pattern would.
 type RuleChainPattern struct {
-	Wildcard       bool           // true iff this entry was the literal "*" -- always satisfied
+	Wildcard       bool           // true iff this entry was the literal "*" -- always satisfied (positional only)
 	WhitelistRoots bool           // true iff whitelist was exactly "{roots}" (mutually exclusive with Wildcard)
 	Whitelist      *regexp.Regexp // nil if absent, Wildcard, or WhitelistRoots
 	Blacklist      *regexp.Regexp // nil if absent
 }
 
 // OptionConstraint is one option (not "flag" -- options can carry values) a
-// rule constrains, identified by its short and/or long form. Pattern nil
-// means the option must be present with NO value; Pattern.Wildcard means
-// present with any/no value; otherwise present WITH a value satisfying it.
+// rule constrains, identified by its short and/or long form. Including an
+// OptionConstraint at all means that option must be PRESENT; Pattern is
+// checked against its value, or against "" if it was present with no
+// value -- so a blank Pattern (Whitelist/Blacklist both nil) accepts
+// any/no value, and a Whitelist of "^$" requires no value specifically.
+// See auth_service/models.py's OptionConstraint for the full reasoning.
 type OptionConstraint struct {
 	Short, Long string
-	Pattern     *RuleChainPattern
+	Pattern     RuleChainPattern
 }
 
 // Rule is one entry in a RuleChain's ordered list -- see db.py's own schema
@@ -209,17 +218,15 @@ func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []Request
 		if !ok {
 			return false
 		}
-		switch {
-		case oc.Pattern == nil:
-			if supplied.Value != nil {
-				return false
-			}
-		case oc.Pattern.Wildcard:
-			// present with any/no value -- always satisfied from here
-		default:
-			if supplied.Value == nil || !h.valueMatchesPattern(*supplied.Value, *oc.Pattern) {
-				return false
-			}
+		// A missing value is matched as "" -- see OptionConstraint's own
+		// doc comment for why this makes "^$" the way to require no value,
+		// with no separate nil/Wildcard special-casing needed here.
+		value := ""
+		if supplied.Value != nil {
+			value = *supplied.Value
+		}
+		if !h.valueMatchesPattern(value, oc.Pattern) {
+			return false
 		}
 	}
 	return true

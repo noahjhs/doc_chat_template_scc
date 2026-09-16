@@ -517,15 +517,14 @@ def _value_in_roots(value, roots):
 
 def _pattern_matches(value, pattern, roots):
     """Python port of the Go daemon's valueMatchesPattern -- pattern is
-    "*" (always matches) or a {"whitelist":.., "blacklist":..} object
-    (never None here; a None *option* pattern -- "no value allowed" -- is
-    handled by the caller before this is reached, since it's a presence/
-    absence check, not a value-matching one). Uses google-re2 (the same
-    RE2 engine Go's stdlib regexp targets), not stdlib re, to preserve the
-    no-catastrophic-backtracking property the whole schema is built
-    around."""
-    if pattern == "*":
-        return True
+    always a real {"whitelist":.., "blacklist":..} object here (the caller
+    already special-cases positional's "*" sentinel before ever reaching
+    this function; options no longer have a sentinel at all -- see
+    _rule_matches below). Both fields absent/blank means "matches any/no
+    value", same as an empty-string RE2 pattern would. Uses google-re2
+    (the same RE2 engine Go's stdlib regexp targets), not stdlib re, to
+    preserve the no-catastrophic-backtracking property the whole schema is
+    built around."""
     whitelist = pattern.get("whitelist")
     blacklist = pattern.get("blacklist")
     if whitelist == "{roots}":
@@ -560,14 +559,14 @@ def _rule_matches(rule, positional_args, options, roots):
         supplied = _find_option(options, constraint.get("short"), constraint.get("long"))
         if supplied is None:
             return False
-        pattern = constraint.get("pattern")
+        # A missing value is matched as "" -- see _build_option_constraints
+        # in pages/resources.py for why this makes a whitelist of "^$" the
+        # way to require no value, with no separate presence/absence check
+        # needed here.
         value = supplied.get("value")
-        if pattern is None:
-            if value is not None:
-                return False
-        elif pattern == "*":
-            pass
-        elif value is None or not _pattern_matches(value, pattern, roots):
+        if value is None:
+            value = ""
+        if not _pattern_matches(value, constraint.get("pattern") or {}, roots):
             return False
     return True
 

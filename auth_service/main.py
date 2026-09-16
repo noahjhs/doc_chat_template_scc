@@ -85,10 +85,10 @@ def _first_validation_message(errors: list[dict]) -> str:
     Prefers a "value_error" entry (a validator's own deliberately-written
     message, e.g. RuleChainPattern's "Invalid regex ...") over a generic
     structural one (e.g. "literal_error") when both are present -- which
-    happens for any `Literal["*"] | SomeModel` union field (see
-    RuleChainRuleCreateRequest.positional_constraints/OptionConstraint.pattern):
-    a genuinely-invalid SomeModel payload fails BOTH union branches (it's
-    not the literal "*", *and* the model's own validator rejects it), and
+    happens for `RuleChainRuleCreateRequest.positional_constraints`' own
+    `Literal["*"] | RuleChainPattern` union field entries: a genuinely-
+    invalid RuleChainPattern payload fails BOTH union branches (it's not
+    the literal "*", *and* the model's own validator rejects it), and
     pydantic reports every attempted branch's error in declaration order --
     so without this, a real "invalid regex" mistake would confusingly
     surface as "Input should be '*'" (the *other* branch's unrelated
@@ -821,10 +821,7 @@ def _serialize_positional_constraints(constraints) -> str:
 
 
 def _serialize_option_constraints(constraints) -> str:
-    def _pattern_out(p):
-        return p if (p is None or p == "*") else p.model_dump()
-
-    return json.dumps([{"short": c.short, "long": c.long, "pattern": _pattern_out(c.pattern)} for c in constraints])
+    return json.dumps([{"short": c.short, "long": c.long, "pattern": c.pattern.model_dump()} for c in constraints])
 
 
 @app.post("/rule-chains/{rule_chain_id}/rules", response_model=RuleChainRuleInfo, status_code=201)
