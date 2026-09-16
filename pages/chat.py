@@ -1,6 +1,7 @@
 import base64
 import json
 import os.path
+import uuid
 
 import re2
 import requests
@@ -1009,6 +1010,65 @@ def _process_turn(local_agent_configs, selected_host_label):
     del st.session_state["_turn"]
     return True
 
+
+# Testing-only escape hatch: inject a tool call directly, as if the model
+# had already decided to propose it, instead of crafting a prompt that
+# talks the model into calling it -- useful for exercising a specific
+# rule/tier/approval path on demand. Reuses _process_turn's own dispatch
+# loop unmodified (pre-seeding pending_calls skips straight past the
+# "call the model" branch into the exact same tier-decision/dispatch code
+# a real model-issued call goes through), so this can't drift from what
+# real usage actually does. Gated the same as chat_input below -- a turn
+# already in flight (including a pending approval) must finish or resolve
+# first, same reasoning as that gate's own comment.
+if "_pending_approval" not in st.session_state and "_turn" not in st.session_state:
+    with st.expander("🔧 Force a tool call (testing)"):
+        st.caption(
+            "Injects a tool call directly into the conversation, as if the model had proposed "
+            "it -- skips needing a prompt that convinces the model to call it. Goes through the "
+            "exact same dispatch, tier decision, and approval flow as a real call."
+        )
+        tool_names = [t["name"] for t in active_tools if t.get("type") == "function"]
+        if not tool_names:
+            st.caption("No tools available yet -- connect a host first.")
+        else:
+            forced_tool_name = st.selectbox("Tool", tool_names, key="_forced_tool_name")
+            forced_tool = next(t for t in active_tools if t.get("name") == forced_tool_name)
+            st.caption("Parameters schema (for reference):")
+            st.code(json.dumps(forced_tool.get("parameters", {}), indent=2), language="json")
+            forced_args_text = st.text_area(
+                "Arguments (a JSON object matching the schema above)",
+                value="{}",
+                key="_forced_tool_args",
+                height=150,
+            )
+            if st.button("Force call", key="_force_tool_call_button"):
+                try:
+                    forced_args = json.loads(forced_args_text)
+                except json.JSONDecodeError as e:
+                    st.error(f"Invalid JSON: {e}")
+                else:
+                    label = f"(forced tool call: {forced_tool_name})"
+                    st.session_state.messages.append({"role": "user", "content": label})
+                    turn = _new_turn(label)
+                    call_id = f"forced-{uuid.uuid4().hex[:8]}"
+                    call_args_json = json.dumps(forced_args)
+                    turn["pending_calls"] = [{"call_id": call_id, "name": forced_tool_name, "arguments": call_args_json}]
+                    # Pre-seeded with the function_call half already in it --
+                    # for a REAL call, the model's own prior response is what
+                    # established "I called this," so only the output needs
+                    # sending back (see the dispatch loop's own
+                    # turn["outputs"].append(...) below, which only ever adds
+                    # function_call_output items). This call never went
+                    # through the model, so nothing establishes it happened
+                    # unless we say so ourselves -- without this, the next
+                    # hop would hand the model a function_call_output with no
+                    # matching function_call anywhere in its context.
+                    turn["outputs"] = [
+                        {"type": "function_call", "call_id": call_id, "name": forced_tool_name, "arguments": call_args_json}
+                    ]
+                    st.session_state["_turn"] = turn
+                    st.rerun()
 
 # Gated on there being no pending approval -- otherwise a new message sent
 # while one's outstanding would silently discard the in-progress turn
