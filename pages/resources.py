@@ -90,6 +90,18 @@ TIER_OPTIONS = ["deny", "ask", "allow"]
 TIER_LABELS = {"deny": "Deny", "ask": "Ask", "allow": "Allow"}
 
 
+def _cell_str(value):
+    """A row dict here came from a data_editor's DataFrame via
+    .to_dict("records") -- a blank text cell round-trips as float NaN
+    there, not None or "" (confirmed directly: a column seeded with a mix
+    of real strings and None ends up dtype "str", but NaN is still what a
+    None cell exports as), so `row.get(...) or ""` alone isn't enough --
+    `nan or ""` is still `nan` (NaN is truthy), and calling .strip() on
+    that raises. pd.isna() is the one check that's correct for all of
+    None/NaN/NaT without also misfiring on a real, non-empty string."""
+    return "" if pd.isna(value) else str(value)
+
+
 def _positional_rows(constraints):
     return [{"whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or ""} for c in constraints]
 
@@ -104,7 +116,10 @@ def _build_positional_constraints(rows):
     missing value is matched as "", which an empty pattern always
     matches), no "*" sentinel needed."""
     result = [
-        {"whitelist": (row.get("whitelist") or "").strip() or None, "blacklist": (row.get("blacklist") or "").strip() or None}
+        {
+            "whitelist": _cell_str(row.get("whitelist")).strip() or None,
+            "blacklist": _cell_str(row.get("blacklist")).strip() or None,
+        }
         for row in rows
     ]
     errors = []
@@ -143,12 +158,12 @@ def _build_option_constraints(rows):
     "^$" requires the option be present with NO value."""
     result = []
     for row in rows:
-        short = (row.get("short") or "").strip() or None
-        long = (row.get("long") or "").strip() or None
+        short = _cell_str(row.get("short")).strip() or None
+        long = _cell_str(row.get("long")).strip() or None
         if not short and not long:
             continue
-        whitelist = (row.get("whitelist") or "").strip() or None
-        blacklist = (row.get("blacklist") or "").strip() or None
+        whitelist = _cell_str(row.get("whitelist")).strip() or None
+        blacklist = _cell_str(row.get("blacklist")).strip() or None
         result.append({"short": short, "long": long, "pattern": {"whitelist": whitelist, "blacklist": blacklist}})
     return result, []
 
