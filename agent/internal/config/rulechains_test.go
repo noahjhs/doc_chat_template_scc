@@ -48,8 +48,12 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	rule := ruleChains[0].Rules[0]
 
 	pc := rule.PositionalConstraints
-	if len(pc) != 3 || !pc[0].Wildcard {
-		t.Fatalf("expected position 0 to be a wildcard, got %+v", pc)
+	// Position 0 is the bare string "*" -- a stale pre-this-change wire
+	// value (the old positional wildcard sentinel) -- which must still
+	// decode safely as a blank ("value not required") pattern, never a
+	// crash or a compile error.
+	if len(pc) != 3 || pc[0].Whitelist != nil || pc[0].Blacklist != nil || pc[0].WhitelistRoots {
+		t.Fatalf("expected a legacy \"*\" at position 0 to decode as blank (value not required), got %+v", pc)
 	}
 	if pc[1].Whitelist == nil || !pc[1].Whitelist.MatchString("run") {
 		t.Fatalf("expected position 1's whitelist to compile and match \"run\", got %+v", pc[1])
@@ -65,7 +69,7 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	if oc[0].Pattern.Whitelist == nil || !oc[0].Pattern.Whitelist.MatchString("") || oc[0].Pattern.Whitelist.MatchString("x") {
 		t.Fatalf("expected --force's pattern (\"^$\") to require an empty value, got %+v", oc[0].Pattern)
 	}
-	if oc[1].Pattern.Wildcard || oc[1].Pattern.Whitelist != nil || oc[1].Pattern.Blacklist != nil {
+	if oc[1].Pattern.Whitelist != nil || oc[1].Pattern.Blacklist != nil {
 		t.Fatalf("expected a blank (any/no value) pattern for --verbose, got %+v", oc[1].Pattern)
 	}
 	if oc[2].Pattern.Whitelist == nil || !oc[2].Pattern.Whitelist.MatchString("x") {
@@ -73,7 +77,7 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	}
 	// A literal JSON null (a stale pre-this-change row) decodes to the same
 	// blank/matches-anything pattern a {} object would -- never a crash.
-	if oc[3].Pattern.Wildcard || oc[3].Pattern.Whitelist != nil || oc[3].Pattern.Blacklist != nil {
+	if oc[3].Pattern.Whitelist != nil || oc[3].Pattern.Blacklist != nil {
 		t.Fatalf("expected a legacy null pattern to decode as blank (matches any/no value), got %+v", oc[3].Pattern)
 	}
 }

@@ -11,28 +11,25 @@ import (
 	"casper-agent/internal/commands"
 )
 
-// patternWire decodes one JSON value that's either the bare string "*" or
-// an object {"whitelist":.., "blacklist":..} -- mirrors
-// auth_service/models.py's RuleChainPattern / the Literal["*"] union used
-// for positional_constraints list entries and OptionConstraint.pattern.
+// patternWire decodes one JSON {"whitelist":.., "blacklist":..} object --
+// mirrors auth_service/models.py's RuleChainPattern, used for both
+// positional_constraints list entries and OptionConstraint.pattern (fully
+// symmetric now -- see commands.RuleChainPattern's own doc comment for why
+// neither needs a "*"/wildcard sentinel).
 type patternWire struct {
-	isWildcard bool
-	whitelist  *string
-	blacklist  *string
+	whitelist *string
+	blacklist *string
 }
 
 func (p *patternWire) UnmarshalJSON(data []byte) error {
-	// A stale/legacy row could still have a literal JSON null here (the
-	// old tri-state OptionConstraint.pattern representation) -- decodes to
-	// the zero value (no wildcard, no whitelist/blacklist), which compiles
-	// to "matches any/no value", the same safe fallback a blank {} object
-	// gets under the current representation.
-	if string(data) == "null" {
-		return nil
-	}
-	var asString string
-	if err := json.Unmarshal(data, &asString); err == nil {
-		p.isWildcard = asString == "*"
+	// A stale/legacy row could still have a literal JSON null (the old
+	// nilable OptionConstraint.pattern) or the bare string "*" (the old
+	// positional wildcard sentinel) here -- both decode to the zero value
+	// (no whitelist/blacklist), which compiles to "value not required",
+	// the same safe fallback a blank {} object gets under the current
+	// representation, and behaviorally equivalent to what both old forms
+	// meant anyway.
+	if string(data) == "null" || string(data) == `"*"` {
 		return nil
 	}
 	var obj struct {
@@ -56,9 +53,6 @@ func (p *patternWire) UnmarshalJSON(data []byte) error {
 // rare -- a small parity gap is still possible, and this is the
 // deliberate defense against it.
 func (p patternWire) compile() (commands.RuleChainPattern, error) {
-	if p.isWildcard {
-		return commands.RuleChainPattern{Wildcard: true}, nil
-	}
 	out := commands.RuleChainPattern{}
 	if p.whitelist != nil {
 		if *p.whitelist == "{roots}" {

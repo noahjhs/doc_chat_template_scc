@@ -10,8 +10,20 @@ func mustWhitelist(pattern string) RuleChainPattern {
 	return RuleChainPattern{Whitelist: regexp.MustCompile(pattern)}
 }
 
-func wildcard() RuleChainPattern {
-	return RuleChainPattern{Wildcard: true}
+// unconstrained is a blank pattern -- "value not required" -- used
+// throughout these tests as a convenient "match anything at this
+// position" filler, the same role the removed Wildcard sentinel used to
+// play (now redundant: a blank pattern matched against a missing value,
+// coerced to "", already matches -- see ruleMatches).
+func unconstrained() RuleChainPattern {
+	return RuleChainPattern{}
+}
+
+// valueNotAllowed matches only an empty string -- see RuleChainPattern's
+// own doc comment for why this is how a rule requires an argument or
+// option to have NO value.
+func valueNotAllowed() RuleChainPattern {
+	return mustWhitelist("^$")
 }
 
 func rootsWhitelist() RuleChainPattern {
@@ -51,17 +63,55 @@ func TestRuleMatches_EmptyPositionalConstraintsMatchAnyBinary(t *testing.T) {
 	}
 }
 
-func TestRuleMatches_WildcardSkipsEarlyPosition(t *testing.T) {
+func TestRuleMatches_UnconstrainedEarlyPositionDoesntBlockALaterOne(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{wildcard(), wildcard(), mustWhitelist("^world$")},
+		PositionalConstraints: []RuleChainPattern{unconstrained(), unconstrained(), mustWhitelist("^world$")},
 		Tier:                  "allow",
 	}
 	if !h.ruleMatches(rule, []string{"echo", "hello", "world"}, nil) {
-		t.Fatal("expected a match -- positions 0/1 are wildcarded, only position 2 is real")
+		t.Fatal("expected a match -- positions 0/1 accept anything, only position 2 is real")
 	}
 	if h.ruleMatches(rule, []string{"echo", "hello", "there"}, nil) {
 		t.Fatal("expected no match -- position 2 fails")
+	}
+	// Positions 0/1 don't even need to be SUPPLIED, not just any value --
+	// same coercion-to-"" the option loop uses.
+	if h.ruleMatches(rule, []string{"echo"}, nil) {
+		t.Fatal("expected no match -- position 2 still has nothing to check against")
+	}
+}
+
+func TestRuleMatches_MissingPositionNeverSatisfiesRoots(t *testing.T) {
+	// End-to-end version of TestValueMatchesPattern_RootsEmptyValueNeverMatchesEvenWithRealRoots,
+	// through the actual ruleMatches loop that does the "missing position
+	// coerced to \"\"" step.
+	h, _ := newTestHandler(t)
+	rule := Rule{PositionalConstraints: []RuleChainPattern{mustWhitelist("^cat$"), rootsWhitelist()}, Tier: "ask"}
+	if h.ruleMatches(rule, []string{"cat"}, nil) {
+		t.Fatal("expected no match -- position 1 (a real {roots} constraint) was never supplied")
+	}
+}
+
+func TestRuleMatches_PositionalValueNotAllowed(t *testing.T) {
+	// There's no separate "must not be present" concept for positional
+	// args distinct from "no value" the way there is for options -- a
+	// positional value that's absent is matched as "" exactly like a
+	// valueless option, so "^$" works the same way here too: it requires
+	// the position be either absent or an explicit empty string.
+	h, _ := newTestHandler(t)
+	rule := Rule{
+		PositionalConstraints: []RuleChainPattern{mustWhitelist("^rm$"), valueNotAllowed()},
+		Tier:                  "deny",
+	}
+	if !h.ruleMatches(rule, []string{"rm"}, nil) {
+		t.Fatal("expected a match -- position 1 wasn't supplied at all")
+	}
+	if !h.ruleMatches(rule, []string{"rm", ""}, nil) {
+		t.Fatal("expected a match -- position 1 was explicitly supplied as an empty string")
+	}
+	if h.ruleMatches(rule, []string{"rm", "-rf"}, nil) {
+		t.Fatal("expected no match -- position 1 has a real value, which \"^$\" forbids")
 	}
 }
 
@@ -71,7 +121,7 @@ func TestRuleMatches_OptionEmptyStringWhitelistRequiresNoValue(t *testing.T) {
 	// string) is how a rule requires an option be present with NO value.
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{wildcard()},
+		PositionalConstraints: []RuleChainPattern{unconstrained()},
 		OptionConstraints:     []OptionConstraint{{Long: "force", Pattern: mustWhitelist("^$")}},
 	}
 	noValue := "no"
@@ -89,7 +139,7 @@ func TestRuleMatches_OptionEmptyStringWhitelistRequiresNoValue(t *testing.T) {
 func TestRuleMatches_OptionBlankPatternAcceptsAnyOrNoValue(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{wildcard()},
+		PositionalConstraints: []RuleChainPattern{unconstrained()},
 		OptionConstraints:     []OptionConstraint{{Short: "v", Pattern: RuleChainPattern{}}},
 	}
 	anything := "anything"
@@ -104,7 +154,7 @@ func TestRuleMatches_OptionBlankPatternAcceptsAnyOrNoValue(t *testing.T) {
 func TestRuleMatches_OptionValuePattern(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{wildcard()},
+		PositionalConstraints: []RuleChainPattern{unconstrained()},
 		OptionConstraints:     []OptionConstraint{{Long: "format", Pattern: mustWhitelist("^json$")}},
 	}
 	jsonValue := "json"
@@ -124,7 +174,7 @@ func TestMatchRule_FirstMatchWins(t *testing.T) {
 	h, _ := newTestHandler(t)
 	chain := RuleChain{Rules: []Rule{
 		{ID: 1, PositionalConstraints: []RuleChainPattern{mustWhitelist("^echo$")}, Tier: "ask"},
-		{ID: 2, PositionalConstraints: []RuleChainPattern{wildcard()}, Tier: "allow"},
+		{ID: 2, PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"},
 	}}
 	rule := h.matchRule(chain, []string{"echo"}, nil)
 	if rule == nil || rule.ID != 1 {
@@ -160,6 +210,25 @@ func TestValueMatchesPattern_RootsEmptyNeverMatches(t *testing.T) {
 	h := New(nil, nil) // zero roots
 	if h.valueMatchesPattern("/anything", rootsWhitelist()) {
 		t.Fatal("expected {roots} to never match with zero roots")
+	}
+}
+
+func TestValueMatchesPattern_RootsEmptyValueNeverMatchesEvenWithRealRoots(t *testing.T) {
+	// Regression test: valueInRoots used to treat an empty value as "use
+	// cwd instead" (mirroring how an empty req.Path means "use cwd" for
+	// other path-taking actions) -- harmless before ruleMatches always
+	// required real presence for a non-wildcard positional constraint, but
+	// once a missing positional value started being coerced to "" (so a
+	// blank pattern can mean "value not required" without its own
+	// sentinel), that same coercion reaching a REAL "{roots}" pattern
+	// would silently resolve to the cwd and match -- letting a rule
+	// requiring "position N must be a real path inside roots" pass when
+	// position N was never supplied at all. cwd is always inside roots by
+	// the daemon's own invariant, so this needs an actual root configured
+	// to catch a regression back to the old defaulting behavior.
+	h, _ := newTestHandler(t)
+	if h.valueMatchesPattern("", rootsWhitelist()) {
+		t.Fatal("expected an empty (missing) value to never satisfy {roots}, even with a real root configured")
 	}
 }
 
@@ -232,7 +301,7 @@ func TestRunRuleChainCall_RejectsWhenNoRuleMatches(t *testing.T) {
 
 func TestRunRuleChainCall_RequiresAtLeastTheBinary(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{wildcard()}, Tier: "allow"}}}})
+	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}}})
 	if _, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{}}); err == nil {
 		t.Fatal("expected an ActionError -- positional_args must include at least the binary")
 	}
@@ -240,7 +309,7 @@ func TestRunRuleChainCall_RequiresAtLeastTheBinary(t *testing.T) {
 
 func TestRunRuleChainCall_NoRootsMeansFail(t *testing.T) {
 	h := New(nil, nil)
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{wildcard()}, Tier: "allow"}}}})
+	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}}})
 	res, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{"echo"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -256,7 +325,7 @@ func TestRunRuleChainCall_PathRedirectsDirectoryUnconditionally(t *testing.T) {
 	if err := os.Mkdir(subdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{wildcard()}, Tier: "allow"}}}})
+	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}}})
 
 	res, err := h.Dispatch(&Request{
 		Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{"echo", "hi"}, Path: subdir,
@@ -277,7 +346,7 @@ func TestListRuleChains(t *testing.T) {
 	}
 
 	h.SetRuleChains([]RuleChain{
-		{ID: 1, Name: "test", Rules: []Rule{{PositionalConstraints: []RuleChainPattern{wildcard()}, Tier: "allow"}}},
+		{ID: 1, Name: "test", Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}},
 	})
 	res, err := h.Dispatch(&Request{Action: "list_rule_chains"})
 	if err != nil {

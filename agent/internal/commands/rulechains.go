@@ -8,21 +8,21 @@ import (
 	"strings"
 )
 
-// RuleChainPattern is one whitelist/blacklist pair, or a special sentinel,
-// for a single positional or option argument value -- see
-// auth_service/models.py's RuleChainPattern for the full reasoning (RE2,
-// "{roots}"). Compiled once at fetch/decode time (see
-// config/rulechains.go's FetchRuleChains), never per-match. Wildcard is
-// only ever set for a positional_constraints list entry that was the
-// literal "*" (meaning the position needn't even be present) -- an
-// OptionConstraint's Pattern is always a real (possibly fully blank)
-// pattern, never Wildcard; a blank Whitelist/Blacklist there already
-// means "matches any/no value" on its own, the same as an empty-string
-// RE2 pattern would.
+// RuleChainPattern is one whitelist/blacklist pair for a single positional
+// or option argument value -- see auth_service/models.py's RuleChainPattern
+// for the full reasoning (RE2, "{roots}"). Compiled once at fetch/decode
+// time (see config/rulechains.go's FetchRuleChains), never per-match. A
+// missing value (a position beyond what was supplied, or an option present
+// with no value) is matched as "" -- so a blank pattern (Whitelist/
+// Blacklist both nil) means "value not required" (an empty-string RE2
+// pattern already matches everything, including ""), a Whitelist of "^$"
+// means "value not allowed" (only "" satisfies it), and a real pattern
+// means "value required" (since "" won't satisfy most real patterns).
+// Fully symmetric between positional and option constraints -- neither
+// needs its own sentinel.
 type RuleChainPattern struct {
-	Wildcard       bool           // true iff this entry was the literal "*" -- always satisfied (positional only)
-	WhitelistRoots bool           // true iff whitelist was exactly "{roots}" (mutually exclusive with Wildcard)
-	Whitelist      *regexp.Regexp // nil if absent, Wildcard, or WhitelistRoots
+	WhitelistRoots bool           // true iff whitelist was exactly "{roots}"
+	Whitelist      *regexp.Regexp // nil if absent or WhitelistRoots
 	Blacklist      *regexp.Regexp // nil if absent
 }
 
@@ -144,13 +144,19 @@ func (h *Handler) runListRuleChains(_ *Request) (Result, error) {
 // "{roots}" whitelist. Unconditionally false with zero roots (matches
 // isConfined's own posture), so a "{roots}" constraint just never matches
 // rather than erroring -- the rule falls through to the next one, or the
-// terminal deny.
+// terminal deny. Also unconditionally false for an empty value -- unlike
+// resolvePath (where an empty req.Path deliberately means "use cwd" for
+// path-taking actions), an empty value reaching here means a positional
+// argument or option value was never actually supplied (see ruleMatches'
+// "missing value matched as \"\"" coercion) and must never be treated as
+// "so check the cwd instead", which would let a rule requiring a real
+// path-in-roots value silently pass on a value that was never given.
 func (h *Handler) valueInRoots(value string) bool {
+	if value == "" {
+		return false
+	}
 	base := h.getCwd()
 	expanded := expandUser(value)
-	if expanded == "" {
-		expanded = "."
-	}
 	var joined string
 	if filepath.IsAbs(expanded) {
 		joined = expanded
@@ -164,16 +170,12 @@ func (h *Handler) valueInRoots(value string) bool {
 	return h.isConfined(resolved)
 }
 
-// valueMatchesPattern reports whether value satisfies p -- Wildcard always
-// matches; WhitelistRoots checks containment via valueInRoots against the
-// RESOLVED path, while a blacklist, if also present, still checks the RAW
-// value (a deliberate asymmetry, documented on RuleChainPattern in
-// auth_service/models.py); otherwise a plain RE2 whitelist/blacklist check
-// against the raw value.
+// valueMatchesPattern reports whether value satisfies p -- WhitelistRoots
+// checks containment via valueInRoots against the RESOLVED path, while a
+// blacklist, if also present, still checks the RAW value (a deliberate
+// asymmetry, documented on RuleChainPattern in auth_service/models.py);
+// otherwise a plain RE2 whitelist/blacklist check against the raw value.
 func (h *Handler) valueMatchesPattern(value string, p RuleChainPattern) bool {
-	if p.Wildcard {
-		return true
-	}
 	if p.WhitelistRoots {
 		if !h.valueInRoots(value) {
 			return false
@@ -199,17 +201,20 @@ func findOption(options []RequestOption, short, long string) (RequestOption, boo
 // ruleMatches reports whether every constraint in r is satisfied by the
 // given structured call -- first-match-wins order is matchRule's job, not
 // this function's. Positions/options the model supplies but r doesn't
-// mention are simply not checked (don't-care), matching the same
-// "unconstrained" philosophy applied throughout this schema.
+// mention (i.e. beyond PositionalConstraints' length, or with no
+// OptionConstraint entry at all) are simply not checked (don't-care),
+// matching the same "unconstrained" philosophy applied throughout this
+// schema. A position within PositionalConstraints' length that the model
+// didn't actually supply is matched as "" -- same coercion the option loop
+// below already uses -- so a blank pattern there means "value not
+// required" without needing its own sentinel.
 func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []RequestOption) bool {
 	for i, pc := range r.PositionalConstraints {
-		if pc.Wildcard {
-			continue
+		value := ""
+		if i < len(positionalArgs) {
+			value = positionalArgs[i]
 		}
-		if i >= len(positionalArgs) {
-			return false // a real constraint with nothing supplied to check against
-		}
-		if !h.valueMatchesPattern(positionalArgs[i], pc) {
+		if !h.valueMatchesPattern(value, pc) {
 			return false
 		}
 	}

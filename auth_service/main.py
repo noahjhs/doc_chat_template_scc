@@ -84,16 +84,18 @@ def _first_validation_message(errors: list[dict]) -> str:
 
     Prefers a "value_error" entry (a validator's own deliberately-written
     message, e.g. RuleChainPattern's "Invalid regex ...") over a generic
-    structural one (e.g. "literal_error") when both are present -- which
-    happens for `RuleChainRuleCreateRequest.positional_constraints`' own
-    `Literal["*"] | RuleChainPattern` union field entries: a genuinely-
-    invalid RuleChainPattern payload fails BOTH union branches (it's not
-    the literal "*", *and* the model's own validator rejects it), and
-    pydantic reports every attempted branch's error in declaration order --
-    so without this, a real "invalid regex" mistake would confusingly
-    surface as "Input should be '*'" (the *other* branch's unrelated
+    structural one (e.g. "literal_error") when both are present -- this
+    mattered while positional_constraints/OptionConstraint.pattern were
+    still `Literal["*"] | RuleChainPattern` unions (since dropped in favor
+    of RuleChainPattern alone being expressive enough on its own): a
+    genuinely-invalid RuleChainPattern payload failed BOTH union branches
+    (not the literal "*", *and* the model's own validator rejected it),
+    and pydantic reports every attempted branch's error in declaration
+    order -- so without this, a real "invalid regex" mistake confusingly
+    surfaced as "Input should be '*'" (the *other* branch's unrelated
     failure) purely because that branch happened to be declared first.
-    Confirmed directly: this exact case was the trigger for adding this.
+    Kept as the general-purpose preference regardless, in case a future
+    union-typed field hits the same issue.
 
     pydantic v2 prefixes a validator's own raised ValueError text with
     "Value error, " in the formatted message, stripped so e.g. "Enter a
@@ -817,7 +819,7 @@ def remove_rule_chain_from_host(rule_chain_id: int, host_id: int, authorization:
 
 
 def _serialize_positional_constraints(constraints) -> str:
-    return json.dumps([c if c == "*" else c.model_dump() for c in constraints])
+    return json.dumps([c.model_dump() for c in constraints])
 
 
 def _serialize_option_constraints(constraints) -> str:

@@ -91,31 +91,27 @@ TIER_LABELS = {"deny": "Deny", "ask": "Ask", "allow": "Allow"}
 
 
 def _positional_rows(constraints):
-    rows = []
-    for c in constraints:
-        if c == "*":
-            rows.append({"whitelist": "", "blacklist": ""})
-        else:
-            rows.append({"whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or ""})
-    return rows
+    return [{"whitelist": c.get("whitelist") or "", "blacklist": c.get("blacklist") or ""} for c in constraints]
 
 
 def _build_positional_constraints(rows):
     """Mirrors RuleChainRuleCreateRequest's own validators client-side, so
     a mistake shows up immediately here rather than only after a round
     trip to auth_service -- the server re-validates regardless, so this is
-    purely for faster feedback, never the source of truth. A row with both
-    whitelist and blacklist left blank is unconstrained ("*") -- no
-    separate checkbox needed."""
-    result, errors = [], []
-    for row in rows:
-        whitelist = (row.get("whitelist") or "").strip() or None
-        blacklist = (row.get("blacklist") or "").strip() or None
-        result.append("*" if whitelist is None and blacklist is None else {"whitelist": whitelist, "blacklist": blacklist})
+    purely for faster feedback, never the source of truth. Every row is
+    just {whitelist, blacklist}, the one shape a positional constraint
+    takes -- a row with both left blank means "value not required" (a
+    missing value is matched as "", which an empty pattern always
+    matches), no "*" sentinel needed."""
+    result = [
+        {"whitelist": (row.get("whitelist") or "").strip() or None, "blacklist": (row.get("blacklist") or "").strip() or None}
+        for row in rows
+    ]
+    errors = []
     # Position 0 (the binary) is optional exactly like every other
     # position -- an empty list here means fully unconstrained, same as
     # any position beyond the list's length already is.
-    if result and isinstance(result[0], dict) and result[0].get("whitelist") == "{roots}":
+    if result and result[0].get("whitelist") == "{roots}":
         errors.append('Position 0 (the binary) can never use "{roots}" -- it is never a path.')
     return result, errors
 
@@ -158,14 +154,9 @@ def _build_option_constraints(rows):
 
 
 def _uses_roots(positional_constraints, option_constraints):
-    for c in positional_constraints:
-        if isinstance(c, dict) and c.get("whitelist") == "{roots}":
-            return True
-    for c in option_constraints:
-        pattern = c.get("pattern")
-        if isinstance(pattern, dict) and pattern.get("whitelist") == "{roots}":
-            return True
-    return False
+    if any(c.get("whitelist") == "{roots}" for c in positional_constraints):
+        return True
+    return any((c.get("pattern") or {}).get("whitelist") == "{roots}" for c in option_constraints)
 
 
 def _render_rule_editor(chain, rule):

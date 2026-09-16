@@ -67,16 +67,20 @@ class RuleChainPattern(BaseModel):
 
     Both fields are optional -- an absent whitelist/blacklist behaves
     exactly like an empty-string regex would (RE2 matches everything with
-    an empty pattern), so a fully blank {whitelist: null, blacklist:
-    null} means "matches any value" (see OptionConstraint below, whose
-    pattern is always exactly one of these -- to require NO value, use a
-    whitelist of "^$", which only matches the empty string; a supplied
-    option with no value is matched as "" for this purpose).
-
-    Distinct from the bare wildcard "*" used directly as a
-    positional_constraints list entry (see RuleChainRuleCreateRequest
-    below) -- "*" means the position isn't even required to be present,
-    not just "any value accepted"."""
+    an empty pattern). This is the ONLY shape a constraint takes, for both
+    a positional_constraints list entry and an OptionConstraint's pattern
+    (see RuleChainRuleCreateRequest/OptionConstraint below) -- no "*" or
+    other sentinel needed, because a MISSING value (a positional argument
+    beyond what was supplied, or an option present with no value) is
+    matched as "" for this purpose. That gives exactly the three states
+    "value required"/"not required"/"not allowed" for free:
+      - fully blank ({whitelist: null, blacklist: null}): "" already
+        satisfies an empty pattern, so this matches whether a value was
+        actually supplied or not -- "value not required".
+      - whitelist "^$" (matches only ""): satisfied only by a missing
+        value (or an explicit empty string) -- "value not allowed".
+      - any other real pattern: "" won't usually satisfy it, so a value
+        must actually have been supplied -- "value required"."""
 
     whitelist: str | None = Field(default=None, max_length=500)
     blacklist: str | None = Field(default=None, max_length=500)
@@ -118,20 +122,19 @@ class OptionConstraint(BaseModel):
         return self
 
 
-def _pattern_uses_roots(entry) -> bool:
-    return isinstance(entry, RuleChainPattern) and entry.whitelist == "{roots}"
+def _pattern_uses_roots(pattern: RuleChainPattern) -> bool:
+    return pattern.whitelist == "{roots}"
 
 
 class RuleChainRuleCreateRequest(BaseModel):
     """One rule within a Rule Chain -- see rule_chain_rules' own schema
     comment in db.py for the full shape. positional_constraints' list
     index IS the argv position (index 0 = the binary). Position 0 is
-    optional exactly like every other position -- an empty list, or an
-    entry explicitly marked "*", both mean "unconstrained" there too;
-    there's nothing special required about constraining the binary
-    itself."""
+    optional exactly like every other position -- an empty list, or a
+    blank entry, both mean "value not required" there too; there's
+    nothing special required about constraining the binary itself."""
 
-    positional_constraints: list[Literal["*"] | RuleChainPattern] = Field(default_factory=list)
+    positional_constraints: list[RuleChainPattern] = Field(default_factory=list)
     option_constraints: list[OptionConstraint] = Field(default_factory=list)
     tier: Literal["allow", "ask", "deny"] = "ask"
 
@@ -159,7 +162,7 @@ class RuleChainRuleUpdateRequest(BaseModel):
     through RuleChainRuleCreateRequest -- a partial patch can't be
     validated in isolation."""
 
-    positional_constraints: list[Literal["*"] | RuleChainPattern] | None = None
+    positional_constraints: list[RuleChainPattern] | None = None
     option_constraints: list[OptionConstraint] | None = None
     tier: Literal["allow", "ask", "deny"] | None = None
 
@@ -167,7 +170,7 @@ class RuleChainRuleUpdateRequest(BaseModel):
 class RuleChainRuleInfo(BaseModel):
     id: int
     position: int
-    positional_constraints: list[Literal["*"] | RuleChainPattern]
+    positional_constraints: list[RuleChainPattern]
     option_constraints: list[OptionConstraint]
     tier: str
 

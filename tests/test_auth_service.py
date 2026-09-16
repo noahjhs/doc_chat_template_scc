@@ -598,15 +598,37 @@ def test_rule_chain_rule_accepts_empty_positional_constraints(client):
     assert created.json()["positional_constraints"] == []
 
 
-def test_rule_chain_rule_accepts_wildcard_at_any_position(client):
+def test_rule_chain_rule_accepts_blank_pattern_at_any_position(client):
     signup = _signup(client, "hank3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     chain = _create_rule_chain(client, headers).json()
-    # "*" at position 0 (any binary) and mid-list (skip position 1, still
-    # constrain position 2) both accepted.
-    created = _add_rule(client, headers, chain["id"], ["*", "*", {"whitelist": "^build$"}])
+    # A blank pattern at position 0 (any binary) and mid-list (position 1
+    # not required, position 2 still constrained) both accepted -- no "*"
+    # sentinel needed, a missing value is matched as "" against the blank
+    # pattern's empty whitelist/blacklist, which matches everything.
+    created = _add_rule(client, headers, chain["id"], [{}, {}, {"whitelist": "^build$"}])
     assert created.status_code == 201
-    assert created.json()["positional_constraints"] == ["*", "*", {"whitelist": "^build$", "blacklist": None}]
+    assert created.json()["positional_constraints"] == [
+        {"whitelist": None, "blacklist": None},
+        {"whitelist": None, "blacklist": None},
+        {"whitelist": "^build$", "blacklist": None},
+    ]
+
+
+def test_rule_chain_rule_positional_value_not_allowed(client):
+    # No dedicated "position must be absent" concept -- a missing
+    # positional value is matched as "", same as a valueless option, so
+    # "^$" works identically here: it requires the position be either
+    # absent or an explicit empty string.
+    signup = _signup(client, "hank3b")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    chain = _create_rule_chain(client, headers).json()
+    created = _add_rule(client, headers, chain["id"], [{"whitelist": "^rm$"}, {"whitelist": "^$"}])
+    assert created.status_code == 201
+    assert created.json()["positional_constraints"] == [
+        {"whitelist": "^rm$", "blacklist": None},
+        {"whitelist": "^$", "blacklist": None},
+    ]
 
 
 def test_rule_chain_rule_rejects_roots_on_position_zero(client):
@@ -621,9 +643,9 @@ def test_rule_chain_rule_rejects_roots_with_allow_tier(client):
     signup = _signup(client, "judy3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     chain = _create_rule_chain(client, headers).json()
-    denied = _add_rule(client, headers, chain["id"], ["*", {"whitelist": "{roots}"}], tier="allow")
+    denied = _add_rule(client, headers, chain["id"], [{}, {"whitelist": "{roots}"}], tier="allow")
     assert denied.status_code == 422
-    allowed = _add_rule(client, headers, chain["id"], ["*", {"whitelist": "{roots}"}], tier="ask")
+    allowed = _add_rule(client, headers, chain["id"], [{}, {"whitelist": "{roots}"}], tier="ask")
     assert allowed.status_code == 201
 
 
@@ -649,7 +671,7 @@ def test_rule_chain_rule_option_pattern_states_round_trip(client):
         client,
         headers,
         chain["id"],
-        ["*"],
+        [{}],
         option_constraints=[
             {"long": "force", "pattern": {"whitelist": "^$"}},  # must be present, no value
             {"short": "v", "pattern": {}},  # must be present, any/no value
@@ -667,7 +689,7 @@ def test_rule_chain_option_constraint_requires_short_or_long(client):
     signup = _signup(client, "mallory1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     chain = _create_rule_chain(client, headers).json()
-    r = _add_rule(client, headers, chain["id"], ["*"], option_constraints=[{}])
+    r = _add_rule(client, headers, chain["id"], [{}], option_constraints=[{}])
     assert r.status_code == 422
 
 
@@ -707,7 +729,7 @@ def test_rule_chain_daemon_facing_fetch(client):
     ).json()
     chain = _create_rule_chain(client, headers).json()
     r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}]).json()
-    r2 = _add_rule(client, headers, chain["id"], ["*"], tier="deny").json()
+    r2 = _add_rule(client, headers, chain["id"], [{}], tier="deny").json()
     client.put(f"/rule-chains/{chain['id']}/hosts/{pair_a['host_id']}", headers=headers)
 
     device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}

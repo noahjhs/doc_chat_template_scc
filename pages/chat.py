@@ -517,14 +517,13 @@ def _value_in_roots(value, roots):
 
 def _pattern_matches(value, pattern, roots):
     """Python port of the Go daemon's valueMatchesPattern -- pattern is
-    always a real {"whitelist":.., "blacklist":..} object here (the caller
-    already special-cases positional's "*" sentinel before ever reaching
-    this function; options no longer have a sentinel at all -- see
-    _rule_matches below). Both fields absent/blank means "matches any/no
-    value", same as an empty-string RE2 pattern would. Uses google-re2
-    (the same RE2 engine Go's stdlib regexp targets), not stdlib re, to
-    preserve the no-catastrophic-backtracking property the whole schema is
-    built around."""
+    always a real {"whitelist":.., "blacklist":..} object, the one shape
+    both positional_constraints entries and OptionConstraint.pattern take
+    (no "*" sentinel anywhere). Both fields absent/blank means "matches
+    any/no value", same as an empty-string RE2 pattern would. Uses
+    google-re2 (the same RE2 engine Go's stdlib regexp targets), not
+    stdlib re, to preserve the no-catastrophic-backtracking property the
+    whole schema is built around."""
     whitelist = pattern.get("whitelist")
     blacklist = pattern.get("blacklist")
     if whitelist == "{roots}":
@@ -547,13 +546,13 @@ def _find_option(options, short, long):
 def _rule_matches(rule, positional_args, options, roots):
     """Python port of the Go daemon's ruleMatches -- see
     agent/internal/commands/rulechains.go for the authoritative version
-    this mirrors."""
+    this mirrors. A positional_constraints entry beyond what was actually
+    supplied is matched as "" -- same coercion the option loop below uses
+    for a missing value -- so a blank pattern there means "value not
+    required" with no separate sentinel needed."""
     for i, pattern in enumerate(rule["positional_constraints"]):
-        if pattern == "*":
-            continue
-        if i >= len(positional_args):
-            return False  # a real constraint with nothing supplied to check against
-        if not _pattern_matches(positional_args[i], pattern, roots):
+        value = positional_args[i] if i < len(positional_args) else ""
+        if not _pattern_matches(value, pattern, roots):
             return False
     for constraint in rule["option_constraints"]:
         supplied = _find_option(options, constraint.get("short"), constraint.get("long"))

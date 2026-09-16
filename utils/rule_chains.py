@@ -6,16 +6,15 @@ always see the exact same rendering of the exact same rule."""
 
 
 def describe_pattern(pattern):
-    """Prose rendering of one positional_constraints entry ("*", meaning
-    the position needn't even be present, or a real {"whitelist":..,
-    "blacklist":..} object) or an option's pattern field (always the
-    latter -- an option's own presence is unconditional, only its value is
-    optionally constrained; a missing value is matched as "", so "^$" is
-    called out specially as "no value" rather than the literal regex)."""
-    if pattern == "*":
-        return "the position needn't be present"
+    """Prose rendering of one {"whitelist":.., "blacklist":..} pattern --
+    the one shape both a positional_constraints entry and an
+    OptionConstraint's pattern take (no "*" sentinel anywhere). A missing
+    value (a positional argument beyond what was supplied, or an option
+    present with no value) is matched as "", so a blank pattern means
+    "value not required" (an empty pattern matches "" too) and a
+    whitelist of "^$" (matches only "") means "value not allowed"."""
     if pattern.get("whitelist") == "^$" and not pattern.get("blacklist"):
-        return "no value"
+        return "value not allowed"
     parts = []
     if pattern.get("whitelist") == "{roots}":
         parts.append("must be inside one of this host's addressable directories")
@@ -23,7 +22,7 @@ def describe_pattern(pattern):
         parts.append(f"must match {pattern['whitelist']!r}")
     if pattern.get("blacklist"):
         parts.append(f"must not match {pattern['blacklist']!r}")
-    return ", ".join(parts) if parts else "unconstrained"
+    return ", ".join(parts) if parts else "value not required"
 
 
 def describe_rule(rule):
