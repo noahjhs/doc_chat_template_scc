@@ -88,11 +88,6 @@ rule_chains = st.session_state["_rule_chains"]
 TIER_OPTIONS = ["deny", "ask", "allow"]
 TIER_LABELS = {"deny": "Deny", "ask": "Ask", "allow": "Allow"}
 
-PATTERN_MODE_NO_VALUE = "No value"
-PATTERN_MODE_ANY_VALUE = "Any value"
-PATTERN_MODE_PATTERN = "Specific pattern"
-PATTERN_MODES = [PATTERN_MODE_NO_VALUE, PATTERN_MODE_ANY_VALUE, PATTERN_MODE_PATTERN]
-
 
 def _positional_rows(constraints):
     rows = []
@@ -128,17 +123,17 @@ def _option_rows(constraints):
     for c in constraints:
         pattern = c.get("pattern")
         if pattern is None:
-            mode, whitelist, blacklist = PATTERN_MODE_NO_VALUE, "", ""
+            allow_value, whitelist, blacklist = False, "", ""
         elif pattern == "*":
-            mode, whitelist, blacklist = PATTERN_MODE_ANY_VALUE, "", ""
+            allow_value, whitelist, blacklist = True, "", ""
         else:
-            mode = PATTERN_MODE_PATTERN
+            allow_value = True
             whitelist, blacklist = pattern.get("whitelist") or "", pattern.get("blacklist") or ""
         rows.append(
             {
                 "short": c.get("short") or "",
                 "long": c.get("long") or "",
-                "pattern_mode": mode,
+                "allow_value": allow_value,
                 "whitelist": whitelist,
                 "blacklist": blacklist,
             }
@@ -151,25 +146,26 @@ def _build_option_constraints(rows):
     row the table is seeded with) is treated as an unused placeholder and
     silently skipped -- option_constraints=[] (no options at all) is
     perfectly valid, and erroring on the untouched seed row would make a
-    brand-new rule with no options unsaveable."""
+    brand-new rule with no options unsaveable.
+
+    "Allow value?" unchecked means the option must be present with NO
+    value -- whitelist/blacklist are ignored in that case (there's no way
+    to grey out cells in one row based on another cell in the same
+    st.data_editor, so this is enforced here rather than visually).
+    Checked with both fields left blank means any/no value is accepted;
+    checked with either filled means a value is required matching them."""
     result, errors = [], []
-    for i, row in enumerate(rows):
+    for row in rows:
         short = (row.get("short") or "").strip() or None
         long = (row.get("long") or "").strip() or None
         if not short and not long:
             continue
-        mode = row.get("pattern_mode") or PATTERN_MODE_NO_VALUE
-        if mode == PATTERN_MODE_NO_VALUE:
+        if not row.get("allow_value"):
             pattern = None
-        elif mode == PATTERN_MODE_ANY_VALUE:
-            pattern = "*"
         else:
             whitelist = (row.get("whitelist") or "").strip() or None
             blacklist = (row.get("blacklist") or "").strip() or None
-            if whitelist is None and blacklist is None:
-                errors.append(f"Option row {i + 1}: provide a whitelist and/or blacklist for 'Specific pattern'.")
-                continue
-            pattern = {"whitelist": whitelist, "blacklist": blacklist}
+            pattern = "*" if whitelist is None and blacklist is None else {"whitelist": whitelist, "blacklist": blacklist}
         result.append({"short": short, "long": long, "pattern": pattern})
     return result, errors
 
@@ -195,7 +191,7 @@ def _render_rule_editor(chain, rule):
     is_new = rule is None
     key_suffix = "new" if is_new else rule["id"]
     blank_positional_row = {"whitelist": "", "blacklist": ""}
-    blank_option_row = {"short": "", "long": "", "pattern_mode": PATTERN_MODE_NO_VALUE, "whitelist": "", "blacklist": ""}
+    blank_option_row = {"short": "", "long": "", "allow_value": False, "whitelist": "", "blacklist": ""}
     saved_positional_rows = [blank_positional_row] if is_new else (_positional_rows(rule["positional_constraints"]) or [blank_positional_row])
     option_rows = [] if is_new else _option_rows(rule["option_constraints"])
     tier_default = "ask" if is_new else rule["tier"]
@@ -280,9 +276,9 @@ def _render_rule_editor(chain, rule):
 
         st.caption(
             "Options -- at least one of short/long is required per row (leave both blank to skip an "
-            "unused row). \"No value\" means the option must be present with no value; \"Any value\" "
-            "accepts the option with or without a value; \"Specific pattern\" requires a value matching "
-            "the whitelist/blacklist."
+            "unused row). Leave \"Allow value?\" unchecked for a plain valueless flag (the option must "
+            "be present with no value); check it and leave whitelist/blacklist blank to accept any "
+            "value; check it and fill in whitelist/blacklist to require a matching value."
         )
         option_edited = st.data_editor(
             option_rows or [blank_option_row],
@@ -291,11 +287,11 @@ def _render_rule_editor(chain, rule):
             column_config={
                 "short": st.column_config.TextColumn("Short (-f)"),
                 "long": st.column_config.TextColumn("Long (--force)"),
-                "pattern_mode": st.column_config.SelectboxColumn("Value", options=PATTERN_MODES, required=True),
+                "allow_value": st.column_config.CheckboxColumn("Allow value?", default=False),
                 "whitelist": st.column_config.TextColumn("Whitelist (regex)"),
                 "blacklist": st.column_config.TextColumn("Blacklist (regex)"),
             },
-            column_order=["short", "long", "pattern_mode", "whitelist", "blacklist"],
+            column_order=["short", "long", "allow_value", "whitelist", "blacklist"],
             hide_index=True,
         )
 
@@ -460,7 +456,13 @@ for chain in rule_chains:
                         _refresh()
                         st.rerun()
             with row[2]:
-                st.caption(describe_rule(rule))
+                # st.text, not st.caption/st.markdown -- describe_rule()
+                # embeds raw regex source (arbitrary "$", "^", "*", "_",
+                # backticks...), and Streamlit's markdown renderer treats
+                # "$...$" as inline LaTeX math, which mangled patterns like
+                # "^npm$" into garbled math notation when this used
+                # st.caption. st.text does no Markdown/HTML parsing at all.
+                st.text(describe_rule(rule))
             with row[3]:
                 if st.button("Edit", key=f"edit_{rule['id']}"):
                     st.session_state[editing_key] = not st.session_state.get(editing_key, False)
