@@ -118,16 +118,19 @@ def _pattern_uses_roots(entry) -> bool:
 class RuleChainRuleCreateRequest(BaseModel):
     """One rule within a Rule Chain -- see rule_chain_rules' own schema
     comment in db.py for the full shape. positional_constraints' list
-    index IS the argv position (index 0 = the binary, always required);
-    entries beyond this list, or explicitly marked "*", are unconstrained."""
+    index IS the argv position (index 0 = the binary). Position 0 is
+    optional exactly like every other position -- an empty list, or an
+    entry explicitly marked "*", both mean "unconstrained" there too;
+    there's nothing special required about constraining the binary
+    itself."""
 
-    positional_constraints: list[Literal["*"] | RuleChainPattern] = Field(min_length=1)
+    positional_constraints: list[Literal["*"] | RuleChainPattern] = Field(default_factory=list)
     option_constraints: list[OptionConstraint] = Field(default_factory=list)
     tier: Literal["allow", "ask", "deny"] = "ask"
 
     @model_validator(mode="after")
     def _validate_rule(self):
-        if _pattern_uses_roots(self.positional_constraints[0]):
+        if self.positional_constraints and _pattern_uses_roots(self.positional_constraints[0]):
             raise ValueError('Position 0 (the binary) can never use "{roots}" -- it is never a path.')
         uses_roots = any(_pattern_uses_roots(c) for c in self.positional_constraints) or any(
             _pattern_uses_roots(oc.pattern) for oc in self.option_constraints
@@ -149,7 +152,7 @@ class RuleChainRuleUpdateRequest(BaseModel):
     through RuleChainRuleCreateRequest -- a partial patch can't be
     validated in isolation."""
 
-    positional_constraints: list[Literal["*"] | RuleChainPattern] | None = Field(default=None, min_length=1)
+    positional_constraints: list[Literal["*"] | RuleChainPattern] | None = None
     option_constraints: list[OptionConstraint] | None = None
     tier: Literal["allow", "ask", "deny"] | None = None
 

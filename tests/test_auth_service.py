@@ -586,11 +586,16 @@ def test_rule_chain_rule_reorder_rejects_non_permutation(client):
     assert unknown_id.status_code == 400
 
 
-def test_rule_chain_rule_requires_position_zero(client):
+def test_rule_chain_rule_accepts_empty_positional_constraints(client):
+    # Position 0 (the binary) is optional, same as every other position --
+    # an empty list means the rule doesn't constrain the binary or any
+    # argument at all (still subject to whatever option_constraints say).
     signup = _signup(client, "gina3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     chain = _create_rule_chain(client, headers).json()
-    assert _add_rule(client, headers, chain["id"], []).status_code == 422
+    created = _add_rule(client, headers, chain["id"], [])
+    assert created.status_code == 201
+    assert created.json()["positional_constraints"] == []
 
 
 def test_rule_chain_rule_accepts_wildcard_at_any_position(client):

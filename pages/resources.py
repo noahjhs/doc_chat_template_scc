@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from utils.auth import (
@@ -111,9 +112,10 @@ def _build_positional_constraints(rows):
         whitelist = (row.get("whitelist") or "").strip() or None
         blacklist = (row.get("blacklist") or "").strip() or None
         result.append("*" if whitelist is None and blacklist is None else {"whitelist": whitelist, "blacklist": blacklist})
-    if not result:
-        errors.append("At least one positional constraint (position 0, the binary) is required.")
-    elif isinstance(result[0], dict) and result[0].get("whitelist") == "{roots}":
+    # Position 0 (the binary) is optional exactly like every other
+    # position -- an empty list here means fully unconstrained, same as
+    # any position beyond the list's length already is.
+    if result and isinstance(result[0], dict) and result[0].get("whitelist") == "{roots}":
         errors.append('Position 0 (the binary) can never use "{roots}" -- it is never a path.')
     return result, errors
 
@@ -311,7 +313,10 @@ def _render_rule_editor(chain, rule):
     is_new = rule is None
     key_suffix = "new" if is_new else rule["id"]
     blank_positional_row = {"whitelist": "", "blacklist": ""}
-    saved_positional_rows = [blank_positional_row] if is_new else (_positional_rows(rule["positional_constraints"]) or [blank_positional_row])
+    # Position 0 (the binary) is optional, same as every other position --
+    # an empty list here is a fully legitimate, intentional "unconstrained"
+    # state, not a placeholder needing a phantom blank row.
+    saved_positional_rows = [] if is_new else _positional_rows(rule["positional_constraints"])
     tier_default = "ask" if is_new else rule["tier"]
     _init_option_rows(chain, rule, key_suffix)
 
@@ -362,8 +367,8 @@ def _render_rule_editor(chain, rule):
         st.session_state[generation_key] = st.session_state.get(generation_key, 0) + 1
 
     st.number_input(
-        "Number of positional argument rows (row 0 = binary)",
-        min_value=1,
+        "Number of positional argument rows (row 0 = binary, optional like every other position)",
+        min_value=0,
         step=1,
         key=count_key,
         on_change=_resize_positional_rows,
@@ -378,10 +383,16 @@ def _render_rule_editor(chain, rule):
     with st.form(f"rule_form_{chain['id']}_{key_suffix}"):
         st.caption(
             "Positional constraints -- the row number IS the argv position (row 0 is the binary "
-            "itself, always required). Leave both fields blank to leave that position unconstrained."
+            "itself). Leave both fields blank, or leave the row out entirely, to leave that position "
+            "unconstrained."
         )
+        # A plain list of row dicts renders with no columns at all once it's
+        # empty (Streamlit can't infer a schema from zero rows) -- same
+        # issue the options table used to hit. An explicitly-columned empty
+        # DataFrame keeps the headers (and the "+" add-row affordance)
+        # showing even at a genuine 0-row count.
         positional_edited = st.data_editor(
-            working_rows,
+            pd.DataFrame(working_rows, columns=["whitelist", "blacklist"]),
             num_rows="dynamic",
             key=f"positional_editor_{chain['id']}_{key_suffix}_{generation}",
             column_config={
@@ -423,7 +434,9 @@ def _render_rule_editor(chain, rule):
         st.rerun()
 
     if submitted:
-        positional_constraints, errors = _build_positional_constraints(positional_edited)
+        # data_editor returns the same type it was given -- a DataFrame in,
+        # a DataFrame out -- so convert back to plain dicts before building.
+        positional_constraints, errors = _build_positional_constraints(positional_edited.to_dict("records"))
         option_constraints, option_errors = _build_option_constraints(current_option_rows)
         errors += option_errors
         if _uses_roots(positional_constraints, option_constraints) and tier == "allow":

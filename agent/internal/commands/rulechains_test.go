@@ -35,6 +35,22 @@ func TestRuleMatches_Positional(t *testing.T) {
 	}
 }
 
+func TestRuleMatches_EmptyPositionalConstraintsMatchAnyBinary(t *testing.T) {
+	// Position 0 (the binary) is optional, same as every other position --
+	// an empty list is a fully legitimate "unconstrained" rule, not a
+	// degenerate/invalid one; it simply never enters the loop in
+	// ruleMatches, so any positional_args (including any binary) satisfy
+	// it, same as any position beyond a shorter list already does.
+	h, _ := newTestHandler(t)
+	rule := Rule{Tier: "allow"}
+	if !h.ruleMatches(rule, []string{"echo", "hello"}, nil) {
+		t.Fatal("expected a match -- no positional constraints at all")
+	}
+	if !h.ruleMatches(rule, []string{"rm", "-rf", "/"}, nil) {
+		t.Fatal("expected a match -- still no positional constraints, regardless of the binary")
+	}
+}
+
 func TestRuleMatches_WildcardSkipsEarlyPosition(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
