@@ -143,11 +143,7 @@ CREATE TABLE IF NOT EXISTS policy_layer_rules (
     -- argv position (index 0 = the binary itself); a value beyond the
     -- list's length, or a fully blank entry, is unconstrained ("value not
     -- required" -- a missing value is matched as "", which a blank
-    -- pattern always matches; no "*" sentinel needed). "{roots}" is a
-    -- reserved whitelist value (see models.Pattern) meaning "must resolve
-    -- to a path inside this host's own addressable directories" --
-    -- expanded by the Go daemon via its existing resolvePath/roots
-    -- machinery, not a regex.
+    -- pattern always matches; no "*" sentinel needed).
     positional_constraints TEXT NOT NULL,
     -- JSON list of {"short":.., "long":.., "pattern": {"whitelist":..,
     -- "blacklist":..}} -- "options" (not "flags"): including one at all

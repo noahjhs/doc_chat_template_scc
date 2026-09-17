@@ -359,23 +359,6 @@ def _user_owns_host(db, user_id: int, host_id: int) -> bool:
     )
 
 
-def _host_workspace(db, user_id: int, host_id: int) -> list[str]:
-    """Live, daemon-reported workspace for one of the caller's own hosts --
-    same "only when actually connected" posture as list_hosts' own
-    HostInfo.workspace (a disconnected host has no live roots to check
-    "{roots}" containment against). Returns [] rather than raising for an
-    unowned/unconnected host -- ownership is checked separately by the
-    caller so the 404 message stays uniform."""
-    row = db.execute("SELECT routing_key FROM hosts WHERE id = ?", (host_id,)).fetchone()
-    if row is None:
-        return []
-    with _attached_lock:
-        att = _attached.get(row["routing_key"])
-    if att is None or att["user_id"] != user_id or att["local_agent_url"] is None:
-        return []
-    return att["workspace"]
-
-
 def _user_owns_environment(db, user_id: int, environment_id: int) -> bool:
     return (
         db.execute(
@@ -477,7 +460,6 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
             "host_id": r["id"],
             "url": att["local_agent_url"],
             "api_key": att["command_key"],
-            "workspace": att["workspace"],
             "policy_layers": layers_by_host.get(r["id"], []),
         }
     return configs
@@ -944,10 +926,11 @@ def update_policy_layer_rule(
     policy_layer_id: int, rule_id: int, body: PolicyLayerRuleUpdateRequest, authorization: str = Header(default="")
 ):
     """Re-validates the MERGED (current row + patch) shape by reconstructing
-    it through PolicyLayerRuleCreateRequest -- a partial patch can't be
-    cross-field-validated (position 0, "{roots}"+tier) in isolation, same
-    merge-then-revalidate trick this service uses for every other partial
-    update (see e.g. ProfileUpdateRequest's own docstring)."""
+    it through PolicyLayerRuleCreateRequest -- a partial patch's individual
+    fields (e.g. a lone pattern's regex) can't be validated in isolation
+    from the rest of the rule, same merge-then-revalidate trick this
+    service uses for every other partial update (see e.g.
+    ProfileUpdateRequest's own docstring)."""
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
@@ -1036,16 +1019,10 @@ def eval_policy(body: PolicyEvalRequest, authorization: str = Header(default="")
         for policy_layer_id in body.policy_layer_ids:
             if not _user_owns_policy_layer(db, user_id, policy_layer_id):
                 raise HTTPException(status_code=404, detail="Policy layer not found.")
-        if body.host_id is not None:
-            if not _user_owns_host(db, user_id, body.host_id):
-                raise HTTPException(status_code=404, detail="Host not found.")
-            roots = _host_workspace(db, user_id, body.host_id)
-        else:
-            roots = body.roots or []
         layers = [(policy_layer_id, _policy_layer_rules(db, policy_layer_id)) for policy_layer_id in body.policy_layer_ids]
     composed = compose_policy(layers)
     options = [o.model_dump() for o in body.options]
-    matched_layer_id, matched_rule = match_policy(composed, body.positional_args, options, roots)
+    matched_layer_id, matched_rule = match_policy(composed, body.positional_args, options)
     tier = matched_rule.tier if matched_rule else "deny"
     return PolicyEvalResponse(tier=tier, matched_layer_id=matched_layer_id, matched_rule=matched_rule)
 

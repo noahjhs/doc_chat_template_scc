@@ -24,10 +24,6 @@ func valueNotAllowed() Pattern {
 	return mustWhitelist("^$")
 }
 
-func rootsWhitelist() Pattern {
-	return Pattern{WhitelistRoots: true}
-}
-
 func TestRuleMatches_Positional(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
@@ -77,17 +73,6 @@ func TestRuleMatches_UnconstrainedEarlyPositionDoesntBlockALaterOne(t *testing.T
 	// same coercion-to-"" the option loop uses.
 	if h.ruleMatches(rule, []string{"echo"}, nil) {
 		t.Fatal("expected no match -- position 2 still has nothing to check against")
-	}
-}
-
-func TestRuleMatches_MissingPositionNeverSatisfiesRoots(t *testing.T) {
-	// End-to-end version of TestValueMatchesPattern_RootsEmptyValueNeverMatchesEvenWithRealRoots,
-	// through the actual ruleMatches loop that does the "missing position
-	// coerced to \"\"" step.
-	h, _ := newTestHandler(t)
-	rule := Rule{PositionalConstraints: []Pattern{mustWhitelist("^cat$"), rootsWhitelist()}, Tier: "ask"}
-	if h.ruleMatches(rule, []string{"cat"}, nil) {
-		t.Fatal("expected no match -- position 1 (a real {roots} constraint) was never supplied")
 	}
 }
 
@@ -226,59 +211,6 @@ func TestMatchPolicy_NoLayersMeansTerminalDeny(t *testing.T) {
 	h, _ := newTestHandler(t)
 	if h.matchPolicy(nil, []string{"echo"}, nil) != nil {
 		t.Fatal("expected no match -- zero layers attached composes to zero rules")
-	}
-}
-
-func TestValueMatchesPattern_Roots(t *testing.T) {
-	h, root := newTestHandler(t)
-	inside := root + "/inside.txt"
-	if err := os.WriteFile(inside, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !h.valueMatchesPattern(inside, rootsWhitelist()) {
-		t.Fatal("expected a path inside a root to satisfy {roots}")
-	}
-	if h.valueMatchesPattern("/etc/passwd", rootsWhitelist()) {
-		t.Fatal("expected a path outside every root to fail {roots}")
-	}
-}
-
-func TestValueMatchesPattern_RootsEmptyNeverMatches(t *testing.T) {
-	h := New(nil, nil) // zero roots
-	if h.valueMatchesPattern("/anything", rootsWhitelist()) {
-		t.Fatal("expected {roots} to never match with zero roots")
-	}
-}
-
-func TestValueMatchesPattern_RootsEmptyValueNeverMatchesEvenWithRealRoots(t *testing.T) {
-	// Regression test: valueInRoots used to treat an empty value as "use
-	// cwd instead" (mirroring how an empty req.Path means "use cwd" for
-	// other path-taking actions) -- harmless before ruleMatches always
-	// required real presence for a non-wildcard positional constraint, but
-	// once a missing positional value started being coerced to "" (so a
-	// blank pattern can mean "value not required" without its own
-	// sentinel), that same coercion reaching a REAL "{roots}" pattern
-	// would silently resolve to the cwd and match -- letting a rule
-	// requiring "position N must be a real path inside roots" pass when
-	// position N was never supplied at all. cwd is always inside roots by
-	// the daemon's own invariant, so this needs an actual root configured
-	// to catch a regression back to the old defaulting behavior.
-	h, _ := newTestHandler(t)
-	if h.valueMatchesPattern("", rootsWhitelist()) {
-		t.Fatal("expected an empty (missing) value to never satisfy {roots}, even with a real root configured")
-	}
-}
-
-func TestValueMatchesPattern_RootsWithBlacklistChecksRawValue(t *testing.T) {
-	h, root := newTestHandler(t)
-	blocked := root + "/blocked.txt"
-	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	p := rootsWhitelist()
-	p.Blacklist = regexp.MustCompile("blocked")
-	if h.valueMatchesPattern(blocked, p) {
-		t.Fatal("expected the blacklist (checked against the raw value) to reject this even though it's inside roots")
 	}
 }
 

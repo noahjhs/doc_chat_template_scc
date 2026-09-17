@@ -74,10 +74,17 @@ class Pattern(BaseModel):
     chosen specifically for RE2's guaranteed-linear-time matching, since
     these patterns evaluate agent-influenced input) against one argument
     value. Matches if (the value matches whitelist) AND (the value does
-    NOT match blacklist). whitelist may instead be the literal reserved
-    string "{roots}", meaning "must resolve to a path inside this host's
-    own addressable directories" -- expanded by the Go daemon via its
-    existing resolvePath/roots machinery, never compiled as a regex.
+    NOT match blacklist).
+
+    An earlier version had a "{roots}" whitelist sentinel meaning "must
+    resolve to a path inside this host's own addressable directories" --
+    removed for simplicity (the daemon's own path confinement was always
+    the real security boundary regardless, which is why a "{roots}" rule
+    could never be tier "allow" -- see the removed validator's own
+    history). A rule author wanting that protection today writes a plain
+    regex instead (e.g. a blacklist on "^/" and "\\.\\." to reject
+    absolute paths and traversal), the same way every other constraint in
+    this schema already works.
 
     Both fields are always real regex strings, never absent/null -- a
     blank whitelist defaults to "" (an empty RE2 pattern matches
@@ -106,11 +113,7 @@ class Pattern(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self):
-        if self.blacklist == "{roots}":
-            raise ValueError('"{roots}" is only meaningful as a whitelist, not a blacklist.')
         for value in (self.whitelist, self.blacklist):
-            if value == "{roots}":
-                continue
             try:
                 re2.compile(value)
             except re2.error as e:
@@ -141,10 +144,6 @@ class OptionConstraint(BaseModel):
         return self
 
 
-def _pattern_uses_roots(pattern: Pattern) -> bool:
-    return pattern.whitelist == "{roots}"
-
-
 class PolicyLayerRuleCreateRequest(BaseModel):
     """One rule within a Policy Layer -- see policy_layer_rules' own
     schema comment in db.py for the full shape. positional_constraints'
@@ -157,29 +156,11 @@ class PolicyLayerRuleCreateRequest(BaseModel):
     option_constraints: list[OptionConstraint] = Field(default_factory=list)
     tier: Literal["allow", "ask", "deny"] = "ask"
 
-    @model_validator(mode="after")
-    def _validate_rule(self):
-        if self.positional_constraints and _pattern_uses_roots(self.positional_constraints[0]):
-            raise ValueError('Position 0 (the binary) can never use "{roots}" -- it is never a path.')
-        uses_roots = any(_pattern_uses_roots(c) for c in self.positional_constraints) or any(
-            _pattern_uses_roots(oc.pattern) for oc in self.option_constraints
-        )
-        if uses_roots and self.tier == "allow":
-            raise ValueError(
-                'A rule using "{roots}" cannot have tier "allow" -- only "ask" or "deny" '
-                "(the client-side tier decision can only approximate directory containment; "
-                "only the daemon can check it authoritatively)."
-            )
-        return self
-
 
 class PolicyLayerRuleUpdateRequest(BaseModel):
     """PATCH /policy-layers/{id}/rules/{rule_id}'s body -- every field
     optional, same merge-only-what's-present convention as
-    ProfileUpdateRequest. Cross-field validation (position 0, "{roots}"
-    rules) is re-applied by main.py reconstructing the MERGED result
-    through PolicyLayerRuleCreateRequest -- a partial patch can't be
-    validated in isolation."""
+    ProfileUpdateRequest."""
 
     positional_constraints: list[Pattern] | None = None
     option_constraints: list[OptionConstraint] | None = None
@@ -247,26 +228,14 @@ class PolicyEvalOption(BaseModel):
 class PolicyEvalRequest(BaseModel):
     """POST /policies/eval's body -- composes policy_layer_ids (sorted
     ascending, concatenated -- the same v1 composition rule the Go daemon's
-    composePolicy and the browser's own _compose_policy use) into one
+    composePolicy and conversations.py's own tier decision use) into one
     Policy and evaluates one hypothetical call against it. No side effects,
     no daemon involved -- the fast/deterministic bottom of the testing
-    pyramid. roots and host_id are mutually exclusive: roots lets a caller
-    test a "{roots}" rule with no real host needed at all; host_id instead
-    derives it from one of the caller's own hosts' live, daemon-reported
-    workspace (same posture as GET /hosts' own HostInfo.workspace -- empty
-    for a host that isn't currently connected)."""
+    pyramid."""
 
     policy_layer_ids: list[int] = Field(default_factory=list)
     positional_args: list[str] = Field(default_factory=list)
     options: list[PolicyEvalOption] = Field(default_factory=list)
-    roots: list[str] | None = None
-    host_id: int | None = None
-
-    @model_validator(mode="after")
-    def _roots_xor_host(self):
-        if self.roots is not None and self.host_id is not None:
-            raise ValueError("Specify at most one of roots/host_id, not both.")
-        return self
 
 
 class PolicyEvalResponse(BaseModel):

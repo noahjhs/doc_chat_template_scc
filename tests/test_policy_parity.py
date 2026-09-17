@@ -57,9 +57,7 @@ def test_parity_case(policy_module, case):
         )
         for i, rule in enumerate(case["rules"])
     ]
-    matched_rule_index, matched_rule = policy_module.match_policy(
-        composed, case["positional_args"], case["options"], roots=[]
-    )
+    matched_rule_index, matched_rule = policy_module.match_policy(composed, case["positional_args"], case["options"])
     tier = matched_rule.tier if matched_rule else "deny"
     assert tier == case["expected_tier"], f"{case['name']}: expected tier {case['expected_tier']!r}, got {tier!r}"
     assert matched_rule_index == case["expected_matched_rule_index"], (

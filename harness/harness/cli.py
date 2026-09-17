@@ -147,8 +147,8 @@ def report_presence(
     workspace: list[str] = typer.Option([], "--root", help="An addressable directory -- may be repeated."),
 ):
     """Make a paired test host "connected" (see `pair`), with the given
-    workspace roots -- so policy eval/enforcement can exercise a
-    {roots}-using rule with no real machine involved."""
+    workspace directories -- lets a test host show up as connected (and
+    its directories browsable/displayed) with no real machine involved."""
     domain, _token = _require_session()
     try:
         result = client.report_host_presence(domain, device_token, local_agent_url, list(workspace))
@@ -262,8 +262,6 @@ def eval(
     option: list[str] = typer.Option(
         [], "--option", "-o", help="short=VALUE, long=VALUE, or a bare short/long with no value -- may be repeated."
     ),
-    root: list[str] = typer.Option([], "--root", help="A workspace root, for a {roots} rule -- may be repeated."),
-    host: Optional[str] = typer.Option(None, "--host", help="Derive roots from this host's own live workspace instead."),
 ):
     """Evaluate a hypothetical call against a composed policy -- no
     execution, no daemon involved. The fastest, most deterministic rung of
@@ -271,11 +269,8 @@ def eval(
     domain, token = _require_session()
     try:
         layer_ids = [_resolve_layer_id(domain, token, name_or_id) for name_or_id in layer]
-        host_id = _resolve_host_id(domain, token, host) if host else None
         options = [_parse_option(o) for o in option]
-        result = client.eval_policy(
-            domain, token, layer_ids, positional_args=list(arg), options=options, roots=list(root) or None, host_id=host_id
-        )
+        result = client.eval_policy(domain, token, layer_ids, positional_args=list(arg), options=options)
     except client.ApiError as e:
         _handle_api_error(e)
     console.print(result)

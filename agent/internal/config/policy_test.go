@@ -21,7 +21,6 @@ func TestFetchPolicyLayersDecodesPositionalAndOptionShapes(t *testing.T) {
 							"positional_constraints": []any{
 								"*",
 								map[string]any{"whitelist": "^run$"},
-								map[string]any{"whitelist": "{roots}"},
 							},
 							"option_constraints": []map[string]any{
 								{"short": "f", "long": "force", "pattern": map[string]any{"whitelist": "^$"}},
@@ -52,14 +51,11 @@ func TestFetchPolicyLayersDecodesPositionalAndOptionShapes(t *testing.T) {
 	// value (the old positional wildcard sentinel) -- which must still
 	// decode safely as a blank ("value not required") pattern, never a
 	// crash or a compile error.
-	if len(pc) != 3 || pc[0].Whitelist != nil || pc[0].Blacklist != nil || pc[0].WhitelistRoots {
+	if len(pc) != 2 || pc[0].Whitelist != nil || pc[0].Blacklist != nil {
 		t.Fatalf("expected a legacy \"*\" at position 0 to decode as blank (value not required), got %+v", pc)
 	}
 	if pc[1].Whitelist == nil || !pc[1].Whitelist.MatchString("run") {
 		t.Fatalf("expected position 1's whitelist to compile and match \"run\", got %+v", pc[1])
-	}
-	if !pc[2].WhitelistRoots {
-		t.Fatalf("expected position 2 to be WhitelistRoots, got %+v", pc[2])
 	}
 
 	oc := rule.OptionConstraints

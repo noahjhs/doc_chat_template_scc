@@ -636,24 +636,6 @@ def test_policy_layer_rule_positional_value_not_allowed(client):
     ]
 
 
-def test_policy_layer_rule_rejects_roots_on_position_zero(client):
-    signup = _signup(client, "ivan3")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers).json()
-    r = _add_rule(client, headers, layer["id"], [{"whitelist": "{roots}"}])
-    assert r.status_code == 422
-
-
-def test_policy_layer_rule_rejects_roots_with_allow_tier(client):
-    signup = _signup(client, "judy3")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers).json()
-    denied = _add_rule(client, headers, layer["id"], [{}, {"whitelist": "{roots}"}], tier="allow")
-    assert denied.status_code == 422
-    allowed = _add_rule(client, headers, layer["id"], [{}, {"whitelist": "{roots}"}], tier="ask")
-    assert allowed.status_code == 201
-
-
 def test_policy_layer_rule_rejects_invalid_regex(client):
     signup = _signup(client, "kevin1")
     headers = {"Authorization": f"Bearer {signup['token']}"}

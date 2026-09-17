@@ -3,7 +3,6 @@ package commands
 import (
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -11,7 +10,7 @@ import (
 
 // Pattern is one whitelist/blacklist pair for a single positional or option
 // argument value -- see auth_service/models.py's Pattern for the full
-// reasoning (RE2, "{roots}"). Compiled once at fetch/decode time (see
+// reasoning (RE2). Compiled once at fetch/decode time (see
 // config/policy.go's FetchPolicyLayers), never per-match. A missing value (a
 // position beyond what was supplied, or an option present with no value) is
 // matched as "" -- so a blank pattern (Whitelist/Blacklist both nil) means
@@ -20,10 +19,21 @@ import (
 // (only "" satisfies it), and a real pattern means "value required" (since
 // "" won't satisfy most real patterns). Fully symmetric between positional
 // and option constraints -- neither needs its own sentinel.
+//
+// A rule wanting to confine a specific argument value to the workspace
+// (rather than just the command's own cwd, which runRunShellCommand already
+// confines structurally via req.Path/resolvePath, independent of any
+// pattern) has no dedicated sentinel for that -- author a plain regex (e.g.
+// a blacklist on "^/" and "\\.\\." to reject absolute paths and traversal)
+// the same way every other constraint in this schema works. An earlier
+// version had a "{roots}" whitelist sentinel for exactly this; removed for
+// simplicity -- the daemon's own path confinement was always the real
+// security boundary regardless (a "{roots}" rule could never be tier
+// "allow" for that reason), so losing it is a narrower rule-authoring
+// convenience, not a security regression.
 type Pattern struct {
-	WhitelistRoots bool           // true iff whitelist was exactly "{roots}"
-	Whitelist      *regexp.Regexp // nil if absent or WhitelistRoots
-	Blacklist      *regexp.Regexp // nil if absent
+	Whitelist *regexp.Regexp // nil if absent
+	Blacklist *regexp.Regexp // nil if absent
 }
 
 // OptionConstraint is one option (not "flag" -- options can carry values) a
@@ -130,48 +140,10 @@ func (h *Handler) runListPolicyLayers(_ *Request) (Result, error) {
 	return h.ok(strings.Join(lines, "\n"), ""), nil
 }
 
-// valueInRoots mirrors resolvePath's resolve-and-confine logic exactly,
-// returning a bool instead of raising -- used by valueMatchesPattern for a
-// "{roots}" whitelist. Unconditionally false with zero roots (matches
-// isConfined's own posture), so a "{roots}" constraint just never matches
-// rather than erroring -- the rule falls through to the next one, or the
-// terminal deny. Also unconditionally false for an empty value -- unlike
-// resolvePath (where an empty req.Path deliberately means "use cwd" for
-// path-taking actions), an empty value reaching here means a positional
-// argument or option value was never actually supplied (see ruleMatches'
-// "missing value matched as \"\"" coercion) and must never be treated as
-// "so check the cwd instead", which would let a rule requiring a real
-// path-in-roots value silently pass on a value that was never given.
-func (h *Handler) valueInRoots(value string) bool {
-	if value == "" {
-		return false
-	}
-	base := h.getCwd()
-	expanded := expandUser(value)
-	var joined string
-	if filepath.IsAbs(expanded) {
-		joined = expanded
-	} else {
-		joined = filepath.Join(base, expanded)
-	}
-	resolved, err := realpath(joined)
-	if err != nil {
-		return false
-	}
-	return h.isConfined(resolved)
-}
-
-// valueMatchesPattern reports whether value satisfies p -- WhitelistRoots
-// checks containment via valueInRoots against the RESOLVED path, while a
-// blacklist, if also present, still checks the RAW value (a deliberate
-// asymmetry, documented on Pattern in auth_service/models.py); otherwise a
-// plain RE2 whitelist/blacklist check against the raw value.
+// valueMatchesPattern reports whether value satisfies p -- a plain RE2
+// whitelist/blacklist check against the raw value.
 func (h *Handler) valueMatchesPattern(value string, p Pattern) bool {
-	if p.WhitelistRoots {
-		if !h.valueInRoots(value) {
-			return false
-		}
-	} else if p.Whitelist != nil && !p.Whitelist.MatchString(value) {
+	if p.Whitelist != nil && !p.Whitelist.MatchString(value) {
 		return false
 	}
 	if p.Blacklist != nil && p.Blacklist.MatchString(value) {

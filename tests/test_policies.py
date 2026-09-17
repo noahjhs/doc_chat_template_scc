@@ -162,95 +162,6 @@ def test_eval_option_pattern_states(client):
     assert force_with_disallowed_value["tier"] == "deny"
 
 
-def test_eval_roots_via_direct_roots_param(client):
-    signup = _signup(client, "erin")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^cat$"}, {"whitelist": "{roots}"}], tier="ask")
-
-    inside_root = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "/Users/erin/project/file.txt"],
-        roots=["/Users/erin/project"],
-    ).json()
-    assert inside_root["tier"] == "ask"
-
-    outside_root = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "/etc/passwd"],
-        roots=["/Users/erin/project"],
-    ).json()
-    assert outside_root["tier"] == "deny"
-
-    no_roots_at_all = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["cat", "/Users/erin/project/file.txt"]
-    ).json()
-    assert no_roots_at_all["tier"] == "deny"
-
-
-def test_eval_roots_via_host_id(client):
-    signup = _signup(client, "frank")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^cat$"}, {"whitelist": "{roots}"}], tier="ask")
-
-    pair = client.post(
-        "/hosts/pair", json={"routing_key": "rk-frank-1", "hostname": "franks-mac"}, headers=headers
-    ).json()
-    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
-
-    # Not yet connected -- host_id derives an empty roots list, same as
-    # GET /hosts' own HostInfo.workspace posture.
-    disconnected = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "/Users/frank/project/file.txt"],
-        host_id=pair["host_id"],
-    ).json()
-    assert disconnected["tier"] == "deny"
-
-    client.post(
-        "/hosts/presence",
-        json={"local_agent_url": "https://relay.example/agent/frank", "workspace": ["/Users/frank/project"]},
-        headers=device_headers,
-    )
-
-    connected_inside = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "/Users/frank/project/file.txt"],
-        host_id=pair["host_id"],
-    ).json()
-    assert connected_inside["tier"] == "ask"
-
-    connected_outside = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "/etc/passwd"],
-        host_id=pair["host_id"],
-    ).json()
-    assert connected_outside["tier"] == "deny"
-
-
-def test_eval_rejects_both_roots_and_host_id(client):
-    signup = _signup(client, "gina")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = client.post(
-        "/hosts/pair", json={"routing_key": "rk-gina-1", "hostname": "ginas-mac"}, headers=headers
-    ).json()
-    r = _eval(
-        client, headers, policy_layer_ids=[], positional_args=[], roots=["/tmp"], host_id=pair["host_id"]
-    )
-    assert r.status_code == 422
-
-
 def test_eval_ownership_enforced(client):
     a = _signup(client, "hank")
     b = _signup(client, "ivy")
@@ -258,14 +169,6 @@ def test_eval_ownership_enforced(client):
     headers_b = {"Authorization": f"Bearer {b['token']}"}
 
     layer = _create_policy_layer(client, headers_a)
-    pair = client.post(
-        "/hosts/pair", json={"routing_key": "rk-hank-1", "hostname": "hanks-mac"}, headers=headers_a
-    ).json()
 
     other_users_layer = _eval(client, headers_b, policy_layer_ids=[layer["id"]], positional_args=[])
     assert other_users_layer.status_code == 404
-
-    other_users_host = _eval(
-        client, headers_b, policy_layer_ids=[], positional_args=[], host_id=pair["host_id"]
-    )
-    assert other_users_host.status_code == 404

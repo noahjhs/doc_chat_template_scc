@@ -55,15 +55,11 @@ func (p *patternWire) UnmarshalJSON(data []byte) error {
 func (p patternWire) compile() (commands.Pattern, error) {
 	out := commands.Pattern{}
 	if p.whitelist != nil {
-		if *p.whitelist == "{roots}" {
-			out.WhitelistRoots = true
-		} else {
-			re, err := regexp.Compile(*p.whitelist)
-			if err != nil {
-				return out, fmt.Errorf("whitelist %q: %w", *p.whitelist, err)
-			}
-			out.Whitelist = re
+		re, err := regexp.Compile(*p.whitelist)
+		if err != nil {
+			return out, fmt.Errorf("whitelist %q: %w", *p.whitelist, err)
 		}
+		out.Whitelist = re
 	}
 	if p.blacklist != nil {
 		re, err := regexp.Compile(*p.blacklist)

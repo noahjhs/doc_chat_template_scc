@@ -252,14 +252,8 @@ def eval_policy(
     policy_layer_ids: list[int],
     positional_args: list[str] | None = None,
     options: list[dict] | None = None,
-    roots: list[str] | None = None,
-    host_id: int | None = None,
 ) -> dict:
     body = {"policy_layer_ids": policy_layer_ids, "positional_args": positional_args or [], "options": options or []}
-    if roots is not None:
-        body["roots"] = roots
-    if host_id is not None:
-        body["host_id"] = host_id
     return _request(domain, "POST", "/policies/eval", token=token, json=body)
 
 

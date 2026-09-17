@@ -555,8 +555,7 @@ def _decide_tier(resolved_config: dict | None, args: dict) -> str:
     has no policy to check, so this falls back to "deny", same "absence
     means deny" posture the daemon itself uses) and returns its tier."""
     composed = compose_policy(resolved_config["policy_layers"]) if resolved_config else []
-    roots = (resolved_config or {}).get("workspace") or []
-    _, matched_rule = match_policy(composed, args.get("positional_args") or [], args.get("options") or [], roots)
+    _, matched_rule = match_policy(composed, args.get("positional_args") or [], args.get("options") or [])
     return matched_rule.tier if matched_rule else "deny"
 
 
