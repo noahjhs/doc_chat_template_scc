@@ -216,6 +216,17 @@ def decide_pending_approval(domain: str, device_token: str, approval_id: str, de
     )
 
 
+def get_pending_approval(domain: str, token: str, approval_id: str, wait_seconds: float | None = None) -> dict:
+    """GET /hosts/pending-approvals/{id} -- the SUBMITTER's own long-poll
+    (session token, not device_token), for learning a decision that landed
+    via the *other* channel (a real native dialog, or a harness
+    `respond-approvals` session acting as the attended host) -- the
+    counterpart to list_pending_approvals/decide_pending_approval above,
+    which are the attended-device side of the same exchange."""
+    params = {"wait_seconds": wait_seconds} if wait_seconds is not None else None
+    return _request(domain, "GET", f"/hosts/pending-approvals/{approval_id}", token=token, params=params)
+
+
 # --- Real-daemon pairing (manual verification only, not CI-automatable) ------
 def trigger_real_pairing(username: str, token: str) -> None:
     """Fires the same casper://pair hand-off a browser sign-in click would,

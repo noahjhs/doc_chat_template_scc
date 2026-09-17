@@ -236,6 +236,79 @@ def report_presence(
     console.print(result)
 
 
+@app.command()
+def attend(
+    host: Optional[str] = typer.Argument(None, help="A host label or id -- omit with --clear to unset."),
+    clear: bool = typer.Option(False, "--clear", help="Clear the attended host instead of setting one."),
+):
+    """Set (or clear) which of the caller's own hosts is "attended" --
+    where an "ask"-tier approval's native-dialog prompt would go. Works
+    the same whether `host` is a real daemon or a `pair`-faked one; see
+    `respond-approvals` for standing in for the dialog itself."""
+    domain, token = _require_session()
+    try:
+        if clear:
+            client.clear_attended_host(domain, token)
+            console.print("[green]Cleared.[/green]")
+            return
+        if host is None:
+            result = client.get_attended_host(domain, token)
+            console.print(result)
+            return
+        host_id = _resolve_host_id(domain, token, host)
+        result = client.set_attended_host(domain, token, host_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@app.command("respond-approvals")
+def respond_approvals(
+    device_token: str,
+    approve: bool = typer.Option(False, "--approve", help="Auto-approve every pending approval."),
+    deny: bool = typer.Option(False, "--deny", help="Auto-deny every pending approval."),
+    once: bool = typer.Option(False, "--once", help="Answer at most one approval, then exit."),
+):
+    """Stands in for the native-dialog relay entirely -- polls
+    GET /hosts/pending-approvals with device_token (the same long-poll a
+    real daemon's own dialog.go loop runs) and answers each one, either
+    automatically (--approve/--deny) or by prompting interactively (the
+    default). device_token belongs to whichever host `attend` designated
+    -- real or `pair`-faked; see auth_service/main.py's own
+    list_pending_approvals_for_attended_host for why there's no
+    requirement that this be the daemon actually dispatching the call.
+    Runs until interrupted (Ctrl-C) unless --once."""
+    if approve and deny:
+        err_console.print("[red]Specify at most one of --approve/--deny.[/red]")
+        raise typer.Exit(code=1)
+    domain, _token = _require_session()
+    console.print("Waiting for pending approvals (Ctrl-C to stop)...")
+    try:
+        while True:
+            result = client.list_pending_approvals(domain, device_token)
+            for pending in result.get("pending_approvals", []):
+                if pending.get("decision") is not None:
+                    continue
+                console.print(
+                    f"[yellow]Approval requested[/yellow] on {pending['host_label']}: "
+                    f"{pending['binary']} {pending['args']}".strip()
+                )
+                if approve:
+                    decision = "allow"
+                elif deny:
+                    decision = "deny"
+                else:
+                    decision = typer.prompt("Approve? [allow/deny]", default="allow")
+                client.decide_pending_approval(domain, device_token, pending["id"], decision)
+                console.print(f"[green]{decision}.[/green]")
+                if once:
+                    return
+    except client.ApiError as e:
+        _handle_api_error(e)
+    except KeyboardInterrupt:
+        console.print("\nStopped.")
+
+
 @environment_app.command("list")
 def environment_list():
     domain, token = _require_session()

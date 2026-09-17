@@ -198,6 +198,66 @@ def test_mock_chat_flow_with_approval(harness_env, tmp_path):
     assert output["mock"] is True
 
 
+def test_attended_host_answers_approval_via_device_token_channel(harness_env, tmp_path):
+    """Phase 4's own protocol-level test: a harness-faked host is set as
+    the attended host and decides the approval via the device_token
+    channel (list_pending_approvals/decide_pending_approval) -- the same
+    channel a real native dialog (dialog.go's osascript loop) or a
+    harness `respond-approvals` session uses -- rather than the caller
+    supplying approval_decision to /conversations/step directly. Confirms
+    that decision is then usable to resume the conversation, same as any
+    other approval_decision value."""
+    main, hc = harness_env
+    signup = hc.signup(DOMAIN, "attendeduser", "correct-horse-battery")
+    token = signup["token"]
+
+    dispatch_pair = hc.pair_host(DOMAIN, token, "rk-attended-dispatch-1", hostname="dispatch-host")
+    hc.report_host_presence(DOMAIN, dispatch_pair["device_token"], "https://relay.example/agent/dispatch")
+
+    yaml_path = _write_yaml(
+        tmp_path, {"name": "rm ask", "rules": [{"tier": "ask", "positional": [{"whitelist": "^rm$"}]}]}
+    )
+    layer = hc.apply_policy_layer(DOMAIN, token, yaml_path)
+    hc.add_policy_layer_to_host(DOMAIN, token, layer["id"], dispatch_pair["host_id"])
+
+    # A SEPARATE host stands in for "the attended device" -- never itself
+    # dispatches anything; auth_service has no binding requiring it to.
+    attendant_pair = hc.pair_host(DOMAIN, token, "rk-attended-watcher-1", hostname="attendant-host")
+    hc.set_attended_host(DOMAIN, token, attendant_pair["host_id"])
+    assert hc.get_attended_host(DOMAIN, token)["host_id"] == attendant_pair["host_id"]
+
+    fake = FakeClient([FakeResponse(id="resp_1", output_text="Ran it.")])
+    main._get_openai_client = lambda: fake
+
+    paused = hc.call_tool(
+        DOMAIN, token, "run_shell_command", {"positional_args": ["rm", "scratch.txt"]}, mock=True
+    )
+    assert paused["status"] == "pending_approval"
+    approval_id = paused["pending_approval"]["approval_id"]
+    assert approval_id
+
+    # Nothing decided yet -- undecided in the attended device's own queue.
+    pending = hc.list_pending_approvals(DOMAIN, attendant_pair["device_token"])["pending_approvals"]
+    assert any(p["id"] == approval_id and p["decision"] is None for p in pending)
+
+    decided = hc.decide_pending_approval(DOMAIN, attendant_pair["device_token"], approval_id, "allow")
+    assert decided["decision"] == "allow"
+
+    # The submitter's own poll (a *different* credential -- the session
+    # token, not either device_token) sees the same decision land.
+    submitter_view = hc.get_pending_approval(DOMAIN, token, approval_id, wait_seconds=0)
+    assert submitter_view["decision"] == "allow"
+
+    # The caller relays the decision it just learned via the device_token
+    # channel back into /conversations/step's own approval_decision field
+    # to actually resume the conversation.
+    resumed = hc.conversation_step(DOMAIN, token, turn=paused["turn"], approval_decision="allow", mock=True)
+    assert resumed["status"] == "done"
+    calls = resumed["turn"]["aggregate"]["shell_command_calls"]
+    assert len(calls) == 1
+    assert json.loads(calls[0]["output"])["mock"] is True
+
+
 def test_policy_apply_and_delete(harness_env, tmp_path):
     _main, hc = harness_env
     signup = hc.signup(DOMAIN, "deleteflowuser", "correct-horse-battery")
