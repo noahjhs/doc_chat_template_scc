@@ -4,12 +4,9 @@ to under a composed Policy (concatenated Policy Layers). Mirrors the Go
 daemon's own authoritative matcher (agent/internal/commands/policy.go)
 exactly -- that daemon-side copy remains the one that's truly authoritative
 for a real dispatched call (it alone has real filesystem access for
-{roots} containment), but this is the canonical *server-side* copy: POST
-/policies/eval evaluates purely against this, and the tool-dispatch tier
-decision (once /conversations/step lands) will too. pages/chat.py still
-carries its own client-side port of this same logic for now (used to
-approximate the tier before a real call is dispatched) -- that copy is
-slated for deletion once its callers move to /conversations/step."""
+{roots} containment), but this is the canonical *server-side* copy: both
+POST /policies/eval and conversations.py's own tool-dispatch tier decision
+evaluate purely against this."""
 
 import os.path
 
@@ -116,14 +113,11 @@ def match_policy(
 
 
 def describe_pattern(pattern: Pattern) -> str:
-    """Prose rendering of one Pattern -- attribute-access port of
-    utils/policy.py's own describe_pattern (which operates on raw JSON
-    dicts, for the browser's own rendering); this copy exists for
-    /conversations/step's run_shell_command tool description, built
-    server-side from real Pattern objects rather than a re-fetched JSON
-    payload. Kept behaviorally identical -- see utils/policy.py's own
-    docstring for the three-state whitelist/blacklist semantics this
-    renders."""
+    """Prose rendering of one Pattern, built server-side from a real
+    Pattern object -- used by conversations.py's run_shell_command tool
+    description, so the model sees a host's effective policy in plain
+    English. See Pattern's own docstring (models.py) for the three-state
+    whitelist/blacklist semantics this renders."""
     has_blacklist = pattern.blacklist and pattern.blacklist != BLACKLIST_MATCHES_NOTHING
     if pattern.whitelist == "^$" and not has_blacklist:
         return "value not allowed"

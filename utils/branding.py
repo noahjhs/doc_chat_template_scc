@@ -8,7 +8,7 @@ TAGLINE = "your friendly ghost."
 # A simple, original ghost illustration (not any existing character's
 # design) -- plain SVG markup, safe to render via st.markdown(unsafe_allow_html=True)
 # since it's static vector markup, not a <script> tag (which that mechanism
-# can't reliably execute -- see pages/chat.py's notes on st.iframe).
+# can't reliably execute -- see pages/signin.py's notes on st.iframe).
 GHOST_SVG = """
 <svg width="{size}" height="{size}" viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg">
   <path d="M60 8 C31 8 8 31 8 62 L8 122
@@ -34,9 +34,8 @@ def hide_streamlit_chrome():
     """Hides Streamlit's own header bar and three-dot menu (home_link_html()
     is our own replacement for that navigation surface, so Streamlit's isn't
     needed), and trims the sidebar's default top padding down to nearly
-    nothing, so pages/chat.py's home link sits right at the top of the
-    sidebar rather than visibly inset from it. Call on every page, exactly
-    once.
+    nothing, so the home link sits right at the top rather than visibly
+    inset from it. Call on every page, exactly once.
 
     Deliberately does not touch the main content block's own padding --
     home_link_html()/page_header() render as normal in-flow content now, so
@@ -96,7 +95,7 @@ def home_link_html(size=32):
     matching this codebase's own established rule for cross-subdomain
     links elsewhere (see casper_app.py's own Sign in/Sign up links) --
     opening in a new tab rather than abandoning whatever's active in this
-    one (a chat session, mid-signup)."""
+    one (an in-progress sign-in/sign-up flow, or a managed Environment)."""
     return (
         f'<a href="{www_subdomain_url()}" target="_blank" rel="noopener" '
         f'style="text-decoration:none;color:inherit;'
@@ -107,9 +106,12 @@ def home_link_html(size=32):
 
 def page_header(size=32):
     """hide_streamlit_chrome() + the home link, rendered as normal in-flow
-    content -- so it gets the same padding as the rest of the page. What
-    every page except pages/chat.py wants (chat.py puts the link in its
-    sidebar's own flow instead, so it calls hide_streamlit_chrome() and
-    home_link_html() directly rather than this)."""
+    content -- so it gets the same padding as the rest of the page. What a
+    page with no real sidebar wants (signin.py, signup.py, download.py,
+    casper_app.py); a page with a real sidebar (environments.py,
+    settings_*.py) uses render_topbar()/render_sidebar() instead, which
+    hide Streamlit's chrome their own way (utils/sidebar.py's
+    _render_chrome_css) and pin the home link to a fixed corner rather
+    than rendering it in-flow here."""
     hide_streamlit_chrome()
     st.markdown(home_link_html(size), unsafe_allow_html=True)

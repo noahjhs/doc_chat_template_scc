@@ -386,9 +386,10 @@ class AttendedHostInfo(BaseModel):
 
 
 class PendingApprovalCreateRequest(BaseModel):
-    """POST /hosts/pending-approvals's body -- mirrors exactly what
-    pages/chat.py already renders in its in-chat approval warning, so the
-    two channels (native dialog vs. in-chat buttons) show the human the
+    """POST /hosts/pending-approvals's body -- mirrors exactly what a
+    caller resolving the pending_approval from POST /conversations/step
+    already has, so the two channels (a native dialog on the attended
+    host vs. resolving approval_decision directly) show the human the
     same thing."""
 
     template_name: str = Field(min_length=1, max_length=64)

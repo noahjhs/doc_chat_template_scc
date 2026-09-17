@@ -61,14 +61,14 @@ if "_signup_token" in st.session_state:
     token = st.session_state["_signup_token"]
     username = st.session_state["_signup_username"]
     pair_url = build_pair_url(token, username)
-    chat_url = f"/chat?local_agent_token={quote(token, safe='')}"
+    environments_url = f"/environments?local_agent_token={quote(token, safe='')}"
 
     st.success("Signed up.")
     # A same-tab fallback link, in case the auto-navigate below doesn't
     # fire for some reason (st.link_button opens a new tab, which isn't
     # what we want here).
     st.markdown(
-        f'<a id="continue-link" href="{chat_url}" target="_self">Continue if nothing happens</a>',
+        f'<a id="continue-link" href="{environments_url}" target="_self">Continue if nothing happens</a>',
         unsafe_allow_html=True,
     )
     # Fires the casper://pair hand-off first (a custom-scheme anchor click
@@ -80,16 +80,14 @@ if "_signup_token" in st.session_state:
     # (or Chrome's own "Open Casper?" permission prompt) for a moment; an
     # earlier attempt called focus() before the dispatch and didn't fix a
     # reported case of the tab losing focus, which is consistent with that
-    # -- focusing *after* the dispatch, right before the /chat navigation,
-    # is the more likely-correct ordering, though this is a best-effort fix
-    # without a way to directly test browser/OS focus behavior. See
-    # pages/chat.py's own focus() call on load for a second attempt, in
-    # case this one still doesn't stick. All in one script so the pairing
-    # dispatch has definitely started before the /chat navigation unloads
-    # the page. See click_anchor_js's docstring for why a direct
-    # window.parent.location assignment doesn't reliably work from inside
-    # st.iframe's sandbox.
+    # -- focusing *after* the dispatch, right before the /environments
+    # navigation, is the more likely-correct ordering, though this is a
+    # best-effort fix without a way to directly test browser/OS focus
+    # behavior. All in one script so the pairing dispatch has definitely
+    # started before the /environments navigation unloads the page. See
+    # click_anchor_js's docstring for why a direct window.parent.location
+    # assignment doesn't reliably work from inside st.iframe's sandbox.
     st.iframe(
-        f"<script>{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(chat_url))}</script>",
+        f"<script>{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(environments_url))}</script>",
         height=1,
     )

@@ -17,9 +17,6 @@
 # skips the (couple-of-minutes) round trip to Apple for quick local
 # iteration, still properly signed either way.
 #
-# Kept alongside build_macos.sh (the Python/PyInstaller build) rather than
-# replacing it -- both exist side by side until the Go version is fully
-# verified and this repo's distributed binary actually cuts over to it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -17,16 +17,16 @@ require_app_subdomain()
 # session first, rather than showing the form regardless. Two checks,
 # covering two different cases:
 # 1. This exact browser tab already has a verified session cached in
-#    session_state (e.g. browser-back-button navigation from chat.py) --
-#    bounce straight back, no form, no flash of it either.
+#    session_state (e.g. browser-back-button navigation from environments.py)
+#    -- bounce straight back, no form, no flash of it either.
 if st.session_state.get("_authenticated_username"):
-    st.switch_page("pages/chat.py")
+    st.switch_page("pages/environments.py")
 
 # 2. A *different* tab/session (or this one after a reload that lost
 # session_state) previously signed in successfully -- utils/auth.py's
 # require_agent_session() stashes that token in this browser's own
 # localStorage on every successful verification. One-shot per session:
-# if found, navigates to /chat with it attached, letting
+# if found, navigates to /environments with it attached, letting
 # require_agent_session() do the real verification there; if there's
 # nothing stashed (or it's since been invalidated), this just no-ops and
 # falls through to the normal sign-in form below -- deliberately not
@@ -42,7 +42,7 @@ if "_recovery_attempted" not in st.session_state:
         (function() {{
             var stored = window.parent.localStorage.getItem('casper_auth_token');
             if (stored) {{
-                var url = new URL(window.parent.location.origin + '/chat');
+                var url = new URL(window.parent.location.origin + '/environments');
                 url.searchParams.set('local_agent_token', stored);
                 {click_anchor_js("url.toString()")}
             }}
@@ -98,14 +98,14 @@ if "_login_token" in st.session_state:
     token = st.session_state["_login_token"]
     username = st.session_state["_login_username"]
     pair_url = build_pair_url(token, username)
-    chat_url = f"/chat?local_agent_token={quote(token, safe='')}"
+    environments_url = f"/environments?local_agent_token={quote(token, safe='')}"
 
     st.success("Signed in.")
     # A same-tab fallback link, in case the auto-navigate below doesn't
     # fire for some reason (st.link_button opens a new tab, which isn't
     # what we want here).
     st.markdown(
-        f'<a id="continue-link" href="{chat_url}" target="_self">Continue if nothing happens</a>',
+        f'<a id="continue-link" href="{environments_url}" target="_self">Continue if nothing happens</a>',
         unsafe_allow_html=True,
     )
     # Fires the casper://pair hand-off first (a custom-scheme anchor click
@@ -117,16 +117,14 @@ if "_login_token" in st.session_state:
     # (or Chrome's own "Open Casper?" permission prompt) for a moment; an
     # earlier attempt called focus() before the dispatch and didn't fix a
     # reported case of the tab losing focus, which is consistent with that
-    # -- focusing *after* the dispatch, right before the /chat navigation,
-    # is the more likely-correct ordering, though this is a best-effort fix
-    # without a way to directly test browser/OS focus behavior. See
-    # pages/chat.py's own focus() call on load for a second attempt, in
-    # case this one still doesn't stick. All in one script so the pairing
-    # dispatch has definitely started before the /chat navigation unloads
-    # the page. See click_anchor_js's docstring for why a direct
-    # window.parent.location assignment doesn't reliably work from inside
-    # st.iframe's sandbox.
+    # -- focusing *after* the dispatch, right before the /environments
+    # navigation, is the more likely-correct ordering, though this is a
+    # best-effort fix without a way to directly test browser/OS focus
+    # behavior. All in one script so the pairing dispatch has definitely
+    # started before the /environments navigation unloads the page. See
+    # click_anchor_js's docstring for why a direct window.parent.location
+    # assignment doesn't reliably work from inside st.iframe's sandbox.
     st.iframe(
-        f"<script>{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(chat_url))}</script>",
+        f"<script>{click_anchor_js(json.dumps(pair_url))}window.parent.focus();{click_anchor_js(json.dumps(environments_url))}</script>",
         height=1,
     )

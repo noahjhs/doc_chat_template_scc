@@ -1,8 +1,9 @@
-"""The tool-calling orchestration loop, ported from pages/chat.py's own
-_process_turn/_dispatch_tool_call/call_local_agent/call_transfer_file (see
-that file's own docstrings for design history) into a stateless, server-side
-form for POST /conversations/step (auth_service/main.py). Key differences
-from the Streamlit original:
+"""The tool-calling orchestration loop backing POST /conversations/step
+(auth_service/main.py) -- originally a Streamlit page's own tool-calling
+loop (_process_turn/_dispatch_tool_call/call_local_agent/
+call_transfer_file), moved server-side and made stateless as part of
+deprecating that GUI in favor of a CLI+library test harness. Key design
+points that differ from a typical request-scoped web handler:
 
 - No streaming -- client.responses.create(..., stream=False). Streaming is
   out of scope until a real GUI is back in play; this is a deliberate,
@@ -107,8 +108,7 @@ def new_turn_from_tool_call(name: str, arguments: dict) -> dict:
     the model into calling it. This is what the harness's `call tool`/
     `call mock tool` verbs use. Pre-seeding pending_calls/outputs like this
     skips straight past "call the model" into the exact same tier-decision/
-    dispatch code a real model-issued call goes through -- ported unchanged
-    from pages/chat.py's own "Force a tool call" panel. The outputs entry
+    dispatch code a real model-issued call goes through. The outputs entry
     establishes the function_call half of the exchange for the model's
     benefit on the NEXT hop (a real call has this already, from the
     model's own prior response); without it, that hop's
@@ -382,8 +382,7 @@ def _resolve_host(
 ) -> tuple[str | None, dict | None, str | None]:
     """host selection isn't in any tool schema's "required" list (there's no
     way to say "required only when there's more than one option" in JSON
-    Schema), so ambiguity is enforced here instead, exactly mirroring
-    pages/chat.py's own call_local_agent/call_shell_command. Returns
+    Schema), so ambiguity is enforced here instead. Returns
     (resolved_host, config, None) on success or (None, None, error_message)
     otherwise -- resolved_host is returned (not just the config) so a
     caller that auto-picked "the only connected host" (host/default_host
@@ -602,11 +601,9 @@ def _drain_pending_calls(turn: dict, ctx: DispatchContext) -> bool:
 
 
 def _extract_response(response) -> tuple[str, dict]:
-    """Non-streaming counterpart to pages/chat.py's capture_response_meta --
-    simpler than the streaming version since there's no event sequence to
-    consume, just one Response object's own .output list to walk (the same
-    shape a streaming response.completed event's .response.output carried).
-    Uses getattr defensively (not direct attribute access) so a minimal
+    """Pulls the finished text, tool calls, and tool-activity metadata out
+    of one non-streaming Response object's own .output list. Uses getattr
+    defensively (not direct attribute access) so a minimal
     fake Response in tests only needs to populate the fields a given test
     actually cares about."""
     meta = {"searches": [], "sources": [], "code_blocks": [], "function_calls": [], "image": None}
@@ -634,8 +631,8 @@ def run_turn(turn: dict, approval_decision: str | None, ctx: DispatchContext, cl
     loop for `turn` -- mutates it in place and returns (status, message):
     status is "done" (message is the finished turn's full text) or
     "pending_approval" (message is None; turn["awaiting_approval"] holds
-    what's waiting). See this module's own docstring for how this differs
-    from pages/chat.py's Streamlit-driven original."""
+    what's waiting). See this module's own docstring for the overall
+    design."""
     while True:
         if turn["awaiting_approval"] is not None:
             if approval_decision is None:

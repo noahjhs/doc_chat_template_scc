@@ -17,10 +17,10 @@ def _auth_domain():
 
 def app_subdomain_url():
     """Base URL (with scheme) of this deployment's "app" subdomain -- where
-    /signin, /signup, and /chat live. Used by the www-hosted landing/download
-    pages to link there across subdomains (see APP_SUBDOMAIN_DOMAIN in
-    docker/app-entrypoint.sh) -- pages already served from the app subdomain
-    itself (signin.py, signup.py, chat.py) never need this; they link to
+    /signin, /signup, and /environments live. Used by the www-hosted
+    landing/download pages to link there across subdomains (see
+    APP_SUBDOMAIN_DOMAIN in docker/app-entrypoint.sh) -- pages already
+    served from the app subdomain itself never need this; they link to
     each other with plain relative paths."""
     return _base_url(st.secrets["APP_SUBDOMAIN_DOMAIN"])
 
@@ -80,10 +80,11 @@ def require_www_subdomain():
 
 
 def require_app_subdomain():
-    """Gate an app-only page (signin, signup, chat): st.stop()s with a
-    plain "not found" if reached via the www subdomain (or anything else)
-    instead. A no-op for localhost and if APP_SUBDOMAIN_DOMAIN isn't
-    configured -- same reasoning as require_www_subdomain()."""
+    """Gate an app-only page (signin, signup, environments, ...):
+    st.stop()s with a plain "not found" if reached via the www subdomain
+    (or anything else) instead. A no-op for localhost and if
+    APP_SUBDOMAIN_DOMAIN isn't configured -- same reasoning as
+    require_www_subdomain()."""
     host = _current_host()
     app_host = st.secrets.get("APP_SUBDOMAIN_DOMAIN", "")
     if _is_local_host(host) or not app_host:
@@ -268,10 +269,10 @@ def require_agent_session():
     check for why that's handled there instead, not here). Returns the
     signed-in username; the verified token itself is cached separately in
     session_state["_authenticated_token"] (see current_token()) for
-    callers that need it -- e.g. pages/chat.py's presence lookup -- and
-    stashed in this browser's own localStorage, so landing back on /signin
-    with a still-valid session bounces straight back to /chat instead of
-    showing the login form again (see pages/signin.py)."""
+    callers that need it, and stashed in this browser's own localStorage,
+    so landing back on /signin with a still-valid session bounces straight
+    back to /environments instead of showing the login form again (see
+    pages/signin.py)."""
     if st.session_state.get("_authenticated_username"):
         return st.session_state["_authenticated_username"]
 
@@ -316,22 +317,9 @@ def current_token():
 
 def list_storage(auth_domain, token):
     """GET /storage. Returns {"files": [...], "total_bytes", "cap_bytes"},
-    or {"error": str} -- _auth_write (not _auth_get) for a consistent,
-    model-legible error shape, since this backs pages/chat.py's transfer
-    tool rather than a page-load lookup."""
+    or {"error": str} -- _auth_write (not _auth_get) for a consistent
+    error shape."""
     return _auth_write("GET", auth_domain, token, "/storage")
-
-
-def upload_storage(auth_domain, token, filename, content_b64):
-    """POST /storage. Returns the new file's {"filename", "size",
-    "uploaded_at"}, or {"error": str} (e.g. over the per-user cap)."""
-    return _auth_write("POST", auth_domain, token, "/storage", {"filename": filename, "content": content_b64})
-
-
-def download_storage(auth_domain, token, filename):
-    """GET /storage/{filename}. Returns {"filename", "content"} (base64),
-    or {"error": str} (e.g. not found)."""
-    return _auth_write("GET", auth_domain, token, f"/storage/{quote(filename, safe='')}")
 
 
 def delete_storage(auth_domain, token, filename):
@@ -353,79 +341,6 @@ def update_profile(auth_domain, token, **fields):
     return _auth_write("PATCH", auth_domain, token, "/profile", fields)
 
 
-def list_policy_layers(auth_domain, token):
-    """GET /policy-layers. Returns {"policy_layers": [...]}, or {"error": str}."""
-    return _auth_write("GET", auth_domain, token, "/policy-layers")
-
-
-def create_policy_layer(auth_domain, token, name):
-    """POST /policy-layers -- name only, creates an empty shell (rules=[]).
-    Returns the new layer, or {"error": str}."""
-    return _auth_write("POST", auth_domain, token, "/policy-layers", {"name": name})
-
-
-def rename_policy_layer(auth_domain, token, policy_layer_id, name):
-    """PATCH /policy-layers/{id}. Returns the updated layer, or {"error": str}."""
-    return _auth_write("PATCH", auth_domain, token, f"/policy-layers/{policy_layer_id}", {"name": name})
-
-
-def delete_policy_layer(auth_domain, token, policy_layer_id):
-    """DELETE /policy-layers/{id}. Returns {"revoked": True}, or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/policy-layers/{policy_layer_id}")
-
-
-def add_policy_layer_to_host(auth_domain, token, policy_layer_id, host_id):
-    """PUT /policy-layers/{id}/hosts/{host_id}. Returns the updated layer,
-    or {"error": str}."""
-    return _auth_write("PUT", auth_domain, token, f"/policy-layers/{policy_layer_id}/hosts/{host_id}")
-
-
-def remove_policy_layer_from_host(auth_domain, token, policy_layer_id, host_id):
-    """DELETE /policy-layers/{id}/hosts/{host_id}. Returns the updated
-    layer, or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/policy-layers/{policy_layer_id}/hosts/{host_id}")
-
-
-def create_policy_layer_rule(auth_domain, token, policy_layer_id, positional_constraints, option_constraints, tier):
-    """POST /policy-layers/{id}/rules -- positional_constraints is a list
-    of {"whitelist": str, "blacklist": str} entries (list index IS the
-    argv position, index 0 the binary; a blank entry, or omitting the
-    position entirely, means "value not required" there); option_constraints
-    is a list of {"short": str|None, "long": str|None, "pattern":
-    {"whitelist": str, "blacklist": str}} entries (a blank pattern means
-    "value not required", a whitelist of "^$" means "value not allowed").
-    Returns the new rule, or {"error": str}."""
-    return _auth_write(
-        "POST",
-        auth_domain,
-        token,
-        f"/policy-layers/{policy_layer_id}/rules",
-        {"positional_constraints": positional_constraints, "option_constraints": option_constraints, "tier": tier},
-    )
-
-
-def update_policy_layer_rule(auth_domain, token, policy_layer_id, rule_id, **fields):
-    """PATCH /policy-layers/{id}/rules/{rule_id} -- merge-updates only the
-    given fields (any subset of positional_constraints/option_constraints/
-    tier). Returns the updated rule, or {"error": str}."""
-    return _auth_write("PATCH", auth_domain, token, f"/policy-layers/{policy_layer_id}/rules/{rule_id}", fields)
-
-
-def delete_policy_layer_rule(auth_domain, token, policy_layer_id, rule_id):
-    """DELETE /policy-layers/{id}/rules/{rule_id}. Returns {"revoked": True},
-    or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/policy-layers/{policy_layer_id}/rules/{rule_id}")
-
-
-def reorder_policy_layer_rules(auth_domain, token, policy_layer_id, rule_ids):
-    """PUT /policy-layers/{id}/rules/reorder -- rule_ids must be exactly a
-    permutation of the layer's current rule ids. Returns the updated layer
-    (rules now in the new order), or {"error": str}."""
-    return _auth_write(
-        "PUT", auth_domain, token, f"/policy-layers/{policy_layer_id}/rules/reorder", {"rule_ids": rule_ids}
-    )
-
-
 def get_attended_host(auth_domain, token):
     """GET /users/me/attended-host. Returns {"host_id", "label"} (both None
     if unset), or {"error": str}."""
@@ -442,46 +357,3 @@ def clear_attended_host(auth_domain, token):
     """DELETE /users/me/attended-host. Returns {"revoked": True}, or
     {"error": str}."""
     return _auth_write("DELETE", auth_domain, token, "/users/me/attended-host")
-
-
-def submit_pending_approval(auth_domain, token, template_name, binary, args, host_label):
-    """POST /hosts/pending-approvals -- submitted once an "ask"-tier
-    command-template call needs a human decision, alongside (not instead
-    of) pages/chat.py's own in-chat Approve/Deny UI, so a native dialog on
-    the user's attended host (see get_attended_host/set_attended_host
-    above) can answer it too. Returns {"approval_id": str}, or
-    {"error": str} -- a failure here just means the native-dialog channel
-    isn't available for this call; the in-chat buttons still work on their
-    own."""
-    return _auth_write(
-        "POST",
-        auth_domain,
-        token,
-        "/hosts/pending-approvals",
-        {"template_name": template_name, "binary": binary, "args": args, "host_label": host_label},
-    )
-
-
-def poll_pending_approval_decision(auth_domain, token, approval_id, wait_seconds=3):
-    """GET /hosts/pending-approvals/{id}?wait_seconds=... -- a short-wait
-    variant of the endpoint's default ~25s long-poll, specifically so
-    pages/chat.py's st.fragment(run_every=...)-driven poll never blocks
-    that browser session's script thread (and its own Approve/Deny
-    buttons) for long -- see the endpoint's own docstring. Needs its own
-    timeout rather than _auth_write's hardcoded 10s (comfortably above
-    wait_seconds, not exactly matching _auth_write's assumption of a quick
-    call), but the same {"error": str} failure-shape convention. Returns
-    the full PendingApprovalInfo dict (decision is None until someone
-    answers), or {"error": str}."""
-    try:
-        response = requests.get(
-            f"{_base_url(auth_domain)}/hosts/pending-approvals/{quote(approval_id, safe='')}",
-            params={"wait_seconds": wait_seconds},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=wait_seconds + 10,
-        )
-        if response.status_code >= 400:
-            return {"error": _error_detail(response, "Request failed.")}
-        return response.json()
-    except requests.RequestException as e:
-        return {"error": f"Couldn't reach the auth service: {e}"}

@@ -40,8 +40,9 @@ st.title("Hosts & Environments")
 AUTH_DOMAIN = st.secrets["AUTH_SERVICE_DOMAIN"]
 TOKEN = current_token()
 
-# Deliberately the same session_state keys pages/chat.py reads -- so a
-# rename/forget/membership change made here is immediately what chat.py
+# Deliberately the same session_state keys render_sidebar() (utils/
+# sidebar.py) itself populates -- so a rename/forget/membership change made
+# here is immediately what the sidebar (on this page and every other one)
 # sees too, next time it loads, with no separate cache to go stale.
 if "_hosts" not in st.session_state:
     st.session_state["_hosts"] = (list_hosts(AUTH_DOMAIN, TOKEN) or {}).get("hosts", [])
@@ -180,6 +181,3 @@ for env in environments:
 
 if st.session_state.pop("_just_saved", False):
     st.success("Update saved")
-
-st.divider()
-st.button("← Back to chat", on_click=lambda: st.switch_page("pages/chat.py"))

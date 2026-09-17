@@ -116,9 +116,9 @@ st.checkbox(
 )
 
 # A fixed-height slot for the save status message -- reserved whether or
-# not anything is actually shown in it this rerun, so the "← Back to chat"
-# button below doesn't jump up/down depending on whether a save just
-# happened. Plain st.empty() alone doesn't do this (it collapses to zero
+# not anything is actually shown in it this rerun, so the "← Back to
+# Environments" button below doesn't jump up/down depending on whether a
+# save just happened. Plain st.empty() alone doesn't do this (it collapses to zero
 # height with nothing written into it); the min-height on this specific
 # keyed container is what actually holds the space open.
 st.html("<style>.st-key-save_status_row { min-height: 3rem; }</style>")
@@ -129,4 +129,4 @@ with st.container(key="save_status_row"):
         st.success("Update saved")
 
 st.divider()
-st.button("← Back to chat", on_click=lambda: st.switch_page("pages/chat.py"))
+st.button("← Back to Environments", on_click=lambda: st.switch_page("pages/environments.py"))

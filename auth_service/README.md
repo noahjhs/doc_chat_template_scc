@@ -1,8 +1,10 @@
 # Doc Chat Auth Service
 
 A small standalone FastAPI service that owns user accounts for Casper's
-sign-up/sign-in flow. Deployed as its own Render web service, separate from
-the main Streamlit app and from `casper_tool.py`.
+sign-up/sign-in flow, plus host/policy-layer state and the tool-calling
+conversation orchestration (`POST /conversations/step`). Deployed as its
+own Render web service, separate from the main Streamlit app and from the
+Go agent (`agent/`).
 
 ## Endpoints
 
@@ -16,8 +18,8 @@ the main Streamlit app and from `casper_tool.py`.
   "not logged in" from a network failure on the caller's side).
 - `POST /revoke` — `Authorization: Bearer <token>` → `200 {revoked: true}`,
   idempotent. Only affects future `/verify` calls; it does not itself stop
-  a running `casper_tool.py` process (that's `casper_tool.py`'s own
-  `/api/shutdown`).
+  a running agent daemon (that's `POST /hosts/signout-all`'s own best-effort
+  `/api/shutdown` push to every attached host).
 
 `/signup` and `/login` are rate-limited per IP (in-memory, resets on
 restart) since they're public password endpoints.

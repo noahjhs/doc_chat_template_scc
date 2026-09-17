@@ -445,10 +445,9 @@ def _policy_layer_info(db, policy_layer_id: int) -> PolicyLayerInfo:
 
 def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
     """Every one of the caller's own hosts that's currently connected,
-    keyed by label -- POST /conversations/step's own analogue of
-    pages/chat.py's old local_agent_configs, built from THIS service's own
-    state instead of accepted from the caller (see conversations.py's own
-    module docstring on why that matters). policy_layers is left
+    keyed by label -- built from THIS service's own state instead of
+    accepted from the caller (see conversations.py's own module docstring
+    on why that matters). policy_layers is left
     un-composed (a list of (layer_id, rules) pairs) -- composition happens
     per-call via policy.compose_policy, same as everywhere else this
     project composes a host's policy."""
@@ -1055,9 +1054,9 @@ def eval_policy(body: PolicyEvalRequest, authorization: str = Header(default="")
 # What THIS host's own enforcement copy should be -- independent of GET
 # /hosts's browser-facing copy above (same underlying data, different
 # credential/audience). The daemon fetches this for itself rather than
-# trusting the browser/model to have applied a rule correctly -- every rule
-# is structurally re-enforced daemon-side regardless of what tier
-# pages/chat.py already decided client-side.
+# trusting the caller to have applied a rule correctly -- every rule is
+# structurally re-enforced daemon-side regardless of what tier
+# conversations.py's own tier decision already reached.
 @app.get("/hosts/policy-layers", response_model=HostPolicyLayerListResponse)
 def list_host_policy_layers(authorization: str = Header(default="")):
     attached = _resolve_attached(authorization)
@@ -1169,12 +1168,14 @@ def get_pending_approval(approval_id: str, wait_seconds: float = _LONG_POLL_SECO
     """The submitter's long-poll -- waits up to wait_seconds (default
     _LONG_POLL_SECONDS, clamped to that as a ceiling) for a decision to
     land, so the caller can immediately re-request rather than fast-polling
-    on a fixed timer. wait_seconds exists for pages/chat.py's
-    st.fragment(run_every=...)-driven poll specifically: blocking the full
-    ~25s there would stall that browser session's script thread (and its
-    own Approve/Deny buttons) for the same duration, so it asks for a short
-    wait (a few seconds) instead -- the daemon's own long-poll (a Go
-    goroutine, not constrained the same way) keeps using the default."""
+    on a fixed timer. A caller driven by its own event loop/UI thread (a
+    browser script, a CLI) can pass a shorter wait so it isn't stalled for
+    the full ~25s -- the daemon's own long-poll (a Go goroutine, not
+    constrained the same way) keeps using the default. Note that
+    POST /conversations/step's own approval_decision field is the more
+    direct way for the same caller that created the approval to resolve
+    it -- this endpoint matters for a *different* channel answering the
+    same approval (the native-dialog relay to an attended host)."""
     user_id = _resolve_submitter(authorization)
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid or missing token.")
@@ -1416,11 +1417,9 @@ def _make_storage_io(user_id: int):
     conversations.py never needs to know this service's storage layout or
     STORAGE_CAP_BYTES itself (see its own DispatchContext docstring).
     Reuses the exact same helpers list_storage/upload_storage/
-    download_storage already call, just in-process rather than over HTTP
-    (transfer_file's "server storage" side used to go through those
-    endpoints via pages/chat.py's own download_storage/upload_storage HTTP
-    wrappers; now that orchestration lives in the same service, that round
-    trip is pointless)."""
+    download_storage already call, just in-process rather than over HTTP,
+    since transfer_file's "server storage" side and those endpoints both
+    live in this same service now."""
     directory = _user_storage_dir(user_id)
 
     def read(filename: str) -> str | None:
@@ -1455,10 +1454,9 @@ def _make_storage_io(user_id: int):
     return read, write
 
 
-# --- Conversations (browser/harness-facing tool-calling orchestration) ---
-# The stateless counterpart to pages/chat.py's own tool-calling loop -- see
-# conversations.py's module docstring for the full design (no streaming,
-# no caller-supplied host connection details, turn state fully
+# --- Conversations (harness/future-frontend-facing tool-calling loop) ----
+# See conversations.py's module docstring for the full design (no
+# streaming, no caller-supplied host connection details, turn state fully
 # externalized, mock only fakes daemon/storage dispatch, never the model
 # call itself).
 @app.post("/conversations/step", response_model=ConversationStepResponse)
@@ -1516,7 +1514,7 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
 # --- Profile (pages/settings_profile.py, pages/settings_security.py) ----
 # Notification contact info + the "allow chat to configure..." checkboxes
 # are plain per-user preferences -- persisted here, but not enforced
-# anywhere yet (nothing in pages/chat.py's tool-calling loop reads
+# anywhere yet (nothing in conversations.py's tool-calling loop reads
 # allow_configure_* today). "Command sets"/"Apps"/"Local agents" don't
 # correspond to any existing modeled concept in this codebase the way
 # Hosts/Environments do (see auth_service/db.py's hosts/environments

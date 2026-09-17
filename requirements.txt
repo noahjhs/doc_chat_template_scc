@@ -1,6 +1,2 @@
 streamlit>=1.37
-openai
-prompt_toolkit
-pandas
 requests
-google-re2

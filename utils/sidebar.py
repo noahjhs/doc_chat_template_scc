@@ -19,12 +19,12 @@ from utils.auth import (
 from utils.branding import NAME
 from utils.browser_nav import click_anchor_js
 
-# Mirrors casper_tool.py's COMMAND_CATEGORIES -- the two run as separate
-# processes on separate machines, so this list is duplicated rather than
-# imported. Keep them in sync by hand. Lives here (not pages/chat.py) since
-# render_sidebar() below is what actually displays it (in the "Local
-# commands" expanders), and pages/chat.py's own tool-schema code just
-# imports it back for the model-facing action enum.
+# Mirrors the Go daemon's own allowlisted run_local_command actions
+# (agent/internal/commands/commands.go) and auth_service/conversations.py's
+# own copy (its run_local_command tool schema's action enum) -- three
+# independent processes/services, so this list is duplicated rather than
+# imported. Keep them in sync by hand. Lives here since render_sidebar()
+# below is what actually displays it, in the "Local commands" expanders.
 COMMAND_CATEGORIES = {
     "Git": ["status", "branch", "log"],
     "Navigation": ["pwd", "cd", "ls", "tree", "list_directories"],
@@ -108,8 +108,8 @@ def _render_chrome_css():
     Streamlit's own frontend source, that the button which reopens a
     collapsed sidebar (data-testid="stExpandSidebarButton") is rendered
     *inside* stToolbar specifically, not stHeader generally. Both re-shown
-    here (every page with a real sidebar needs this now, not just chat.py),
-    keeping only stMainMenu (the hamburger/settings menu, a sibling of the
+    here (every page with a real sidebar needs this), keeping only
+    stMainMenu (the hamburger/settings menu, a sibling of the
     expand button within stToolbar, not an ancestor) hidden. Layered after
     hide_streamlit_chrome()'s own <style> tag, so this wins the cascade for
     equally-specific, both-!important rules on the same selectors.
@@ -241,11 +241,11 @@ def _render_chrome_css():
 
 
 def _fetch_local_json(config, action, **kwargs):
-    """Like call_local_agent (pages/chat.py), but returns the parsed
-    response dict (or an error dict in the same {success, stdout, stderr}
-    shape commands.Result already uses) instead of a model-facing string --
-    for UI code that needs to read a result programmatically, namely the
-    workspace browser below and pages/chat.py's own file-transfer tool."""
+    """Like auth_service/conversations.py's own _fetch_local_json, but
+    returns the parsed response dict (or an error dict in the same
+    {success, stdout, stderr} shape commands.Result already uses) instead
+    of a model-facing string -- for UI code that needs to read a result
+    programmatically, namely the workspace browser below."""
     try:
         response = requests.post(
             f"{config['url']}/api/command",
@@ -261,8 +261,8 @@ def _fetch_local_json(config, action, **kwargs):
             # exception message would just be "400 Client Error: Bad
             # Request for url: ...", silently dropping the daemon's actual
             # reason (e.g. "Denied: no matching rule for this call."),
-            # same fix as pages/chat.py's call_local_agent/
-            # call_shell_command.
+            # same fix as auth_service/conversations.py's own
+            # _call_local_agent/_call_shell_command.
             try:
                 detail = response.json().get("detail")
             except ValueError:
@@ -355,10 +355,11 @@ def _build_local_agent_configs(connected_hosts):
             "api_key": h["command_key"],
             "workspace": h.get("workspace") or [],
             # Policy layers enabled on this specific host -- see
-            # auth_service's HostInfo.policy_layers. pages/chat.py composes
-            # these into the host's Policy client-side, mirroring the
-            # daemon's own host-scoped composition (see policy.go's
-            # composePolicy), for its own tier-decision approximation.
+            # auth_service's HostInfo.policy_layers. Not currently composed
+            # or read by anything in this Streamlit app (that composition
+            # now happens server-side, in auth_service/conversations.py's
+            # build_tools -- see Phase 3 of the backend/harness refactor);
+            # kept here in case a future in-app consumer wants it.
             "policy_layers": h.get("policy_layers") or [],
         }
     return configs
@@ -367,16 +368,16 @@ def _build_local_agent_configs(connected_hosts):
 def render_sidebar(username):
     """The entire sidebar: "Signed in as", Environment selection, host
     picker, workspace directory browser, and Local commands reference --
-    identical on every page that calls it (pages/chat.py,
-    pages/environments.py, pages/settings_profile.py,
-    pages/settings_security.py), so a user sees the exact same controls
-    (and can switch host/Environment, browse directories, etc.) regardless
-    of which page they're on. The brand/logo and sign-out both live in
-    utils/topbar.py's render_topbar() instead, not here -- see its own
-    module docstring for why. Returns (local_agent_configs,
-    selected_host_label) -- pages/chat.py's own tool-calling code needs
-    both; every other caller just ignores them, since only chat.py does
-    tool calling."""
+    identical on every page that calls it (pages/environments.py,
+    pages/settings_profile.py, pages/settings_security.py), so a user sees
+    the exact same controls (and can switch host/Environment, browse
+    directories, etc.) regardless of which page they're on. The brand/logo
+    and sign-out both live in utils/topbar.py's render_topbar() instead,
+    not here -- see its own module docstring for why. Returns
+    (local_agent_configs, selected_host_label) -- no current caller in
+    this Streamlit app uses either (that tool-calling context now lives
+    server-side, in auth_service/conversations.py, driven by the harness
+    or a future frontend instead); every caller here just discards them."""
     _render_chrome_css()
 
     # Looked up once (cached in session_state) rather than carried via query
@@ -491,10 +492,11 @@ def render_sidebar(username):
             if env_host_ids:
                 # Click-selectable -- the selection becomes the default
                 # target for local commands the model doesn't name a host
-                # for (see call_local_agent's default_host in pages/chat.py),
-                # same idea as the active Environment selector just above
-                # it. Re-defaults to the first host whenever the current
-                # selection isn't valid for this Environment any more
+                # for (see auth_service/conversations.py's
+                # _call_local_agent's default_host), same idea as the
+                # active Environment selector just above it. Re-defaults to
+                # the first host whenever the current selection isn't
+                # valid for this Environment any more
                 # (switched Environments, or never selected yet) --
                 # Streamlit's radio requires its keyed session_state value
                 # to already be one of the options before it's instantiated.
@@ -528,9 +530,12 @@ def render_sidebar(username):
         # to the active Environment, since a user's physical location
         # doesn't change when they switch which project they're directing
         # the assistant at. Used only to route an "ask"-tier approval's
-        # native-dialog prompt to the right daemon (see pages/chat.py's
-        # submit_pending_approval) -- purely additive, the in-chat
-        # Approve/Deny buttons work the same whether or not this is set.
+        # native-dialog prompt to the right daemon (see
+        # auth_service/conversations.py's _drain_pending_calls, which
+        # creates the approval record an attended daemon's own long-poll
+        # picks up) -- purely additive, a caller resolving the approval
+        # directly via /conversations/step's own approval_decision field
+        # works the same whether or not this is set.
         if hosts:
             if "_attended_host_id" not in st.session_state:
                 fetched = get_attended_host(st.secrets["AUTH_SERVICE_DOMAIN"], current_token())
