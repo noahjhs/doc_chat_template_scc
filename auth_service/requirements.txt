@@ -4,3 +4,4 @@ pydantic
 bcrypt
 requests
 google-re2
+openai

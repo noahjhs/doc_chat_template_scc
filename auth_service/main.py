@@ -18,10 +18,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from policy import compose_policy, match_policy
+import conversations
 from models import (
     AttendedHostInfo,
     AttendedHostUpdateRequest,
     AuthResponse,
+    ConversationPendingApproval,
+    ConversationStepRequest,
+    ConversationStepResponse,
     EnvironmentCreateRequest,
     EnvironmentInfo,
     EnvironmentListResponse,
@@ -66,6 +70,22 @@ from models import (
 
 app = FastAPI()
 init_db()
+
+_openai_client = None
+
+
+def _get_openai_client():
+    """Lazily constructed, cached singleton -- not built at import time
+    since OPENAI_API_KEY need not be set for every deployment context (e.g.
+    running just the test suite). Tests patch this function itself (module-
+    boundary injection) to exercise /conversations/step's tool-calling loop
+    without hitting the real API -- see tests/test_conversations.py."""
+    global _openai_client
+    if _openai_client is None:
+        from openai import OpenAI
+
+        _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
 
 
 @app.exception_handler(RequestValidationError)
@@ -421,6 +441,47 @@ def _policy_layer_info(db, policy_layer_id: int) -> PolicyLayerInfo:
         ).fetchall()
     ]
     return PolicyLayerInfo(id=row["id"], name=row["name"], rules=_policy_layer_rules(db, policy_layer_id), host_ids=host_ids)
+
+
+def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
+    """Every one of the caller's own hosts that's currently connected,
+    keyed by label -- POST /conversations/step's own analogue of
+    pages/chat.py's old local_agent_configs, built from THIS service's own
+    state instead of accepted from the caller (see conversations.py's own
+    module docstring on why that matters). policy_layers is left
+    un-composed (a list of (layer_id, rules) pairs) -- composition happens
+    per-call via policy.compose_policy, same as everywhere else this
+    project composes a host's policy."""
+    rows = db.execute(
+        "SELECT h.id, h.routing_key, uh.label FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id WHERE uh.user_id = ?",
+        (user_id,),
+    ).fetchall()
+    layer_host_rows = db.execute(
+        """
+        SELECT plh.host_id, pl.id
+        FROM policy_layer_hosts plh JOIN policy_layers pl ON pl.id = plh.policy_layer_id
+        WHERE pl.user_id = ?
+        """,
+        (user_id,),
+    ).fetchall()
+    layers_by_host: dict[int, list[tuple[int, list[PolicyLayerRuleInfo]]]] = {}
+    for r in layer_host_rows:
+        layers_by_host.setdefault(r["host_id"], []).append((r["id"], _policy_layer_rules(db, r["id"])))
+    with _attached_lock:
+        attached_snapshot = {k: dict(v) for k, v in _attached.items()}
+    configs = {}
+    for r in rows:
+        att = attached_snapshot.get(r["routing_key"])
+        if att is None or att["user_id"] != user_id or att["local_agent_url"] is None:
+            continue
+        configs[r["label"]] = {
+            "host_id": r["id"],
+            "url": att["local_agent_url"],
+            "api_key": att["command_key"],
+            "workspace": att["workspace"],
+            "policy_layers": layers_by_host.get(r["id"], []),
+        }
+    return configs
 
 
 # --- Host pairing / presence (daemon-initiated, device_token-gated) ------
@@ -1071,27 +1132,35 @@ def _resolve_submitter(authorization: str) -> int | None:
     return attached["user_id"] if attached else None
 
 
-@app.post("/hosts/pending-approvals", response_model=PendingApprovalCreateResponse, status_code=201)
-def create_pending_approval(body: PendingApprovalCreateRequest, authorization: str = Header(default="")):
-    user_id = _resolve_submitter(authorization)
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing token.")
-
+def _create_pending_approval_record(user_id: int, template_name: str, binary: str, args: str, host_label: str) -> str:
+    """Factored out of the create_pending_approval endpoint below so
+    /conversations/step's run_shell_command "ask" path can create one
+    in-process (direct function call, not a self-HTTP round trip) --
+    same store, same long-poll wakeup, just a different caller."""
     approval_id = uuid.uuid4().hex
     with _pending_cond:
         _prune_pending_approvals_locked()
         _pending_approvals[approval_id] = {
             "id": approval_id,
             "user_id": user_id,
-            "template_name": body.template_name,
-            "binary": body.binary,
-            "args": body.args,
-            "host_label": body.host_label,
+            "template_name": template_name,
+            "binary": binary,
+            "args": args,
+            "host_label": host_label,
             "decision": None,
             "created_ts": time.time(),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _pending_cond.notify_all()
+    return approval_id
+
+
+@app.post("/hosts/pending-approvals", response_model=PendingApprovalCreateResponse, status_code=201)
+def create_pending_approval(body: PendingApprovalCreateRequest, authorization: str = Header(default="")):
+    user_id = _resolve_submitter(authorization)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    approval_id = _create_pending_approval_record(user_id, body.template_name, body.binary, body.args, body.host_label)
     return PendingApprovalCreateResponse(approval_id=approval_id)
 
 
@@ -1339,6 +1408,109 @@ def delete_storage(filename: str, authorization: str = Header(default="")):
     if os.path.isfile(target):
         os.remove(target)
     return StorageDeleteResponse(deleted=True)
+
+
+def _make_storage_io(user_id: int):
+    """Read/write closures over one user's own storage directory and cap-
+    check logic, handed to conversations.DispatchContext as callbacks --
+    conversations.py never needs to know this service's storage layout or
+    STORAGE_CAP_BYTES itself (see its own DispatchContext docstring).
+    Reuses the exact same helpers list_storage/upload_storage/
+    download_storage already call, just in-process rather than over HTTP
+    (transfer_file's "server storage" side used to go through those
+    endpoints via pages/chat.py's own download_storage/upload_storage HTTP
+    wrappers; now that orchestration lives in the same service, that round
+    trip is pointless)."""
+    directory = _user_storage_dir(user_id)
+
+    def read(filename: str) -> str | None:
+        try:
+            safe = _safe_filename(filename)
+        except HTTPException:
+            return None
+        target = os.path.join(directory, safe)
+        if not os.path.isfile(target):
+            return None
+        with open(target, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+
+    def write(filename: str, content_b64: str) -> tuple[str | None, int]:
+        """Returns (error_message, 0) on failure or (None, byte_size) on success."""
+        try:
+            safe = _safe_filename(filename)
+        except HTTPException:
+            return "Invalid filename.", 0
+        try:
+            data = base64.b64decode(content_b64, validate=True)
+        except (binascii.Error, ValueError):
+            return "Invalid base64 content.", 0
+        target = os.path.join(directory, safe)
+        existing_size = os.path.getsize(target) if os.path.exists(target) else 0
+        if _dir_total_bytes(directory) - existing_size + len(data) > STORAGE_CAP_BYTES:
+            return f"Storage cap exceeded ({STORAGE_CAP_BYTES // (1024 * 1024)}MB per user).", 0
+        with open(target, "wb") as f:
+            f.write(data)
+        return None, len(data)
+
+    return read, write
+
+
+# --- Conversations (browser/harness-facing tool-calling orchestration) ---
+# The stateless counterpart to pages/chat.py's own tool-calling loop -- see
+# conversations.py's module docstring for the full design (no streaming,
+# no caller-supplied host connection details, turn state fully
+# externalized, mock only fakes daemon/storage dispatch, never the model
+# call itself).
+@app.post("/conversations/step", response_model=ConversationStepResponse)
+def step_conversation(body: ConversationStepRequest, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        configs = _connected_host_configs(db, user_id)
+
+    in_flight = conversations.is_in_flight(body.turn)
+    if in_flight:
+        if body.message is not None or body.tool_call is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot supply message/tool_call while a turn is in flight -- resolve the pending approval first.",
+            )
+        if body.approval_decision is None:
+            raise HTTPException(status_code=400, detail="This turn is awaiting an approval decision.")
+        turn = body.turn
+    else:
+        if body.message is None and body.tool_call is None:
+            raise HTTPException(status_code=400, detail="Supply message or tool_call to start a new turn.")
+        previous_response_id = (body.turn or {}).get("previous_response_id")
+        if body.message is not None:
+            turn = conversations.new_turn_from_message(body.message)
+        else:
+            turn = conversations.new_turn_from_tool_call(body.tool_call.name, body.tool_call.arguments)
+        turn["previous_response_id"] = previous_response_id
+
+    read_storage, write_storage = _make_storage_io(user_id)
+    ctx = conversations.DispatchContext(
+        configs=configs,
+        default_host=body.default_host,
+        mock=body.mock,
+        read_server_storage=read_storage,
+        write_server_storage=write_storage,
+        create_pending_approval=lambda template_name, binary, args, host_label: _create_pending_approval_record(
+            user_id, template_name, binary, args, host_label
+        ),
+    )
+    status, message = conversations.run_turn(turn, body.approval_decision, ctx, _get_openai_client())
+
+    pending_approval = None
+    if status == "pending_approval":
+        pending = turn["awaiting_approval"]
+        pending_approval = ConversationPendingApproval(
+            call_id=pending["call_id"], host=pending.get("host"), args=pending["args"], approval_id=pending.get("approval_id")
+        )
+    return ConversationStepResponse(
+        turn=turn, status=status, message=message if status == "done" else None, pending_approval=pending_approval
+    )
 
 
 # --- Profile (pages/settings_profile.py, pages/settings_security.py) ----

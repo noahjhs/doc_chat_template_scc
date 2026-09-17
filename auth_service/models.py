@@ -1,5 +1,5 @@
 import re
-from typing import Literal
+from typing import Any, Literal
 
 import re2
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -273,6 +273,65 @@ class PolicyEvalResponse(BaseModel):
     tier: Literal["allow", "ask", "deny"]
     matched_layer_id: int | None = None
     matched_rule: PolicyLayerRuleInfo | None = None
+
+
+class ConversationToolCall(BaseModel):
+    """Injects a tool call directly, as if the model had already proposed
+    it -- what the harness's `call tool`/`call mock tool` verbs use. See
+    conversations.py's new_turn_from_tool_call for why this skips straight
+    to dispatch instead of asking the model to decide."""
+
+    name: str = Field(min_length=1, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationStepRequest(BaseModel):
+    """POST /conversations/step's body. Exactly one of three things is
+    happening on a given call, distinguished by shape rather than a mode
+    flag:
+      - turn is None: start a brand-new conversation -- message or
+        tool_call required.
+      - turn is present and NOT in flight (its own pending_calls/
+        awaiting_approval are both empty -- see conversations.is_in_flight):
+        start a new turn continuing the SAME conversation -- message or
+        tool_call required again; the returned turn's previous_response_id
+        carries forward so the model keeps its context.
+      - turn is present and IS in flight: resume a turn paused for
+        approval -- approval_decision required, message/tool_call invalid
+        (a turn already mid-hop can't have a new message injected into it).
+    default_host names which of the caller's own connected hosts a tool
+    call should default to when it doesn't specify one and more than one
+    is connected (mirrors run_shell_command's/run_local_command's own
+    `host` field -- this is a label, never a URL/API key; the server looks
+    those up itself from its own state). mock, see conversations.py's own
+    module docstring."""
+
+    turn: dict[str, Any] | None = None
+    message: str | None = None
+    tool_call: ConversationToolCall | None = None
+    approval_decision: Literal["allow", "deny"] | None = None
+    default_host: str | None = None
+    mock: bool = False
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.message is not None and self.tool_call is not None:
+            raise ValueError("Supply at most one of message/tool_call.")
+        return self
+
+
+class ConversationPendingApproval(BaseModel):
+    call_id: str
+    host: str | None = None
+    args: dict[str, Any]
+    approval_id: str | None = None
+
+
+class ConversationStepResponse(BaseModel):
+    turn: dict[str, Any]
+    status: Literal["done", "pending_approval"]
+    message: str | None = None
+    pending_approval: ConversationPendingApproval | None = None
 
 
 class HostInfo(BaseModel):

@@ -15,7 +15,7 @@ import os.path
 
 import re2
 
-from models import Pattern, PolicyLayerRuleInfo
+from models import BLACKLIST_MATCHES_NOTHING, Pattern, PolicyLayerRuleInfo
 
 
 def _value_in_roots(value: str, roots: list[str]) -> bool:
@@ -113,3 +113,43 @@ def match_policy(
         if _rule_matches(rule, positional_args, options, roots):
             return layer_id, rule
     return None, None
+
+
+def describe_pattern(pattern: Pattern) -> str:
+    """Prose rendering of one Pattern -- attribute-access port of
+    utils/policy.py's own describe_pattern (which operates on raw JSON
+    dicts, for the browser's own rendering); this copy exists for
+    /conversations/step's run_shell_command tool description, built
+    server-side from real Pattern objects rather than a re-fetched JSON
+    payload. Kept behaviorally identical -- see utils/policy.py's own
+    docstring for the three-state whitelist/blacklist semantics this
+    renders."""
+    has_blacklist = pattern.blacklist and pattern.blacklist != BLACKLIST_MATCHES_NOTHING
+    if pattern.whitelist == "^$" and not has_blacklist:
+        return "value not allowed"
+    parts = []
+    if pattern.whitelist == "{roots}":
+        parts.append("must be inside one of this host's addressable directories")
+    elif pattern.whitelist:
+        parts.append(f"must match {pattern.whitelist!r}")
+    if has_blacklist:
+        parts.append(f"must not match {pattern.blacklist!r}")
+    return ", ".join(parts) if parts else "value not required"
+
+
+def describe_rule(rule: PolicyLayerRuleInfo) -> str:
+    """One rule's constraints + tier in prose -- see describe_pattern."""
+    lines = []
+    for i, pattern in enumerate(rule.positional_constraints):
+        label = "binary" if i == 0 else f"position {i}"
+        lines.append(f"{label}: {describe_pattern(pattern)}")
+    for opt in rule.option_constraints:
+        if opt.long and opt.short:
+            name = f"--{opt.long}/-{opt.short}"
+        elif opt.long:
+            name = f"--{opt.long}"
+        else:
+            name = f"-{opt.short}"
+        lines.append(f"option {name}: {describe_pattern(opt.pattern)}")
+    body = "; ".join(lines) if lines else "(no constraints)"
+    return f"tier={rule.tier}: {body}"
