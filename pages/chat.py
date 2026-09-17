@@ -18,7 +18,7 @@ from utils.auth import (
     upload_storage,
 )
 from utils.branding import NAME
-from utils.rule_chains import describe_rule
+from utils.policy import describe_rule
 from utils.sidebar import (
     COMMAND_CATEGORIES,
     GIT_ACTIONS,
@@ -210,39 +210,56 @@ TRANSFER_TOOL = {
     },
 }
 
-def _build_rule_chain_tool(local_agent_configs):
-    """Collects every rule chain enabled on any connected host in the
-    active Environment (deduped by id) into one tool -- conditional
-    per-chain rule enums aren't expressible in a flat JSON Schema tool
-    definition the way host selection's flat enum is (see LOCAL_AGENT_TOOL's
-    own 'host' field), so the available chains and their rules are
-    described in prose in the tool's own description instead. The daemon
-    (agent/internal/commands/rulechains.go) is what actually validates the
-    proposed call server-side regardless of what this description says --
-    a wrong guess here just comes back as a clear rejection the model can
-    retry from, same posture as an unrecognized run_local_command action.
-    Returns None (no tool at all) when no connected host has any rule
-    chains enabled, mirroring how LOCAL_AGENT_TOOL/TRANSFER_TOOL are only
-    added when local_agent_configs is non-empty."""
-    seen = {}
-    for config in local_agent_configs.values():
-        for chain in config.get("rule_chains") or []:
-            seen[chain["id"]] = chain
-    if not seen:
-        return None
+def _compose_policy(config):
+    """Concatenates every policy layer attached to one host's config into
+    one ordered rule list -- v1's whole composition rule (mirrors the Go
+    daemon's own composePolicy in policy.go exactly: sort layers by id
+    ascending, then concatenate their rules in order). A rule is only ever
+    evaluated as part of a policy, never a layer standalone, so this is
+    the thing every real call is actually checked against -- there's no
+    "pick one layer" choice anymore."""
+    layers = sorted(config.get("policy_layers") or [], key=lambda pl: pl["id"])
+    rules = []
+    for layer in layers:
+        rules.extend(layer.get("rules") or [])
+    return rules
+
+
+def _build_shell_tool(local_agent_configs):
+    """One tool covering every connected host's shell access -- host-scoped,
+    not layer-scoped: the model supplies which host to run on (same 'host'
+    field every other tool here already has), and the daemon (and this
+    page's own decide_tier approximation) composes whatever policy layers
+    are attached to THAT host into its Policy and checks the call against
+    the whole thing (see _compose_policy above and policy.go's
+    composePolicy) -- there's nothing for the model to choose among
+    anymore, so the description just lists each host's effective,
+    composed rules for awareness rather than enumerating a choice. The
+    daemon is what actually validates the proposed call server-side
+    regardless of what this description says -- a wrong guess here just
+    comes back as a clear rejection the model can retry from, same
+    posture as an unrecognized run_local_command action. Returns None (no
+    tool at all) when no connected host has any policy layers attached,
+    mirroring how LOCAL_AGENT_TOOL/TRANSFER_TOOL are only added when
+    local_agent_configs is non-empty."""
     lines = []
-    for chain in sorted(seen.values(), key=lambda c: c["id"]):
-        lines.append(f"- rule_chain_id={chain['id']} name={chain['name']!r}:")
-        for rule in chain["rules"]:
+    for host, config in local_agent_configs.items():
+        rules = _compose_policy(config)
+        if not rules:
+            continue
+        lines.append(f"- host={host!r}:")
+        for rule in rules:
             lines.append(f"    {describe_rule(rule)}")
+    if not lines:
+        return None
     description = (
-        "Run a command against one of the user's pre-approved rule chains on "
-        "a connected machine -- not arbitrary shell access. Supply the "
+        "Run a shell command on a connected machine -- not arbitrary shell "
+        "access, subject to that host's own configured policy. Supply the "
         "binary and its arguments as positional_args (index 0 MUST be the "
         "binary itself) plus any options; the daemon checks the call "
-        "against the chain's rules IN ORDER, first match wins -- if nothing "
-        "matches, the call is rejected outright, don't retry it unchanged. "
-        "Available rule chains on hosts in the active Environment:\n" + "\n".join(lines) + "\n"
+        "against the host's policy rules IN ORDER, first match wins -- if "
+        "nothing matches, the call is rejected outright, don't retry it "
+        "unchanged. Each connected host's current effective policy:\n" + "\n".join(lines) + "\n"
         "A matched rule's tier controls what happens next: 'ask' pauses for "
         "the user's explicit approval in chat before it actually runs; "
         "'allow' runs immediately; 'deny' always rejects it without running "
@@ -250,15 +267,11 @@ def _build_rule_chain_tool(local_agent_configs):
     )
     return {
         "type": "function",
-        "name": "run_rule_chain_call",
+        "name": "run_shell_command",
         "description": description,
         "parameters": {
             "type": "object",
             "properties": {
-                "rule_chain_id": {
-                    "type": "integer",
-                    "description": "The id of the rule chain to check this call against, from the list above.",
-                },
                 "positional_args": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -299,17 +312,17 @@ def _build_rule_chain_tool(local_agent_configs):
                     ),
                 },
             },
-            "required": ["rule_chain_id", "positional_args"],
+            "required": ["positional_args"],
         },
     }
 
 
-RULE_CHAIN_TOOL = _build_rule_chain_tool(local_agent_configs)
+SHELL_TOOL = _build_shell_tool(local_agent_configs)
 
 active_tools = (
     TOOLS
     + ([LOCAL_AGENT_TOOL, TRANSFER_TOOL] if local_agent_configs else [])
-    + ([RULE_CHAIN_TOOL] if RULE_CHAIN_TOOL else [])
+    + ([SHELL_TOOL] if SHELL_TOOL else [])
 )
 
 def _build_welcome_message():
@@ -470,20 +483,6 @@ def call_transfer_file(local_agent_configs, source, source_path, destination, de
     return f"Transferred {source_path!r} from {source} to {destination_path!r} on {destination}."
 
 
-def _find_rule_chain(local_agent_configs, host, rule_chain_id):
-    """Looks up a rule chain's cached metadata (name/rules) by id, scoped
-    to the given host -- needed before dispatch, both for decide_tier()
-    below and to build a human-readable label for the approval UI/status
-    message."""
-    config = local_agent_configs.get(host)
-    if config is None:
-        return None
-    for chain in config.get("rule_chains") or []:
-        if chain.get("id") == rule_chain_id:
-            return chain
-    return None
-
-
 def _describe_call_args(positional_args, options):
     """Human-readable rendering of a proposed call's arguments (everything
     but the binary itself, which the caller shows separately) -- used for
@@ -499,7 +498,7 @@ def _describe_call_args(positional_args, options):
 def _value_in_roots(value, roots):
     """Best-effort client-side approximation of the Go daemon's
     authoritative {roots} containment check (agent/internal/commands/
-    rulechains.go's valueInRoots) -- a plain string-prefix test against the
+    policy.go's valueInRoots) -- a plain string-prefix test against the
     cached workspace list, no symlink/".."/case-sensitivity resolution
     (this runs in the browser/server tier, with no real filesystem access
     to the remote host). A relative value can't be resolved against a
@@ -507,7 +506,7 @@ def _value_in_roots(value, roots):
     whenever there's at least one root -- this can only make decide_tier
     ask when the daemon would actually allow, never the reverse, which is
     exactly why a "{roots}" rule is forbidden from carrying tier "allow"
-    at authoring time (see auth_service's own RuleChainRuleCreateRequest
+    at authoring time (see auth_service's own PolicyLayerRuleCreateRequest
     validator) -- the daemon's own check is always the authoritative one."""
     if not value:
         return False
@@ -553,7 +552,7 @@ def _find_option(options, short, long):
 
 def _rule_matches(rule, positional_args, options, roots):
     """Python port of the Go daemon's ruleMatches -- see
-    agent/internal/commands/rulechains.go for the authoritative version
+    agent/internal/commands/policy.go for the authoritative version
     this mirrors. A positional_constraints entry beyond what was actually
     supplied is matched as "" -- same coercion the option loop below uses
     for a missing value -- so a blank pattern there means "value not
@@ -578,42 +577,45 @@ def _rule_matches(rule, positional_args, options, roots):
     return True
 
 
-def match_rule_chain_rule(rule_chain, positional_args, options, roots):
-    """Python port of the Go daemon's matchRule -- first-match-wins over
-    rule_chain["rules"] (already ordered by position, as returned by
-    GET /hosts), returning the matched rule or None (terminal deny)."""
-    if not rule_chain:
-        return None
-    for rule in rule_chain.get("rules") or []:
+def match_policy(rules, positional_args, options, roots):
+    """Python port of the Go daemon's matchPolicy -- first-match-wins over
+    rules (an already-composed policy -- see _compose_policy above, which
+    concatenates every layer attached to a host in the same order
+    policy.go's composePolicy does), returning the matched rule or None
+    (terminal deny). A rule is only ever evaluated as part of a policy,
+    never a layer standalone, so there's no equivalent of the old
+    "look up one chain by id" step here -- the caller already composed
+    whichever host's policy is relevant."""
+    for rule in rules:
         if _rule_matches(rule, positional_args, options, roots):
             return rule
     return None
 
 
-def decide_tier(rule_chain, args, roots, recent_messages):
-    """Finds the first matching rule (see match_rule_chain_rule) and
-    returns its tier, or "deny" if nothing matches -- the same "absence
-    means deny" posture the daemon itself falls back to. Must run here,
-    client-side, synchronously, before the daemon is ever called, so
-    "deny" never reaches it and "ask" can pause for approval before
-    dispatch -- see the plan's note on why {roots} rules can never be
-    tier "allow", given this can only approximate directory containment.
-    recent_messages is accepted but unused for now -- see the "Resources"
-    plan's "Forward compatibility: intent-based authorization" section for
-    why this signature carries it regardless: a later intent-evaluation
-    layer would need exactly this input, and threading it through now
-    avoids re-plumbing the pause/resume mechanism below when that's built."""
-    rule = match_rule_chain_rule(rule_chain, args.get("positional_args") or [], args.get("options") or [], roots)
+def decide_tier(rules, args, roots, recent_messages):
+    """Finds the first matching rule (see match_policy) and returns its
+    tier, or "deny" if nothing matches -- the same "absence means deny"
+    posture the daemon itself falls back to. Must run here, client-side,
+    synchronously, before the daemon is ever called, so "deny" never
+    reaches it and "ask" can pause for approval before dispatch -- see the
+    plan's note on why {roots} rules can never be tier "allow", given this
+    can only approximate directory containment. recent_messages is
+    accepted but unused for now -- see the "Resources" plan's "Forward
+    compatibility: intent-based authorization" section for why this
+    signature carries it regardless: a later intent-evaluation layer
+    would need exactly this input, and threading it through now avoids
+    re-plumbing the pause/resume mechanism below when that's built."""
+    rule = match_policy(rules, args.get("positional_args") or [], args.get("options") or [], roots)
     return rule["tier"] if rule else "deny"
 
 
-def call_rule_chain_call(
-    local_agent_configs, rule_chain_id, positional_args, options, host=None, default_host=None, path=None
-):
+def call_shell_command(local_agent_configs, positional_args, options, host=None, default_host=None, path=None):
     """Mirrors call_local_agent's shape/error posture exactly, for the
-    daemon's run_rule_chain_call action. Never raises."""
+    daemon's run_shell_command action. Host-scoped, not layer-scoped --
+    no id to pass; the daemon composes whatever policy layers are
+    attached to the resolved host itself. Never raises."""
     if not local_agent_configs:
-        return "Rule chain error: no connected machines available."
+        return "Shell command error: no connected machines available."
     if host is None:
         if len(local_agent_configs) == 1:
             host = next(iter(local_agent_configs))
@@ -621,17 +623,16 @@ def call_rule_chain_call(
             host = default_host
         else:
             available = ", ".join(local_agent_configs)
-            return f"Rule chain error: multiple machines connected ({available}) -- specify which one via 'host'."
+            return f"Shell command error: multiple machines connected ({available}) -- specify which one via 'host'."
     config = local_agent_configs.get(host)
     if config is None:
         available = ", ".join(local_agent_configs)
-        return f"Rule chain error: unknown host {host!r}. Available: {available}."
+        return f"Shell command error: unknown host {host!r}. Available: {available}."
     try:
         response = requests.post(
             f"{config['url']}/api/command",
             json={
-                "action": "run_rule_chain_call",
-                "rule_chain_id": rule_chain_id,
+                "action": "run_shell_command",
                 "positional_args": positional_args,
                 "options": options,
                 "path": path,
@@ -640,12 +641,12 @@ def call_rule_chain_call(
             timeout=15,
         )
         if response.status_code == 401:
-            return "Rule chain error: invalid API key."
+            return "Shell command error: invalid API key."
         if response.status_code >= 400:
-            return f"Rule chain error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
+            return f"Shell command error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
         return json.dumps(response.json())
     except requests.RequestException as e:
-        return f"Rule chain error: {e}"
+        return f"Shell command error: {e}"
 
 
 def describe_local_command(action, args):
@@ -712,21 +713,22 @@ def show_transfer_calls(calls):
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
-def show_rule_chain_calls(calls):
-    """Render a demo-friendly summary of rule chain invocations (including
-    denied ones -- see _process_turn's own "Denied by user." synthesized
-    output, appended here the same as a real dispatch result so a denial
-    stays visible in the transcript, not just to the model)."""
+def show_shell_command_calls(calls):
+    """Render a demo-friendly summary of shell command invocations
+    (including denied ones -- see _process_turn's own "Denied by user."
+    synthesized output, appended here the same as a real dispatch result
+    so a denial stays visible in the transcript, not just to the
+    model)."""
     if not calls:
         return
-    label = f"🔧 {len(calls)} rule chain call{'s' if len(calls) != 1 else ''}"
+    label = f"🔧 {len(calls)} shell command{'s' if len(calls) != 1 else ''}"
     with st.expander(label):
         for entry in calls:
             args = entry.get("args", {})
             positional_args = args.get("positional_args") or []
             binary = positional_args[0] if positional_args else ""
             call_args = _describe_call_args(positional_args, args.get("options") or [])
-            prefix = f"$ chain #{args.get('rule_chain_id')} {binary} {call_args}".rstrip()
+            prefix = f"$ {binary} {call_args}".rstrip()
             st.code(f"{prefix}\n{entry['output']}", language="text")
 
 
@@ -739,7 +741,7 @@ def _render_message(message):
         show_code_interpreter(message.get("code_blocks", []))
         show_local_agent_calls(message.get("local_agent_calls", []))
         show_transfer_calls(message.get("transfer_calls", []))
-        show_rule_chain_calls(message.get("rule_chain_calls", []))
+        show_shell_command_calls(message.get("shell_command_calls", []))
 
 
 # One-shot: True only on the render right after the welcome pair is first
@@ -798,7 +800,7 @@ def capture_response_meta(stream, meta):
 
 def _dispatch_tool_call(call, local_agent_configs, selected_host_label, aggregate):
     """Executes ONE already-decided tool call -- never an ask-tier
-    run_rule_chain_call still awaiting approval; _process_turn below
+    run_shell_command still awaiting approval; _process_turn below
     intercepts those before they ever reach here -- and returns its output
     string, appending a demo-friendly entry to the relevant aggregate[...]
     list as a side effect, same as the old inline dispatch did."""
@@ -832,17 +834,13 @@ def _dispatch_tool_call(call, local_agent_configs, selected_host_label, aggregat
             )
             st.code(output, language="text")
         aggregate["transfer_calls"].append({"args": args, "output": output})
-    elif call["name"] == "run_rule_chain_call":
-        host = args.get("host") or selected_host_label
-        rule_chain = _find_rule_chain(local_agent_configs, host, args.get("rule_chain_id"))
-        chain_name = rule_chain["name"] if rule_chain else f"#{args.get('rule_chain_id')}"
+    elif call["name"] == "run_shell_command":
         positional_args = args.get("positional_args") or []
         call_args = _describe_call_args(positional_args, args.get("options") or [])
-        label = f"🔧 Run {chain_name}: {' '.join(positional_args)} {call_args}".rstrip()
+        label = f"🔧 Run: {' '.join(positional_args)} {call_args}".rstrip()
         with st.status(label):
-            output = call_rule_chain_call(
+            output = call_shell_command(
                 local_agent_configs,
-                args.get("rule_chain_id"),
                 positional_args,
                 args.get("options") or [],
                 host=args.get("host"),
@@ -850,7 +848,7 @@ def _dispatch_tool_call(call, local_agent_configs, selected_host_label, aggregat
                 path=args.get("path"),
             )
             st.code(output, language="text")
-        aggregate["rule_chain_calls"].append({"args": args, "output": output})
+        aggregate["shell_command_calls"].append({"args": args, "output": output})
     else:
         output = f"Unknown tool: {call['name']}"
     return output
@@ -865,7 +863,7 @@ def _new_turn(prompt):
             "code_blocks": [],
             "local_agent_calls": [],
             "transfer_calls": [],
-            "rule_chain_calls": [],
+            "shell_command_calls": [],
             "image": None,
         },
         "full_response": "",
@@ -918,12 +916,12 @@ def _process_turn(local_agent_configs, selected_host_label):
         while turn["pending_calls"]:
             call = turn["pending_calls"][0]
             denied_output = None
-            if call["name"] == "run_rule_chain_call":
+            if call["name"] == "run_shell_command":
                 args = json.loads(call["arguments"])
                 host = args.get("host") or selected_host_label
-                rule_chain = _find_rule_chain(local_agent_configs, host, args.get("rule_chain_id"))
+                rules = _compose_policy(local_agent_configs.get(host) or {})
                 roots = (local_agent_configs.get(host) or {}).get("workspace") or []
-                call_tier = decide_tier(rule_chain, args, roots, st.session_state.messages)
+                call_tier = decide_tier(rules, args, roots, st.session_state.messages)
                 if call_tier == "deny":
                     # A structural rejection -- either no matching rule at
                     # all, or the matched rule is itself tier "deny" --
@@ -939,7 +937,7 @@ def _process_turn(local_agent_configs, selected_host_label):
                     if decision is None:
                         approval_id = None
                         positional_args = args.get("positional_args") or []
-                        if rule_chain and positional_args:
+                        if positional_args:
                             # Additive, alongside (not instead of) the
                             # in-chat Approve/Deny UI below -- lets a native
                             # dialog on the user's attended host (see
@@ -951,7 +949,7 @@ def _process_turn(local_agent_configs, selected_host_label):
                             submitted = submit_pending_approval(
                                 AUTH_DOMAIN,
                                 current_token(),
-                                rule_chain["name"],
+                                "Shell command",
                                 positional_args[0],
                                 _describe_call_args(positional_args, args.get("options") or []),
                                 host,
@@ -960,7 +958,6 @@ def _process_turn(local_agent_configs, selected_host_label):
                         st.session_state["_pending_approval"] = {
                             "call_id": call["call_id"],
                             "host": host,
-                            "rule_chain": rule_chain,
                             "args": args,
                             "approval_id": approval_id,
                         }
@@ -971,7 +968,7 @@ def _process_turn(local_agent_configs, selected_host_label):
 
             if denied_output is not None:
                 output = denied_output
-                turn["aggregate"]["rule_chain_calls"].append(
+                turn["aggregate"]["shell_command_calls"].append(
                     {"args": json.loads(call["arguments"]), "output": output}
                 )
             else:
@@ -992,7 +989,7 @@ def _process_turn(local_agent_configs, selected_host_label):
     show_code_interpreter(aggregate["code_blocks"])
     show_local_agent_calls(aggregate["local_agent_calls"])
     show_transfer_calls(aggregate["transfer_calls"])
-    show_rule_chain_calls(aggregate["rule_chain_calls"])
+    show_shell_command_calls(aggregate["shell_command_calls"])
 
     st.session_state.messages.append(
         {
@@ -1004,7 +1001,7 @@ def _process_turn(local_agent_configs, selected_host_label):
             "code_blocks": aggregate["code_blocks"],
             "local_agent_calls": aggregate["local_agent_calls"],
             "transfer_calls": aggregate["transfer_calls"],
-            "rule_chain_calls": aggregate["rule_chain_calls"],
+            "shell_command_calls": aggregate["shell_command_calls"],
         }
     )
     del st.session_state["_turn"]
@@ -1087,24 +1084,19 @@ if "_turn" in st.session_state:
 
     if not finished:
         pending = st.session_state["_pending_approval"]
-        rule_chain = pending["rule_chain"]
-        chain_label = rule_chain["name"] if rule_chain else f"rule chain #{pending['args'].get('rule_chain_id')}"
         positional_args = pending["args"].get("positional_args") or []
         call_args = _describe_call_args(positional_args, pending["args"].get("options") or [])
         call_line = f"{' '.join(positional_args)} {call_args}".strip()
         with st.chat_message("assistant"):
-            st.warning(
-                f"The assistant wants to run **{chain_label}** "
-                f"(`{call_line}`) on **{pending['host']}**. Allow it?"
-            )
+            st.warning(f"The assistant wants to run `{call_line}` on **{pending['host']}**. Allow it?")
             approve_col, deny_col = st.columns(2)
             with approve_col:
-                if st.button("Approve", key="approve_rule_chain", type="primary"):
+                if st.button("Approve", key="approve_shell_command", type="primary"):
                     st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "allow"
                     del st.session_state["_pending_approval"]
                     st.rerun()
             with deny_col:
-                if st.button("Deny", key="deny_rule_chain"):
+                if st.button("Deny", key="deny_shell_command"):
                     st.session_state.setdefault("_approval_decisions", {})[pending["call_id"]] = "deny"
                     del st.session_state["_pending_approval"]
                     st.rerun()

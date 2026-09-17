@@ -57,19 +57,18 @@ class HostPresenceReport(BaseModel):
 # character class requiring one character that's simultaneously not
 # whitespace (\s) and not non-whitespace (\S), which is every character,
 # so it can never match, not even a zero-width match against "". Confirmed
-# directly under google-re2. Keeps RuleChainPattern's two fields fully
-# symmetric: both are always real, always-compiled regex strings, never
-# None -- an absent whitelist ("") already matches everything on its own
-# (an empty RE2 pattern matches everything), but an absent blacklist can't
-# use the same trick, since a literal "" blacklist would match (and so
-# reject) everything instead of nothing. Mirrored in
-# utils/rule_chains.py's own copy of this constant (a separate,
-# independently-deployed service -- see that module's comment for why it
-# can't just be imported from here).
+# directly under google-re2. Keeps Pattern's two fields fully symmetric:
+# both are always real, always-compiled regex strings, never None -- an
+# absent whitelist ("") already matches everything on its own (an empty
+# RE2 pattern matches everything), but an absent blacklist can't use the
+# same trick, since a literal "" blacklist would match (and so reject)
+# everything instead of nothing. Mirrored wherever this schema needs
+# re-deriving client-side (currently the harness) -- a separate,
+# independently-deployed service, so it can't just be imported from here.
 BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
 
 
-class RuleChainPattern(BaseModel):
+class Pattern(BaseModel):
     """A whitelist/blacklist pair evaluated as RE2 regex (google-re2, real
     Python bindings to the same RE2 library Go's stdlib regexp targets --
     chosen specifically for RE2's guaranteed-linear-time matching, since
@@ -87,11 +86,12 @@ class RuleChainPattern(BaseModel):
     (which can never match, so "not specified" and "never rejects"
     likewise coincide). This is the ONLY shape a constraint takes, for
     both a positional_constraints list entry and an OptionConstraint's
-    pattern (see RuleChainRuleCreateRequest/OptionConstraint below) -- no
-    "*" or other sentinel needed, because a MISSING value (a positional
-    argument beyond what was supplied, or an option present with no
-    value) is matched as "" for this purpose. That gives exactly the
-    three states "value required"/"not required"/"not allowed" for free:
+    pattern (see PolicyLayerRuleCreateRequest/OptionConstraint below) --
+    no "*" or other sentinel needed, because a MISSING value (a
+    positional argument beyond what was supplied, or an option present
+    with no value) is matched as "" for this purpose. That gives exactly
+    the three states "value required"/"not required"/"not allowed" for
+    free:
       - fully blank (default whitelist/blacklist): "" already satisfies
         an empty whitelist and never satisfies BLACKLIST_MATCHES_NOTHING,
         so this matches whether a value was actually supplied or not --
@@ -125,14 +125,14 @@ class OptionConstraint(BaseModel):
     """One option (called "options", not "flags" -- they can carry values)
     a rule constrains, identified by its short and/or long form (at least
     one required). Including an OptionConstraint at all means that option
-    must be PRESENT; pattern (always a RuleChainPattern, see its own
-    docstring) is checked against its value -- or against "" if it was
-    present with no value -- so a blank pattern accepts any/no value, and
-    a whitelist of "^$" requires no value specifically."""
+    must be PRESENT; pattern (always a Pattern, see its own docstring) is
+    checked against its value -- or against "" if it was present with no
+    value -- so a blank pattern accepts any/no value, and a whitelist of
+    "^$" requires no value specifically."""
 
     short: str | None = Field(default=None, max_length=16)
     long: str | None = Field(default=None, max_length=64)
-    pattern: RuleChainPattern = Field(default_factory=RuleChainPattern)
+    pattern: Pattern = Field(default_factory=Pattern)
 
     @model_validator(mode="after")
     def _short_or_long(self):
@@ -141,19 +141,19 @@ class OptionConstraint(BaseModel):
         return self
 
 
-def _pattern_uses_roots(pattern: RuleChainPattern) -> bool:
+def _pattern_uses_roots(pattern: Pattern) -> bool:
     return pattern.whitelist == "{roots}"
 
 
-class RuleChainRuleCreateRequest(BaseModel):
-    """One rule within a Rule Chain -- see rule_chain_rules' own schema
-    comment in db.py for the full shape. positional_constraints' list
-    index IS the argv position (index 0 = the binary). Position 0 is
+class PolicyLayerRuleCreateRequest(BaseModel):
+    """One rule within a Policy Layer -- see policy_layer_rules' own
+    schema comment in db.py for the full shape. positional_constraints'
+    list index IS the argv position (index 0 = the binary). Position 0 is
     optional exactly like every other position -- an empty list, or a
     blank entry, both mean "value not required" there too; there's
     nothing special required about constraining the binary itself."""
 
-    positional_constraints: list[RuleChainPattern] = Field(default_factory=list)
+    positional_constraints: list[Pattern] = Field(default_factory=list)
     option_constraints: list[OptionConstraint] = Field(default_factory=list)
     tier: Literal["allow", "ask", "deny"] = "ask"
 
@@ -173,64 +173,64 @@ class RuleChainRuleCreateRequest(BaseModel):
         return self
 
 
-class RuleChainRuleUpdateRequest(BaseModel):
-    """PATCH /rule-chains/{id}/rules/{rule_id}'s body -- every field
+class PolicyLayerRuleUpdateRequest(BaseModel):
+    """PATCH /policy-layers/{id}/rules/{rule_id}'s body -- every field
     optional, same merge-only-what's-present convention as
     ProfileUpdateRequest. Cross-field validation (position 0, "{roots}"
     rules) is re-applied by main.py reconstructing the MERGED result
-    through RuleChainRuleCreateRequest -- a partial patch can't be
+    through PolicyLayerRuleCreateRequest -- a partial patch can't be
     validated in isolation."""
 
-    positional_constraints: list[RuleChainPattern] | None = None
+    positional_constraints: list[Pattern] | None = None
     option_constraints: list[OptionConstraint] | None = None
     tier: Literal["allow", "ask", "deny"] | None = None
 
 
-class RuleChainRuleInfo(BaseModel):
+class PolicyLayerRuleInfo(BaseModel):
     id: int
     position: int
-    positional_constraints: list[RuleChainPattern]
+    positional_constraints: list[Pattern]
     option_constraints: list[OptionConstraint]
     tier: str
 
 
-class RuleChainRuleReorderRequest(BaseModel):
+class PolicyLayerRuleReorderRequest(BaseModel):
     rule_ids: list[int] = Field(min_length=1)
 
 
-class HostRuleChainInfo(BaseModel):
-    """The subset of a rule chain relevant once it's already known to be
+class HostPolicyLayerInfo(BaseModel):
+    """The subset of a policy layer relevant once it's already known to be
     attached to a specific host -- embedded in HostInfo below
     (browser-facing, via GET /hosts) and returned by the daemon-facing
-    GET /hosts/rule-chains. No host_ids on either: both callers already
+    GET /hosts/policy-layers. No host_ids on either: both callers already
     know which host they're asking about."""
 
     id: int
     name: str
-    rules: list[RuleChainRuleInfo] = []
+    rules: list[PolicyLayerRuleInfo] = []
 
 
-class HostRuleChainListResponse(BaseModel):
-    rule_chains: list[HostRuleChainInfo]
+class HostPolicyLayerListResponse(BaseModel):
+    policy_layers: list[HostPolicyLayerInfo]
 
 
-class RuleChainCreateRequest(BaseModel):
+class PolicyLayerCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
 
-class RuleChainRenameRequest(BaseModel):
+class PolicyLayerRenameRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
 
-class RuleChainInfo(BaseModel):
+class PolicyLayerInfo(BaseModel):
     id: int
     name: str
-    rules: list[RuleChainRuleInfo] = []
+    rules: list[PolicyLayerRuleInfo] = []
     host_ids: list[int] = []
 
 
-class RuleChainListResponse(BaseModel):
-    rule_chains: list[RuleChainInfo]
+class PolicyLayerListResponse(BaseModel):
+    policy_layers: list[PolicyLayerInfo]
 
 
 class HostInfo(BaseModel):
@@ -242,7 +242,7 @@ class HostInfo(BaseModel):
     workspace: list[str] = []
     command_key: str | None = None
     environment_ids: list[int] = []
-    rule_chains: list[HostRuleChainInfo] = []
+    policy_layers: list[HostPolicyLayerInfo] = []
 
 
 class HostListResponse(BaseModel):

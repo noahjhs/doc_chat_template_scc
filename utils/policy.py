@@ -1,6 +1,6 @@
-"""Prose rendering of Rule Chain constraints, shared between pages/chat.py
-(the run_rule_chain_call tool description, so the model sees a rule chain's
-rules in plain English) and pages/resources.py (the rule-authoring UI's
+"""Prose rendering of Policy Layer rules, shared between pages/chat.py (the
+run_shell_command tool description, so the model sees a host's effective
+policy in plain English) and pages/resources.py (the policy-authoring UI's
 read-only rule summaries) -- kept in one place so the model and the human
 always see the exact same rendering of the exact same rule."""
 
@@ -10,7 +10,7 @@ always see the exact same rendering of the exact same rule."""
 # app pulls from. A blank blacklist defaults to this ("matches nothing")
 # rather than "" ("matches everything") specifically because a literal ""
 # blacklist would reject every value, not accept every value the way an
-# empty whitelist does -- see RuleChainPattern's own docstring.
+# empty whitelist does -- see Pattern's own docstring.
 BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
 
 

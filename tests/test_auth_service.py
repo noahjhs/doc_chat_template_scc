@@ -7,7 +7,7 @@ import pytest
 
 AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
 
-# Must match auth_service/models.py's own RuleChainPattern.blacklist
+# Must match auth_service/models.py's own Pattern.blacklist
 # default exactly -- a blank blacklist round-trips as this, not None.
 BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
 
@@ -483,13 +483,13 @@ def test_profile_is_per_user(client):
     assert b_profile["email"] == ""
 
 
-def _create_rule_chain(client, headers, name="npm scripts"):
-    return client.post("/rule-chains", json={"name": name}, headers=headers)
+def _create_policy_layer(client, headers, name="npm scripts"):
+    return client.post("/policy-layers", json={"name": name}, headers=headers)
 
 
-def _add_rule(client, headers, chain_id, positional_constraints, option_constraints=None, tier="ask"):
+def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask"):
     return client.post(
-        f"/rule-chains/{chain_id}/rules",
+        f"/policy-layers/{layer_id}/rules",
         json={
             "positional_constraints": positional_constraints,
             "option_constraints": option_constraints or [],
@@ -499,39 +499,39 @@ def _add_rule(client, headers, chain_id, positional_constraints, option_constrai
     )
 
 
-def test_rule_chain_crud(client):
+def test_policy_layer_crud(client):
     signup = _signup(client, "carol")
     headers = {"Authorization": f"Bearer {signup['token']}"}
 
-    created = _create_rule_chain(client, headers)
+    created = _create_policy_layer(client, headers)
     assert created.status_code == 201
     body = created.json()
     assert body["name"] == "npm scripts"
     assert body["rules"] == []
     assert body["host_ids"] == []
 
-    dup = _create_rule_chain(client, headers, name="NPM SCRIPTS")  # case-insensitive
+    dup = _create_policy_layer(client, headers, name="NPM SCRIPTS")  # case-insensitive
     assert dup.status_code == 409
 
-    listed = client.get("/rule-chains", headers=headers).json()["rule_chains"]
+    listed = client.get("/policy-layers", headers=headers).json()["policy_layers"]
     assert [c["id"] for c in listed] == [body["id"]]
 
-    renamed = client.patch(f"/rule-chains/{body['id']}", json={"name": "npm"}, headers=headers)
+    renamed = client.patch(f"/policy-layers/{body['id']}", json={"name": "npm"}, headers=headers)
     assert renamed.status_code == 200
     assert renamed.json()["name"] == "npm"
 
-    deleted = client.delete(f"/rule-chains/{body['id']}", headers=headers)
+    deleted = client.delete(f"/policy-layers/{body['id']}", headers=headers)
     assert deleted.status_code == 200
-    assert client.get("/rule-chains", headers=headers).json()["rule_chains"] == []
+    assert client.get("/policy-layers", headers=headers).json()["policy_layers"] == []
 
 
-def test_rule_chain_rule_crud(client):
+def test_policy_layer_rule_crud(client):
     signup = _signup(client, "dave2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
+    layer = _create_policy_layer(client, headers).json()
 
     created = _add_rule(
-        client, headers, chain["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="allow"
+        client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="allow"
     )
     assert created.status_code == 201
     rule = created.json()
@@ -543,28 +543,28 @@ def test_rule_chain_rule_crud(client):
     assert rule["tier"] == "allow"
 
     updated = client.patch(
-        f"/rule-chains/{chain['id']}/rules/{rule['id']}", json={"tier": "ask"}, headers=headers
+        f"/policy-layers/{layer['id']}/rules/{rule['id']}", json={"tier": "ask"}, headers=headers
     )
     assert updated.status_code == 200
     assert updated.json()["tier"] == "ask"
     # untouched fields survive a partial update
     assert updated.json()["positional_constraints"] == rule["positional_constraints"]
 
-    deleted = client.delete(f"/rule-chains/{chain['id']}/rules/{rule['id']}", headers=headers)
+    deleted = client.delete(f"/policy-layers/{layer['id']}/rules/{rule['id']}", headers=headers)
     assert deleted.status_code == 200
-    assert client.get("/rule-chains", headers=headers).json()["rule_chains"][0]["rules"] == []
+    assert client.get("/policy-layers", headers=headers).json()["policy_layers"][0]["rules"] == []
 
 
-def test_rule_chain_rule_reorder(client):
+def test_policy_layer_rule_reorder(client):
     signup = _signup(client, "erin3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^a$"}]).json()
-    r2 = _add_rule(client, headers, chain["id"], [{"whitelist": "^b$"}]).json()
-    r3 = _add_rule(client, headers, chain["id"], [{"whitelist": "^c$"}]).json()
+    layer = _create_policy_layer(client, headers).json()
+    r1 = _add_rule(client, headers, layer["id"], [{"whitelist": "^a$"}]).json()
+    r2 = _add_rule(client, headers, layer["id"], [{"whitelist": "^b$"}]).json()
+    r3 = _add_rule(client, headers, layer["id"], [{"whitelist": "^c$"}]).json()
 
     reordered = client.put(
-        f"/rule-chains/{chain['id']}/rules/reorder",
+        f"/policy-layers/{layer['id']}/rules/reorder",
         json={"rule_ids": [r3["id"], r1["id"], r2["id"]]},
         headers=headers,
     )
@@ -573,45 +573,45 @@ def test_rule_chain_rule_reorder(client):
     assert [r["position"] for r in reordered.json()["rules"]] == [0, 1, 2]
 
 
-def test_rule_chain_rule_reorder_rejects_non_permutation(client):
+def test_policy_layer_rule_reorder_rejects_non_permutation(client):
     signup = _signup(client, "frank3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^a$"}]).json()
-    _add_rule(client, headers, chain["id"], [{"whitelist": "^b$"}])
+    layer = _create_policy_layer(client, headers).json()
+    r1 = _add_rule(client, headers, layer["id"], [{"whitelist": "^a$"}]).json()
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^b$"}])
 
     missing_one = client.put(
-        f"/rule-chains/{chain['id']}/rules/reorder", json={"rule_ids": [r1["id"]]}, headers=headers
+        f"/policy-layers/{layer['id']}/rules/reorder", json={"rule_ids": [r1["id"]]}, headers=headers
     )
     assert missing_one.status_code == 400
 
     unknown_id = client.put(
-        f"/rule-chains/{chain['id']}/rules/reorder", json={"rule_ids": [r1["id"], 999999]}, headers=headers
+        f"/policy-layers/{layer['id']}/rules/reorder", json={"rule_ids": [r1["id"], 999999]}, headers=headers
     )
     assert unknown_id.status_code == 400
 
 
-def test_rule_chain_rule_accepts_empty_positional_constraints(client):
+def test_policy_layer_rule_accepts_empty_positional_constraints(client):
     # Position 0 (the binary) is optional, same as every other position --
     # an empty list means the rule doesn't constrain the binary or any
     # argument at all (still subject to whatever option_constraints say).
     signup = _signup(client, "gina3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    created = _add_rule(client, headers, chain["id"], [])
+    layer = _create_policy_layer(client, headers).json()
+    created = _add_rule(client, headers, layer["id"], [])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == []
 
 
-def test_rule_chain_rule_accepts_blank_pattern_at_any_position(client):
+def test_policy_layer_rule_accepts_blank_pattern_at_any_position(client):
     signup = _signup(client, "hank3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
+    layer = _create_policy_layer(client, headers).json()
     # A blank pattern at position 0 (any binary) and mid-list (position 1
     # not required, position 2 still constrained) both accepted -- no "*"
     # sentinel needed, a missing value is matched as "" against the blank
     # pattern's empty whitelist/blacklist, which matches everything.
-    created = _add_rule(client, headers, chain["id"], [{}, {}, {"whitelist": "^build$"}])
+    created = _add_rule(client, headers, layer["id"], [{}, {}, {"whitelist": "^build$"}])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == [
         {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
@@ -620,15 +620,15 @@ def test_rule_chain_rule_accepts_blank_pattern_at_any_position(client):
     ]
 
 
-def test_rule_chain_rule_positional_value_not_allowed(client):
+def test_policy_layer_rule_positional_value_not_allowed(client):
     # No dedicated "position must be absent" concept -- a missing
     # positional value is matched as "", same as a valueless option, so
     # "^$" works identically here: it requires the position be either
     # absent or an explicit empty string.
     signup = _signup(client, "hank3b")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    created = _add_rule(client, headers, chain["id"], [{"whitelist": "^rm$"}, {"whitelist": "^$"}])
+    layer = _create_policy_layer(client, headers).json()
+    created = _add_rule(client, headers, layer["id"], [{"whitelist": "^rm$"}, {"whitelist": "^$"}])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == [
         {"whitelist": "^rm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
@@ -636,34 +636,34 @@ def test_rule_chain_rule_positional_value_not_allowed(client):
     ]
 
 
-def test_rule_chain_rule_rejects_roots_on_position_zero(client):
+def test_policy_layer_rule_rejects_roots_on_position_zero(client):
     signup = _signup(client, "ivan3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    r = _add_rule(client, headers, chain["id"], [{"whitelist": "{roots}"}])
+    layer = _create_policy_layer(client, headers).json()
+    r = _add_rule(client, headers, layer["id"], [{"whitelist": "{roots}"}])
     assert r.status_code == 422
 
 
-def test_rule_chain_rule_rejects_roots_with_allow_tier(client):
+def test_policy_layer_rule_rejects_roots_with_allow_tier(client):
     signup = _signup(client, "judy3")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    denied = _add_rule(client, headers, chain["id"], [{}, {"whitelist": "{roots}"}], tier="allow")
+    layer = _create_policy_layer(client, headers).json()
+    denied = _add_rule(client, headers, layer["id"], [{}, {"whitelist": "{roots}"}], tier="allow")
     assert denied.status_code == 422
-    allowed = _add_rule(client, headers, chain["id"], [{}, {"whitelist": "{roots}"}], tier="ask")
+    allowed = _add_rule(client, headers, layer["id"], [{}, {"whitelist": "{roots}"}], tier="ask")
     assert allowed.status_code == 201
 
 
-def test_rule_chain_rule_rejects_invalid_regex(client):
+def test_policy_layer_rule_rejects_invalid_regex(client):
     signup = _signup(client, "kevin1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    r = _add_rule(client, headers, chain["id"], [{"whitelist": "["}])
+    layer = _create_policy_layer(client, headers).json()
+    r = _add_rule(client, headers, layer["id"], [{"whitelist": "["}])
     assert r.status_code == 422
     assert "Invalid regex" in r.json()["detail"]
 
 
-def test_rule_chain_rule_option_pattern_states_round_trip(client):
+def test_policy_layer_rule_option_pattern_states_round_trip(client):
     # There's only ever one pattern shape now -- {whitelist, blacklist},
     # both always real strings (never None) -- not a three-way choice. A
     # blank pattern (default whitelist=""/blacklist=BLACKLIST_MATCHES_NOTHING)
@@ -672,11 +672,11 @@ def test_rule_chain_rule_option_pattern_states_round_trip(client):
     # "must be present with NO value" without needing a dedicated state.
     signup = _signup(client, "laura1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
+    layer = _create_policy_layer(client, headers).json()
     created = _add_rule(
         client,
         headers,
-        chain["id"],
+        layer["id"],
         [{}],
         option_constraints=[
             {"long": "force", "pattern": {"whitelist": "^$"}},  # must be present, no value
@@ -703,40 +703,40 @@ def test_rule_chain_rule_option_pattern_states_round_trip(client):
     }
 
 
-def test_rule_chain_option_constraint_requires_short_or_long(client):
+def test_policy_layer_option_constraint_requires_short_or_long(client):
     signup = _signup(client, "mallory1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    chain = _create_rule_chain(client, headers).json()
-    r = _add_rule(client, headers, chain["id"], [{}], option_constraints=[{}])
+    layer = _create_policy_layer(client, headers).json()
+    r = _add_rule(client, headers, layer["id"], [{}], option_constraints=[{}])
     assert r.status_code == 422
 
 
-def test_rule_chain_host_attachment_and_hosts_listing(client):
+def test_policy_layer_host_attachment_and_hosts_listing(client):
     signup = _signup(client, "erin2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     pair = client.post(
         "/hosts/pair", json={"routing_key": "rk-erin2-1", "hostname": "erins-mac"}, headers=headers
     ).json()
-    chain = _create_rule_chain(client, headers).json()
-    _add_rule(client, headers, chain["id"], [{"whitelist": "^npm$"}])
+    layer = _create_policy_layer(client, headers).json()
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}])
 
-    attached = client.put(f"/rule-chains/{chain['id']}/hosts/{pair['host_id']}", headers=headers).json()
+    attached = client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers).json()
     assert attached["host_ids"] == [pair["host_id"]]
 
     hosts = client.get("/hosts", headers=headers).json()["hosts"]
     (host,) = [h for h in hosts if h["host_id"] == pair["host_id"]]
-    assert len(host["rule_chains"]) == 1
-    assert host["rule_chains"][0]["name"] == "npm scripts"
-    assert len(host["rule_chains"][0]["rules"]) == 1
+    assert len(host["policy_layers"]) == 1
+    assert host["policy_layers"][0]["name"] == "npm scripts"
+    assert len(host["policy_layers"][0]["rules"]) == 1
 
-    detached = client.delete(f"/rule-chains/{chain['id']}/hosts/{pair['host_id']}", headers=headers).json()
+    detached = client.delete(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers).json()
     assert detached["host_ids"] == []
     hosts_after = client.get("/hosts", headers=headers).json()["hosts"]
     (host_after,) = [h for h in hosts_after if h["host_id"] == pair["host_id"]]
-    assert host_after["rule_chains"] == []
+    assert host_after["policy_layers"] == []
 
 
-def test_rule_chain_daemon_facing_fetch(client):
+def test_policy_layer_daemon_facing_fetch(client):
     signup = _signup(client, "frank2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     pair_a = client.post(
@@ -745,17 +745,17 @@ def test_rule_chain_daemon_facing_fetch(client):
     pair_b = client.post(
         "/hosts/pair", json={"routing_key": "rk-frank2-b", "hostname": "b"}, headers=headers
     ).json()
-    chain = _create_rule_chain(client, headers).json()
-    r1 = _add_rule(client, headers, chain["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}]).json()
-    r2 = _add_rule(client, headers, chain["id"], [{}], tier="deny").json()
-    client.put(f"/rule-chains/{chain['id']}/hosts/{pair_a['host_id']}", headers=headers)
+    layer = _create_policy_layer(client, headers).json()
+    r1 = _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}]).json()
+    r2 = _add_rule(client, headers, layer["id"], [{}], tier="deny").json()
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair_a['host_id']}", headers=headers)
 
     device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
     device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
 
-    fetched_a = client.get("/hosts/rule-chains", headers=device_headers_a).json()
-    assert len(fetched_a["rule_chains"]) == 1
-    fetched_rules = fetched_a["rule_chains"][0]["rules"]
+    fetched_a = client.get("/hosts/policy-layers", headers=device_headers_a).json()
+    assert len(fetched_a["policy_layers"]) == 1
+    fetched_rules = fetched_a["policy_layers"][0]["rules"]
     assert [r["id"] for r in fetched_rules] == [r1["id"], r2["id"]]  # rule order survives
     assert fetched_rules[0]["positional_constraints"] == [
         {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
@@ -763,39 +763,39 @@ def test_rule_chain_daemon_facing_fetch(client):
     ]
 
     # Not attached to host B -- device_token B sees nothing.
-    fetched_b = client.get("/hosts/rule-chains", headers=device_headers_b).json()
-    assert fetched_b["rule_chains"] == []
+    fetched_b = client.get("/hosts/policy-layers", headers=device_headers_b).json()
+    assert fetched_b["policy_layers"] == []
 
-    no_auth = client.get("/hosts/rule-chains")
+    no_auth = client.get("/hosts/policy-layers")
     assert no_auth.status_code == 401
 
 
-def test_rule_chain_is_per_user(client):
+def test_policy_layer_is_per_user(client):
     a = _signup(client, "gina2")
     b = _signup(client, "hank2")
     headers_a = {"Authorization": f"Bearer {a['token']}"}
     headers_b = {"Authorization": f"Bearer {b['token']}"}
-    _create_rule_chain(client, headers_a)
-    assert client.get("/rule-chains", headers=headers_b).json()["rule_chains"] == []
+    _create_policy_layer(client, headers_a)
+    assert client.get("/policy-layers", headers=headers_b).json()["policy_layers"] == []
 
 
-def test_rule_chain_ownership_enforced(client):
+def test_policy_layer_ownership_enforced(client):
     a = _signup(client, "ivan2")
     b = _signup(client, "judy2")
     headers_a = {"Authorization": f"Bearer {a['token']}"}
     headers_b = {"Authorization": f"Bearer {b['token']}"}
-    chain = _create_rule_chain(client, headers_a).json()
-    rule = _add_rule(client, headers_a, chain["id"], [{"whitelist": "^npm$"}]).json()
+    layer = _create_policy_layer(client, headers_a).json()
+    rule = _add_rule(client, headers_a, layer["id"], [{"whitelist": "^npm$"}]).json()
 
-    assert client.patch(f"/rule-chains/{chain['id']}", json={"name": "x"}, headers=headers_b).status_code == 404
-    assert client.delete(f"/rule-chains/{chain['id']}", headers=headers_b).status_code == 404
+    assert client.patch(f"/policy-layers/{layer['id']}", json={"name": "x"}, headers=headers_b).status_code == 404
+    assert client.delete(f"/policy-layers/{layer['id']}", headers=headers_b).status_code == 404
     assert (
         client.patch(
-            f"/rule-chains/{chain['id']}/rules/{rule['id']}", json={"tier": "allow"}, headers=headers_b
+            f"/policy-layers/{layer['id']}/rules/{rule['id']}", json={"tier": "allow"}, headers=headers_b
         ).status_code
         == 404
     )
-    assert client.delete(f"/rule-chains/{chain['id']}/rules/{rule['id']}", headers=headers_b).status_code == 404
+    assert client.delete(f"/policy-layers/{layer['id']}/rules/{rule['id']}", headers=headers_b).status_code == 404
 
 
 def _pending_approval_body(**overrides):

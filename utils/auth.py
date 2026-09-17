@@ -353,74 +353,76 @@ def update_profile(auth_domain, token, **fields):
     return _auth_write("PATCH", auth_domain, token, "/profile", fields)
 
 
-def list_rule_chains(auth_domain, token):
-    """GET /rule-chains. Returns {"rule_chains": [...]}, or {"error": str}."""
-    return _auth_write("GET", auth_domain, token, "/rule-chains")
+def list_policy_layers(auth_domain, token):
+    """GET /policy-layers. Returns {"policy_layers": [...]}, or {"error": str}."""
+    return _auth_write("GET", auth_domain, token, "/policy-layers")
 
 
-def create_rule_chain(auth_domain, token, name):
-    """POST /rule-chains -- name only, creates an empty shell (rules=[]).
-    Returns the new chain, or {"error": str}."""
-    return _auth_write("POST", auth_domain, token, "/rule-chains", {"name": name})
+def create_policy_layer(auth_domain, token, name):
+    """POST /policy-layers -- name only, creates an empty shell (rules=[]).
+    Returns the new layer, or {"error": str}."""
+    return _auth_write("POST", auth_domain, token, "/policy-layers", {"name": name})
 
 
-def rename_rule_chain(auth_domain, token, rule_chain_id, name):
-    """PATCH /rule-chains/{id}. Returns the updated chain, or {"error": str}."""
-    return _auth_write("PATCH", auth_domain, token, f"/rule-chains/{rule_chain_id}", {"name": name})
+def rename_policy_layer(auth_domain, token, policy_layer_id, name):
+    """PATCH /policy-layers/{id}. Returns the updated layer, or {"error": str}."""
+    return _auth_write("PATCH", auth_domain, token, f"/policy-layers/{policy_layer_id}", {"name": name})
 
 
-def delete_rule_chain(auth_domain, token, rule_chain_id):
-    """DELETE /rule-chains/{id}. Returns {"revoked": True}, or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/rule-chains/{rule_chain_id}")
+def delete_policy_layer(auth_domain, token, policy_layer_id):
+    """DELETE /policy-layers/{id}. Returns {"revoked": True}, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/policy-layers/{policy_layer_id}")
 
 
-def add_rule_chain_to_host(auth_domain, token, rule_chain_id, host_id):
-    """PUT /rule-chains/{id}/hosts/{host_id}. Returns the updated chain, or
-    {"error": str}."""
-    return _auth_write("PUT", auth_domain, token, f"/rule-chains/{rule_chain_id}/hosts/{host_id}")
-
-
-def remove_rule_chain_from_host(auth_domain, token, rule_chain_id, host_id):
-    """DELETE /rule-chains/{id}/hosts/{host_id}. Returns the updated chain,
+def add_policy_layer_to_host(auth_domain, token, policy_layer_id, host_id):
+    """PUT /policy-layers/{id}/hosts/{host_id}. Returns the updated layer,
     or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/rule-chains/{rule_chain_id}/hosts/{host_id}")
+    return _auth_write("PUT", auth_domain, token, f"/policy-layers/{policy_layer_id}/hosts/{host_id}")
 
 
-def create_rule_chain_rule(auth_domain, token, rule_chain_id, positional_constraints, option_constraints, tier):
-    """POST /rule-chains/{id}/rules -- positional_constraints is a list of
-    "*" | {"whitelist": str, "blacklist": str} entries (list index IS the
-    argv position, index 0 the binary); option_constraints is a list of
-    {"short": str|None, "long": str|None, "pattern": "*" | {...} | None}
-    entries (pattern None means "must be present with no value"). Returns
-    the new rule, or {"error": str}."""
+def remove_policy_layer_from_host(auth_domain, token, policy_layer_id, host_id):
+    """DELETE /policy-layers/{id}/hosts/{host_id}. Returns the updated
+    layer, or {"error": str}."""
+    return _auth_write("DELETE", auth_domain, token, f"/policy-layers/{policy_layer_id}/hosts/{host_id}")
+
+
+def create_policy_layer_rule(auth_domain, token, policy_layer_id, positional_constraints, option_constraints, tier):
+    """POST /policy-layers/{id}/rules -- positional_constraints is a list
+    of {"whitelist": str, "blacklist": str} entries (list index IS the
+    argv position, index 0 the binary; a blank entry, or omitting the
+    position entirely, means "value not required" there); option_constraints
+    is a list of {"short": str|None, "long": str|None, "pattern":
+    {"whitelist": str, "blacklist": str}} entries (a blank pattern means
+    "value not required", a whitelist of "^$" means "value not allowed").
+    Returns the new rule, or {"error": str}."""
     return _auth_write(
         "POST",
         auth_domain,
         token,
-        f"/rule-chains/{rule_chain_id}/rules",
+        f"/policy-layers/{policy_layer_id}/rules",
         {"positional_constraints": positional_constraints, "option_constraints": option_constraints, "tier": tier},
     )
 
 
-def update_rule_chain_rule(auth_domain, token, rule_chain_id, rule_id, **fields):
-    """PATCH /rule-chains/{id}/rules/{rule_id} -- merge-updates only the
+def update_policy_layer_rule(auth_domain, token, policy_layer_id, rule_id, **fields):
+    """PATCH /policy-layers/{id}/rules/{rule_id} -- merge-updates only the
     given fields (any subset of positional_constraints/option_constraints/
     tier). Returns the updated rule, or {"error": str}."""
-    return _auth_write("PATCH", auth_domain, token, f"/rule-chains/{rule_chain_id}/rules/{rule_id}", fields)
+    return _auth_write("PATCH", auth_domain, token, f"/policy-layers/{policy_layer_id}/rules/{rule_id}", fields)
 
 
-def delete_rule_chain_rule(auth_domain, token, rule_chain_id, rule_id):
-    """DELETE /rule-chains/{id}/rules/{rule_id}. Returns {"revoked": True},
+def delete_policy_layer_rule(auth_domain, token, policy_layer_id, rule_id):
+    """DELETE /policy-layers/{id}/rules/{rule_id}. Returns {"revoked": True},
     or {"error": str}."""
-    return _auth_write("DELETE", auth_domain, token, f"/rule-chains/{rule_chain_id}/rules/{rule_id}")
+    return _auth_write("DELETE", auth_domain, token, f"/policy-layers/{policy_layer_id}/rules/{rule_id}")
 
 
-def reorder_rule_chain_rules(auth_domain, token, rule_chain_id, rule_ids):
-    """PUT /rule-chains/{id}/rules/reorder -- rule_ids must be exactly a
-    permutation of the chain's current rule ids. Returns the updated chain
+def reorder_policy_layer_rules(auth_domain, token, policy_layer_id, rule_ids):
+    """PUT /policy-layers/{id}/rules/reorder -- rule_ids must be exactly a
+    permutation of the layer's current rule ids. Returns the updated layer
     (rules now in the new order), or {"error": str}."""
     return _auth_write(
-        "PUT", auth_domain, token, f"/rule-chains/{rule_chain_id}/rules/reorder", {"rule_ids": rule_ids}
+        "PUT", auth_domain, token, f"/policy-layers/{policy_layer_id}/rules/reorder", {"rule_ids": rule_ids}
     )
 
 

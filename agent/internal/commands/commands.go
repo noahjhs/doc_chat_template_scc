@@ -40,21 +40,26 @@ type Request struct {
 	// transferred files need to survive round-tripping arbitrary binary
 	// content intact through JSON, which requires valid UTF-8.
 	Content string `json:"content,omitempty"`
-	// RuleChainID/PositionalArgs/Options are only used by run_rule_chain_call
-	// (see rulechains.go). No argv string, ever -- the model supplies
-	// STRUCTURED arguments (PositionalArgs index 0 is the binary itself,
-	// mapping 1:1 onto a rule's positional constraint list; Options is a
-	// list of named entries, not raw tokens), and the daemon is what
-	// constructs the actual argv for exec.Command, once, only after a rule
-	// has matched -- see rulechains.go's buildArgv. Path (above) is reused
-	// by run_rule_chain_call too, to pick which confined directory to run
-	// in (now unconditional whenever given -- see runRunRuleChainCall).
-	RuleChainID    int             `json:"rule_chain_id,omitempty"`
+	// PositionalArgs/Options are only used by run_shell_command (see
+	// policy.go). No argv string, ever -- the model supplies STRUCTURED
+	// arguments (PositionalArgs index 0 is the binary itself, mapping 1:1
+	// onto a rule's positional constraint list; Options is a list of named
+	// entries, not raw tokens), and the daemon is what constructs the
+	// actual argv for exec.Command, once, only after a rule has matched --
+	// see policy.go's buildArgv. No policy/layer ID here: the call is
+	// host-scoped, not layer-scoped -- the daemon composes every currently
+	// cached PolicyLayer (already scoped to this host, since
+	// GET /hosts/policy-layers is device-token-gated) into this host's
+	// Policy and evaluates against the whole thing (see runRunShellCommand)
+	// rather than the model picking one layer to check against. Path
+	// (above) is reused by run_shell_command too, to pick which confined
+	// directory to run in (unconditional whenever given -- see
+	// runRunShellCommand).
 	PositionalArgs []string        `json:"positional_args,omitempty"`
 	Options        []RequestOption `json:"options,omitempty"`
 }
 
-// RequestOption is one model-supplied option entry for run_rule_chain_call --
+// RequestOption is one model-supplied option entry for run_shell_command --
 // Value is nil for a valueless option (e.g. "--force"), matching
 // OptionConstraint.Pattern's own nil-means-"no value" convention.
 type RequestOption struct {
@@ -107,11 +112,11 @@ func (e *ActionError) Error() string { return e.Detail }
 // "+" button in the web app (see runAddDirectory), which is now the only
 // way roots ever grows.
 type Handler struct {
-	mu                  sync.Mutex
-	roots               []string
-	cwd                 string
-	ruleChains          []RuleChain // see rulechains.go -- the daemon's own cached copy of enabled rule chains, fetched from auth_service
-	refreshRuleChainsFn func()      // see rulechains.go's SetRefreshRuleChainsFunc
+	mu                    sync.Mutex
+	roots                 []string
+	cwd                   string
+	policyLayers          []PolicyLayer // see policy.go -- the daemon's own cached copy of policy layers attached to this host, fetched from auth_service
+	refreshPolicyLayersFn func()        // see policy.go's SetRefreshPolicyLayersFunc
 
 	// Both injected at construction (see cmd/casper/main.go) -- kept out of
 	// this package since they're daemon-orchestration concerns (an
@@ -924,12 +929,12 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 		return h.runListDirectories(req)
 	case "add_directory":
 		return h.runAddDirectory(req)
-	case "list_rule_chains":
-		return h.runListRuleChains(req)
-	case "run_rule_chain_call":
-		return h.runRunRuleChainCall(req)
-	case "refresh_rule_chains":
-		return h.runRefreshRuleChains(req)
+	case "list_policy_layers":
+		return h.runListPolicyLayers(req)
+	case "run_shell_command":
+		return h.runRunShellCommand(req)
+	case "refresh_policy_layers":
+		return h.runRefreshPolicyLayers(req)
 	default:
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

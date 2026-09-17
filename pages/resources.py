@@ -2,26 +2,26 @@ import pandas as pd
 import streamlit as st
 
 from utils.auth import (
-    add_rule_chain_to_host,
-    create_rule_chain,
-    create_rule_chain_rule,
+    add_policy_layer_to_host,
+    create_policy_layer,
+    create_policy_layer_rule,
     current_token,
-    delete_rule_chain,
-    delete_rule_chain_rule,
+    delete_policy_layer,
+    delete_policy_layer_rule,
     list_hosts,
-    list_rule_chains,
-    remove_rule_chain_from_host,
-    rename_rule_chain,
-    reorder_rule_chain_rules,
+    list_policy_layers,
+    remove_policy_layer_from_host,
+    rename_policy_layer,
+    reorder_policy_layer_rules,
     require_agent_session,
     require_app_subdomain,
-    update_rule_chain_rule,
+    update_policy_layer_rule,
 )
-from utils.rule_chains import BLACKLIST_MATCHES_NOTHING, describe_rule
+from utils.policy import BLACKLIST_MATCHES_NOTHING, describe_rule
 from utils.sidebar import _fetch_local_json, handle_sign_out_if_requested, render_sidebar
 from utils.topbar import render_topbar
 
-st.set_page_config(page_title="Casper - Rule Chains", page_icon="👻", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Casper - Policy Layers", page_icon="👻", initial_sidebar_state="expanded")
 require_app_subdomain()
 
 # Handles (and st.stop()s on) an in-flight sign-out -- see
@@ -36,9 +36,9 @@ render_topbar()
 # see its own docstring for why that's necessary.
 local_agent_configs, _ = render_sidebar(username)
 
-st.title("Rule Chains")
+st.title("Policy Layers")
 st.caption(
-    "A Rule Chain is a named, ordered list of rules for how the assistant may invoke a CLI "
+    "A Policy Layer is a named, ordered list of rules for how the assistant may invoke a CLI "
     "command on a host. Rules are checked in order, first match wins; if nothing matches, "
     'the call is denied. Each rule constrains the binary and its arguments ("positional '
     'constraints"), any options, and a tier -- "Allow" runs automatically, "Ask" needs your '
@@ -55,8 +55,8 @@ TOKEN = current_token()
 # they see too, next time it loads, with no separate cache to go stale.
 if "_hosts" not in st.session_state:
     st.session_state["_hosts"] = (list_hosts(AUTH_DOMAIN, TOKEN) or {}).get("hosts", [])
-if "_rule_chains" not in st.session_state:
-    st.session_state["_rule_chains"] = (list_rule_chains(AUTH_DOMAIN, TOKEN) or {}).get("rule_chains", [])
+if "_policy_layers" not in st.session_state:
+    st.session_state["_policy_layers"] = (list_policy_layers(AUTH_DOMAIN, TOKEN) or {}).get("policy_layers", [])
 
 
 def _refresh():
@@ -65,7 +65,7 @@ def _refresh():
     # signal for the "Update saved" message at the bottom of the page.
     # Also pushes a live refresh to every currently connected daemon (fire-
     # and-forget, same posture as the sidebar's own add_directory call) --
-    # without this, a daemon that was already running before a rule chain
+    # without this, a daemon that was already running before a policy layer
     # was created/edited/attached keeps enforcing its own stale cached copy
     # until its next pairing/resume, which made testing a fresh change look
     # like a broken feature rather than an unrelated staleness gap
@@ -74,17 +74,17 @@ def _refresh():
     # daemon until this was added). Broadcasting to every connected host
     # rather than just the one(s) actually affected by this particular
     # mutation is deliberately simple -- an update/delete can affect every
-    # host a chain is attached to, and re-fetching is cheap and idempotent,
+    # host a layer is attached to, and re-fetching is cheap and idempotent,
     # so there's no real cost to over-broadcasting.
     for config in local_agent_configs.values():
-        _fetch_local_json(config, "refresh_rule_chains")
+        _fetch_local_json(config, "refresh_policy_layers")
     st.session_state.pop("_hosts", None)
-    st.session_state.pop("_rule_chains", None)
+    st.session_state.pop("_policy_layers", None)
     st.session_state["_just_saved"] = True
 
 
 hosts = st.session_state["_hosts"]
-rule_chains = st.session_state["_rule_chains"]
+policy_layers = st.session_state["_policy_layers"]
 
 TIER_OPTIONS = ["deny", "ask", "allow"]
 TIER_LABELS = {"deny": "Deny", "ask": "Ask", "allow": "Allow"}
@@ -112,7 +112,7 @@ def _positional_rows(constraints):
 
 
 def _build_positional_constraints(rows):
-    """Mirrors RuleChainRuleCreateRequest's own validators client-side, so
+    """Mirrors PolicyLayerRuleCreateRequest's own validators client-side, so
     a mistake shows up immediately here rather than only after a round
     trip to auth_service -- the server re-validates regardless, so this is
     purely for faster feedback, never the source of truth. Every row is
@@ -163,7 +163,7 @@ def _build_option_constraints(rows):
     value it's allowed to carry is what's optional to constrain here.
     Both whitelist/blacklist left blank means any/no value is accepted; a
     missing value is matched as the empty string (see
-    utils/rule_chains.py or the daemon's ruleMatches), so a whitelist of
+    utils/policy_layers.py or the daemon's ruleMatches), so a whitelist of
     "^$" requires the option be present with NO value. Sends exactly
     what's in the box (after stripping) for both fields, same WYSIWYG
     posture as _build_positional_constraints above."""
@@ -185,9 +185,9 @@ def _uses_roots(positional_constraints, option_constraints):
     return any((c.get("pattern") or {}).get("whitelist") == "{roots}" for c in option_constraints)
 
 
-def _render_rule_editor(chain, rule):
+def _render_rule_editor(layer, rule):
     """The create-or-edit form for one rule -- rule is None when creating
-    a brand-new one (appended to the end of the chain), otherwise the
+    a brand-new one (appended to the end of the layer), otherwise the
     existing rule being edited. Both positional and option constraints use
     st.data_editor(num_rows="dynamic") so adding/removing a row directly
     changes the constraint list's length -- for positional constraints,
@@ -214,11 +214,11 @@ def _render_rule_editor(chain, rule):
     # unless its key also changes. Has to live outside the form below
     # since a plain st.button/number_input (unlike form_submit_button)
     # can't be placed inside one.
-    generation_key = f"_editor_generation_{chain['id']}_{key_suffix}"
+    generation_key = f"_editor_generation_{layer['id']}_{key_suffix}"
     generation = st.session_state.get(generation_key, 0)
     if st.button(
         "↺ Reset table view",
-        key=f"reset_tables_{chain['id']}_{key_suffix}",
+        key=f"reset_tables_{layer['id']}_{key_suffix}",
         help="If a column got hidden via the table's own menu and won't come back, this brings it back.",
     ):
         st.session_state[generation_key] = generation + 1
@@ -233,9 +233,9 @@ def _render_rule_editor(chain, rule):
     # replays from the last *saved* values, not any not-yet-saved in-grid
     # edits made since -- a real but minor rough edge of Streamlit's
     # widget-state model.
-    working_key = f"_positional_working_{chain['id']}_{key_suffix}"
+    working_key = f"_positional_working_{layer['id']}_{key_suffix}"
     working_rows = st.session_state.get(working_key, saved_positional_rows)
-    count_key = f"_positional_row_count_{chain['id']}_{key_suffix}"
+    count_key = f"_positional_row_count_{layer['id']}_{key_suffix}"
     if count_key not in st.session_state:
         st.session_state[count_key] = len(working_rows)
 
@@ -258,7 +258,7 @@ def _render_rule_editor(chain, rule):
     )
     working_rows = st.session_state.get(working_key, saved_positional_rows)
 
-    with st.form(f"rule_form_{chain['id']}_{key_suffix}"):
+    with st.form(f"rule_form_{layer['id']}_{key_suffix}"):
         st.caption(
             "Positional constraints -- the row number IS the argv position (row 0 is the binary "
             'itself). A new row starts with whitelist blank and blacklist pre-filled with "'
@@ -287,7 +287,7 @@ def _render_rule_editor(chain, rule):
         positional_edited = st.data_editor(
             pd.DataFrame(positional_seed, columns=["position", "whitelist", "blacklist"]),
             num_rows="dynamic",
-            key=f"positional_editor_{chain['id']}_{key_suffix}_{generation}",
+            key=f"positional_editor_{layer['id']}_{key_suffix}_{generation}",
             column_config={
                 "position": st.column_config.NumberColumn("Position", disabled=True, default=0),
                 # `default` is what a row added via the table's own native
@@ -323,7 +323,7 @@ def _render_rule_editor(chain, rule):
         option_edited = st.data_editor(
             pd.DataFrame(saved_option_rows, columns=["short", "long", "whitelist", "blacklist"]),
             num_rows="dynamic",
-            key=f"option_editor_{chain['id']}_{key_suffix}_{generation}",
+            key=f"option_editor_{layer['id']}_{key_suffix}_{generation}",
             column_config={
                 # default="" on every text column here too -- see the
                 # positional table's own comment above for why (otherwise
@@ -344,7 +344,7 @@ def _render_rule_editor(chain, rule):
             index=TIER_OPTIONS.index(tier_default),
             format_func=lambda t: TIER_LABELS[t],
             horizontal=True,
-            key=f"tier_editor_{chain['id']}_{key_suffix}",
+            key=f"tier_editor_{layer['id']}_{key_suffix}",
         )
 
         save_col, cancel_col = st.columns(2)
@@ -352,7 +352,7 @@ def _render_rule_editor(chain, rule):
         cancelled = cancel_col.form_submit_button("Cancel")
 
     def _clear_editor_state():
-        st.session_state.pop(f"_editing_rule_{chain['id']}_{key_suffix}", None)
+        st.session_state.pop(f"_editing_rule_{layer['id']}_{key_suffix}", None)
         st.session_state.pop(working_key, None)
         st.session_state.pop(count_key, None)
         st.session_state.pop(generation_key, None)
@@ -377,14 +377,14 @@ def _render_rule_editor(chain, rule):
                 st.error(e)
         else:
             if is_new:
-                result = create_rule_chain_rule(
-                    AUTH_DOMAIN, TOKEN, chain["id"], positional_constraints, option_constraints, tier
+                result = create_policy_layer_rule(
+                    AUTH_DOMAIN, TOKEN, layer["id"], positional_constraints, option_constraints, tier
                 )
             else:
-                result = update_rule_chain_rule(
+                result = update_policy_layer_rule(
                     AUTH_DOMAIN,
                     TOKEN,
-                    chain["id"],
+                    layer["id"],
                     rule["id"],
                     positional_constraints=positional_constraints,
                     option_constraints=option_constraints,
@@ -394,19 +394,19 @@ def _render_rule_editor(chain, rule):
                 st.error(result["error"])
             else:
                 _clear_editor_state()
-                st.session_state.pop("_adding_rule_" + str(chain["id"]), None)
+                st.session_state.pop("_adding_rule_" + str(layer["id"]), None)
                 _refresh()
                 st.rerun()
 
 
-st.header("Create a Rule Chain")
-with st.form("create_rule_chain_form", clear_on_submit=True):
+st.header("Create a Policy Layer")
+with st.form("create_policy_layer_form", clear_on_submit=True):
     name = st.text_input("Name", placeholder="npm scripts")
     if st.form_submit_button("Create"):
         if not name.strip():
             st.error("Name is required.")
         else:
-            result = create_rule_chain(AUTH_DOMAIN, TOKEN, name.strip())
+            result = create_policy_layer(AUTH_DOMAIN, TOKEN, name.strip())
             if result and result.get("error"):
                 st.error(result["error"])
             else:
@@ -414,40 +414,40 @@ with st.form("create_rule_chain_form", clear_on_submit=True):
                 st.rerun()
 
 st.divider()
-st.header("Rule Chains")
-if not rule_chains:
-    st.caption("No Rule Chains yet.")
-for chain in rule_chains:
+st.header("Policy Layers")
+if not policy_layers:
+    st.caption("No Policy Layers yet.")
+for layer in policy_layers:
     with st.container(border=True):
         top = st.columns([3, 2, 1])
         with top[0]:
             new_name = st.text_input(
-                "Rename", value=chain["name"], key=f"chain_name_{chain['id']}", label_visibility="collapsed"
+                "Rename", value=layer["name"], key=f"layer_name_{layer['id']}", label_visibility="collapsed"
             )
-            if new_name.strip() and new_name != chain["name"]:
-                if st.button("Save name", key=f"chain_save_{chain['id']}"):
-                    result = rename_rule_chain(AUTH_DOMAIN, TOKEN, chain["id"], new_name.strip())
+            if new_name.strip() and new_name != layer["name"]:
+                if st.button("Save name", key=f"layer_save_{layer['id']}"):
+                    result = rename_policy_layer(AUTH_DOMAIN, TOKEN, layer["id"], new_name.strip())
                     if result and result.get("error"):
                         st.error(result["error"])
                     else:
                         _refresh()
                         st.rerun()
         with top[2]:
-            confirm_key = f"confirm_delete_chain_{chain['id']}"
+            confirm_key = f"confirm_delete_layer_{layer['id']}"
             if st.session_state.get(confirm_key):
-                if st.button("Confirm delete", key=f"do_delete_chain_{chain['id']}", type="primary"):
-                    result = delete_rule_chain(AUTH_DOMAIN, TOKEN, chain["id"])
+                if st.button("Confirm delete", key=f"do_delete_layer_{layer['id']}", type="primary"):
+                    result = delete_policy_layer(AUTH_DOMAIN, TOKEN, layer["id"])
                     if result and result.get("error"):
                         st.error(result["error"])
                     else:
                         _refresh()
                         st.session_state.pop(confirm_key, None)
                         st.rerun()
-                if st.button("Cancel", key=f"cancel_delete_chain_{chain['id']}"):
+                if st.button("Cancel", key=f"cancel_delete_layer_{layer['id']}"):
                     st.session_state.pop(confirm_key, None)
                     st.rerun()
             else:
-                if st.button("Delete", key=f"delete_chain_{chain['id']}"):
+                if st.button("Delete", key=f"delete_layer_{layer['id']}"):
                     st.session_state[confirm_key] = True
                     st.rerun()
 
@@ -455,16 +455,16 @@ for chain in rule_chains:
             st.caption("Enabled on:")
             checkbox_cols = st.columns(min(len(hosts), 3) or 1)
             for i, host in enumerate(hosts):
-                checked = host["host_id"] in chain["host_ids"]
+                checked = host["host_id"] in layer["host_ids"]
                 with checkbox_cols[i % len(checkbox_cols)]:
                     new_checked = st.checkbox(
-                        host["label"], value=checked, key=f"chain_{chain['id']}_host_{host['host_id']}"
+                        host["label"], value=checked, key=f"layer_{layer['id']}_host_{host['host_id']}"
                     )
                 if new_checked != checked:
                     if new_checked:
-                        result = add_rule_chain_to_host(AUTH_DOMAIN, TOKEN, chain["id"], host["host_id"])
+                        result = add_policy_layer_to_host(AUTH_DOMAIN, TOKEN, layer["id"], host["host_id"])
                     else:
-                        result = remove_rule_chain_from_host(AUTH_DOMAIN, TOKEN, chain["id"], host["host_id"])
+                        result = remove_policy_layer_from_host(AUTH_DOMAIN, TOKEN, layer["id"], host["host_id"])
                     if result and result.get("error"):
                         st.error(result["error"])
                     else:
@@ -474,17 +474,17 @@ for chain in rule_chains:
             st.caption("No hosts to enable this on yet.")
 
         st.markdown("**Rules** (checked in order, first match wins; no match is denied)")
-        rules = chain["rules"]
+        rules = layer["rules"]
         if not rules:
-            st.caption("No rules yet -- this chain denies everything until you add one.")
+            st.caption("No rules yet -- this layer denies everything until you add one.")
         for idx, rule in enumerate(rules):
-            editing_key = f"_editing_rule_{chain['id']}_{rule['id']}"
+            editing_key = f"_editing_rule_{layer['id']}_{rule['id']}"
             row = st.columns([0.6, 0.6, 5, 1, 1])
             with row[0]:
                 if idx > 0 and st.button("▲", key=f"up_{rule['id']}"):
                     ids = [r["id"] for r in rules]
                     ids[idx - 1], ids[idx] = ids[idx], ids[idx - 1]
-                    result = reorder_rule_chain_rules(AUTH_DOMAIN, TOKEN, chain["id"], ids)
+                    result = reorder_policy_layer_rules(AUTH_DOMAIN, TOKEN, layer["id"], ids)
                     if result and result.get("error"):
                         st.error(result["error"])
                     else:
@@ -494,7 +494,7 @@ for chain in rule_chains:
                 if idx < len(rules) - 1 and st.button("▼", key=f"down_{rule['id']}"):
                     ids = [r["id"] for r in rules]
                     ids[idx + 1], ids[idx] = ids[idx], ids[idx + 1]
-                    result = reorder_rule_chain_rules(AUTH_DOMAIN, TOKEN, chain["id"], ids)
+                    result = reorder_policy_layer_rules(AUTH_DOMAIN, TOKEN, layer["id"], ids)
                     if result and result.get("error"):
                         st.error(result["error"])
                     else:
@@ -516,7 +516,7 @@ for chain in rule_chains:
                 rule_confirm_key = f"confirm_delete_rule_{rule['id']}"
                 if st.session_state.get(rule_confirm_key):
                     if st.button("Confirm", key=f"do_delete_rule_{rule['id']}", type="primary"):
-                        result = delete_rule_chain_rule(AUTH_DOMAIN, TOKEN, chain["id"], rule["id"])
+                        result = delete_policy_layer_rule(AUTH_DOMAIN, TOKEN, layer["id"], rule["id"])
                         if result and result.get("error"):
                             st.error(result["error"])
                         else:
@@ -528,12 +528,12 @@ for chain in rule_chains:
                         st.session_state[rule_confirm_key] = True
                         st.rerun()
             if st.session_state.get(editing_key):
-                _render_rule_editor(chain, rule)
+                _render_rule_editor(layer, rule)
 
-        adding_key = f"_adding_rule_{chain['id']}"
+        adding_key = f"_adding_rule_{layer['id']}"
         if st.session_state.get(adding_key):
-            _render_rule_editor(chain, None)
-        elif st.button("+ Add rule", key=f"add_rule_{chain['id']}"):
+            _render_rule_editor(layer, None)
+        elif st.button("+ Add rule", key=f"add_rule_{layer['id']}"):
             st.session_state[adding_key] = True
             st.rerun()
 

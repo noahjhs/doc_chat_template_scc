@@ -106,45 +106,48 @@ CREATE INDEX IF NOT EXISTS idx_command_template_hosts_host_id ON command_templat
 -- A user-authored, reusable, ORDERED list of rules for how the assistant
 -- may invoke CLI commands on a host -- replaces command_templates' flat
 -- exact-match allowlist with sequential first-match-wins evaluation (see
--- rule_chain_rules below). "Rule Chain" is deliberately not called
--- "Toolset" -- that name is reserved for a later round's user-facing view
--- of the effective, composed permission set after rule chains are spliced
--- together up a configuration hierarchy that doesn't exist yet. Which
--- hosts a chain is enabled on is a separate many-to-many
--- (rule_chain_hosts), mirroring environment_hosts/command_template_hosts.
-CREATE TABLE IF NOT EXISTS rule_chains (
+-- policy_layer_rules below). A "Policy" is the composition of one or more
+-- layers for a single tool (v1: shell only, by straight concatenation --
+-- see auth_service's /policies/eval); a rule is only ever evaluated as
+-- part of a policy, never a layer standalone. "Policy Layer" is
+-- deliberately not called "Toolset" -- that name is reserved for a
+-- later, broader concept spanning every tool (not just shell), once more
+-- than one tool has security considerations of its own. Which hosts a
+-- layer is enabled on is a separate many-to-many (policy_layer_hosts),
+-- mirroring environment_hosts/command_template_hosts.
+CREATE TABLE IF NOT EXISTS policy_layers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
     name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (user_id, name COLLATE NOCASE)
 );
-CREATE INDEX IF NOT EXISTS idx_rule_chains_user_id ON rule_chains(user_id);
+CREATE INDEX IF NOT EXISTS idx_policy_layers_user_id ON policy_layers(user_id);
 
-CREATE TABLE IF NOT EXISTS rule_chain_hosts (
-    rule_chain_id INTEGER NOT NULL REFERENCES rule_chains(id),
+CREATE TABLE IF NOT EXISTS policy_layer_hosts (
+    policy_layer_id INTEGER NOT NULL REFERENCES policy_layers(id),
     host_id INTEGER NOT NULL REFERENCES hosts(id),
-    PRIMARY KEY (rule_chain_id, host_id)
+    PRIMARY KEY (policy_layer_id, host_id)
 );
-CREATE INDEX IF NOT EXISTS idx_rule_chain_hosts_host_id ON rule_chain_hosts(host_id);
+CREATE INDEX IF NOT EXISTS idx_policy_layer_hosts_host_id ON policy_layer_hosts(host_id);
 
--- One row per rule (not a JSON list column on rule_chains) -- rules are
--- individually created/edited/deleted/reordered from the UI, so a child
--- table gives per-rule CRUD and a plain ORDER BY position without a
+-- One row per rule (not a JSON list column on policy_layers) -- rules are
+-- individually created/edited/deleted/reordered from client tooling, so a
+-- child table gives per-rule CRUD and a plain ORDER BY position without a
 -- read-modify-write of the whole list on every single-rule edit.
-CREATE TABLE IF NOT EXISTS rule_chain_rules (
+CREATE TABLE IF NOT EXISTS policy_layer_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rule_chain_id INTEGER NOT NULL REFERENCES rule_chains(id),
-    position INTEGER NOT NULL,             -- this rule's place in the CHAIN's eval order (unrelated to argv positions)
+    policy_layer_id INTEGER NOT NULL REFERENCES policy_layers(id),
+    position INTEGER NOT NULL,             -- this rule's place in the LAYER's eval order (unrelated to argv positions)
     -- JSON list of {"whitelist":.., "blacklist":..} -- list index IS the
     -- argv position (index 0 = the binary itself); a value beyond the
     -- list's length, or a fully blank entry, is unconstrained ("value not
     -- required" -- a missing value is matched as "", which a blank
     -- pattern always matches; no "*" sentinel needed). "{roots}" is a
-    -- reserved whitelist value (see models.RuleChainPattern) meaning
-    -- "must resolve to a path inside this host's own addressable
-    -- directories" -- expanded by the Go daemon via its existing
-    -- resolvePath/roots machinery, not a regex.
+    -- reserved whitelist value (see models.Pattern) meaning "must resolve
+    -- to a path inside this host's own addressable directories" --
+    -- expanded by the Go daemon via its existing resolvePath/roots
+    -- machinery, not a regex.
     positional_constraints TEXT NOT NULL,
     -- JSON list of {"short":.., "long":.., "pattern": {"whitelist":..,
     -- "blacklist":..}} -- "options" (not "flags"): including one at all
@@ -157,7 +160,7 @@ CREATE TABLE IF NOT EXISTS rule_chain_rules (
     tier TEXT NOT NULL,                    -- 'allow' | 'ask' | 'deny' -- no default; every rule states its own
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_rule_chain_rules_chain_id ON rule_chain_rules(rule_chain_id, position);
+CREATE INDEX IF NOT EXISTS idx_policy_layer_rules_policy_layer_id ON policy_layer_rules(policy_layer_id, position);
 
 -- Which one of a user's known hosts they're currently physically at --
 -- used to route a pending approval's native-dialog prompt to the right
@@ -175,8 +178,35 @@ CREATE TABLE IF NOT EXISTS user_attended_host (
 """
 
 
+def _rename_legacy_rule_chain_tables(db):
+    """One-time rename from the rule_chain* naming era to policy_layer* --
+    a straight rename of the same data/shape (not a schema/semantic
+    change), so a real ALTER TABLE is correct here, unlike this file's
+    usual "new tables only, no migration" convention for actual schema
+    changes. Must run before the CREATE TABLE IF NOT EXISTS script below
+    -- otherwise that script would create a fresh, empty policy_layers
+    table first, and this would then see the new name already "existing"
+    and skip, silently stranding the real data under the old name.
+    Idempotent: no-ops once the new names already exist (or there was
+    never a rule_chains table to begin with, e.g. a brand-new deploy)."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "rule_chains" not in existing or "policy_layers" in existing:
+        return
+    db.execute("ALTER TABLE rule_chains RENAME TO policy_layers")
+    db.execute("DROP INDEX IF EXISTS idx_rule_chains_user_id")
+
+    db.execute("ALTER TABLE rule_chain_hosts RENAME TO policy_layer_hosts")
+    db.execute("ALTER TABLE policy_layer_hosts RENAME COLUMN rule_chain_id TO policy_layer_id")
+    db.execute("DROP INDEX IF EXISTS idx_rule_chain_hosts_host_id")
+
+    db.execute("ALTER TABLE rule_chain_rules RENAME TO policy_layer_rules")
+    db.execute("ALTER TABLE policy_layer_rules RENAME COLUMN rule_chain_id TO policy_layer_id")
+    db.execute("DROP INDEX IF EXISTS idx_rule_chain_rules_chain_id")
+
+
 def init_db():
     with get_db() as db:
+        _rename_legacy_rule_chain_tables(db)
         db.executescript(SCHEMA)
 
 

@@ -5,22 +5,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
-// RuleChainPattern is one whitelist/blacklist pair for a single positional
-// or option argument value -- see auth_service/models.py's RuleChainPattern
-// for the full reasoning (RE2, "{roots}"). Compiled once at fetch/decode
-// time (see config/rulechains.go's FetchRuleChains), never per-match. A
-// missing value (a position beyond what was supplied, or an option present
-// with no value) is matched as "" -- so a blank pattern (Whitelist/
-// Blacklist both nil) means "value not required" (an empty-string RE2
-// pattern already matches everything, including ""), a Whitelist of "^$"
-// means "value not allowed" (only "" satisfies it), and a real pattern
-// means "value required" (since "" won't satisfy most real patterns).
-// Fully symmetric between positional and option constraints -- neither
-// needs its own sentinel.
-type RuleChainPattern struct {
+// Pattern is one whitelist/blacklist pair for a single positional or option
+// argument value -- see auth_service/models.py's Pattern for the full
+// reasoning (RE2, "{roots}"). Compiled once at fetch/decode time (see
+// config/policy.go's FetchPolicyLayers), never per-match. A missing value (a
+// position beyond what was supplied, or an option present with no value) is
+// matched as "" -- so a blank pattern (Whitelist/Blacklist both nil) means
+// "value not required" (an empty-string RE2 pattern already matches
+// everything, including ""), a Whitelist of "^$" means "value not allowed"
+// (only "" satisfies it), and a real pattern means "value required" (since
+// "" won't satisfy most real patterns). Fully symmetric between positional
+// and option constraints -- neither needs its own sentinel.
+type Pattern struct {
 	WhitelistRoots bool           // true iff whitelist was exactly "{roots}"
 	Whitelist      *regexp.Regexp // nil if absent or WhitelistRoots
 	Blacklist      *regexp.Regexp // nil if absent
@@ -35,106 +35,97 @@ type RuleChainPattern struct {
 // See auth_service/models.py's OptionConstraint for the full reasoning.
 type OptionConstraint struct {
 	Short, Long string
-	Pattern     RuleChainPattern
+	Pattern     Pattern
 }
 
-// Rule is one entry in a RuleChain's ordered list -- see db.py's own schema
-// comment for the full shape. PositionalConstraints' slice index IS the
-// argv position (index 0 = the binary); a supplied value beyond this
+// Rule is one entry in a PolicyLayer's ordered list -- see db.py's own
+// schema comment for the full shape. PositionalConstraints' slice index IS
+// the argv position (index 0 = the binary); a supplied value beyond this
 // slice's length is unconstrained.
 type Rule struct {
 	ID                    int
-	PositionalConstraints []RuleChainPattern
+	PositionalConstraints []Pattern
 	OptionConstraints     []OptionConstraint
 	Tier                  string
 }
 
-// RuleChain is the daemon's own cached copy of a user-authored, ordered
-// rule list -- fetched from auth_service (see config.FetchRuleChains) and
+// PolicyLayer is the daemon's own cached copy of a user-authored, ordered
+// rule list -- fetched from auth_service (see config.FetchPolicyLayers) and
 // cached here so enforcement never has to trust the browser/model to have
-// applied a rule correctly. Rules is already ordered by position.
-type RuleChain struct {
+// applied a rule correctly. Rules is already ordered by position. A Policy
+// (see composePolicy below) is the concatenation of every PolicyLayer
+// currently attached to this host -- a layer is never evaluated standalone.
+type PolicyLayer struct {
 	ID    int
 	Name  string
 	Rules []Rule
 }
 
-// SetRuleChains replaces the entire cached set -- called after every fetch
+// SetPolicyLayers replaces the entire cached set -- called after every fetch
 // from auth_service (pairing, resume, or an explicit refresh triggered
 // from the web app), never merged incrementally.
-func (h *Handler) SetRuleChains(ruleChains []RuleChain) {
+func (h *Handler) SetPolicyLayers(layers []PolicyLayer) {
 	h.mu.Lock()
-	h.ruleChains = ruleChains
+	h.policyLayers = layers
 	h.mu.Unlock()
 }
 
-// RuleChains returns a snapshot of the currently cached rule chains.
-func (h *Handler) RuleChains() []RuleChain {
+// PolicyLayers returns a snapshot of the currently cached policy layers.
+func (h *Handler) PolicyLayers() []PolicyLayer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([]RuleChain(nil), h.ruleChains...)
+	return append([]PolicyLayer(nil), h.policyLayers...)
 }
 
-// SetRefreshRuleChainsFunc injects the callback runRefreshRuleChains
+// SetRefreshPolicyLayersFunc injects the callback runRefreshPolicyLayers
 // invokes -- set once at startup by cmd/casper/main.go (after daemonState
 // exists, so the closure can reach its own getDeviceToken/authDomain; nil
 // until then, and always nil in tests, same nil-tolerant posture as
 // pickAndPersistDir). Kept as an injected callback rather than importing
 // agent/internal/config directly here, since this package has no business
 // knowing about auth domains/device tokens.
-func (h *Handler) SetRefreshRuleChainsFunc(fn func()) {
+func (h *Handler) SetRefreshPolicyLayersFunc(fn func()) {
 	h.mu.Lock()
-	h.refreshRuleChainsFn = fn
+	h.refreshPolicyLayersFn = fn
 	h.mu.Unlock()
 }
 
-// runRefreshRuleChains is not part of run_local_command's model-facing
+// runRefreshPolicyLayers is not part of run_local_command's model-facing
 // action enum (see COMMAND_CATEGORIES in utils/sidebar.py) -- only the web
-// app's Resources page triggers it, same posture as runAddDirectory. Runs
-// the fetch in a goroutine rather than blocking the request/response; the
-// caller is expected to poll (e.g. re-fetch GET /hosts) rather than wait on
-// this response for the refreshed set.
-func (h *Handler) runRefreshRuleChains(_ *Request) (Result, error) {
+// app's policy-authoring UI triggers it, same posture as runAddDirectory.
+// Runs the fetch in a goroutine rather than blocking the request/response;
+// the caller is expected to poll (e.g. re-fetch GET /hosts) rather than
+// wait on this response for the refreshed set.
+func (h *Handler) runRefreshPolicyLayers(_ *Request) (Result, error) {
 	h.mu.Lock()
-	fn := h.refreshRuleChainsFn
+	fn := h.refreshPolicyLayersFn
 	h.mu.Unlock()
 	if fn == nil {
-		return Result{}, &ActionError{Detail: "Refreshing rule chains isn't supported on this installation."}
+		return Result{}, &ActionError{Detail: "Refreshing policy layers isn't supported on this installation."}
 	}
 	go fn()
-	return h.ok("Refreshing rule chains -- check back shortly.", ""), nil
+	return h.ok("Refreshing policy layers -- check back shortly.", ""), nil
 }
 
-func (h *Handler) findRuleChain(id int) (RuleChain, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, rc := range h.ruleChains {
-		if rc.ID == id {
-			return rc, true
-		}
-	}
-	return RuleChain{}, false
-}
-
-// runListRuleChains reports the daemon's own currently-cached set --
+// runListPolicyLayers reports the daemon's own currently-cached set --
 // model-visible, mirrors runListDirectories -- so the model can see what's
 // actually available right now rather than working off a stale schema. The
-// rich, per-rule prose description lives in pages/chat.py's tool schema
+// rich, per-rule prose description lives in the web app's tool schema
 // (built from the same data fetched via GET /hosts); this is a lighter
 // "what does the daemon think it has right now" summary, same modest role
 // runListDirectories plays for addressable directories.
-func (h *Handler) runListRuleChains(_ *Request) (Result, error) {
-	ruleChains := h.RuleChains()
-	if len(ruleChains) == 0 {
-		return h.ok("No rule chains enabled on this host.", ""), nil
+func (h *Handler) runListPolicyLayers(_ *Request) (Result, error) {
+	layers := h.PolicyLayers()
+	if len(layers) == 0 {
+		return h.ok("No policy layers enabled on this host.", ""), nil
 	}
 	var lines []string
-	for _, rc := range ruleChains {
+	for _, pl := range layers {
 		var tiers []string
-		for _, r := range rc.Rules {
+		for _, r := range pl.Rules {
 			tiers = append(tiers, r.Tier)
 		}
-		lines = append(lines, fmt.Sprintf("#%d %s: %d rule(s) [%s]", rc.ID, rc.Name, len(rc.Rules), strings.Join(tiers, ", ")))
+		lines = append(lines, fmt.Sprintf("#%d %s: %d rule(s) [%s]", pl.ID, pl.Name, len(pl.Rules), strings.Join(tiers, ", ")))
 	}
 	return h.ok(strings.Join(lines, "\n"), ""), nil
 }
@@ -173,9 +164,9 @@ func (h *Handler) valueInRoots(value string) bool {
 // valueMatchesPattern reports whether value satisfies p -- WhitelistRoots
 // checks containment via valueInRoots against the RESOLVED path, while a
 // blacklist, if also present, still checks the RAW value (a deliberate
-// asymmetry, documented on RuleChainPattern in auth_service/models.py);
-// otherwise a plain RE2 whitelist/blacklist check against the raw value.
-func (h *Handler) valueMatchesPattern(value string, p RuleChainPattern) bool {
+// asymmetry, documented on Pattern in auth_service/models.py); otherwise a
+// plain RE2 whitelist/blacklist check against the raw value.
+func (h *Handler) valueMatchesPattern(value string, p Pattern) bool {
 	if p.WhitelistRoots {
 		if !h.valueInRoots(value) {
 			return false
@@ -199,7 +190,7 @@ func findOption(options []RequestOption, short, long string) (RequestOption, boo
 }
 
 // ruleMatches reports whether every constraint in r is satisfied by the
-// given structured call -- first-match-wins order is matchRule's job, not
+// given structured call -- first-match-wins order is matchPolicy's job, not
 // this function's. Positions/options the model supplies but r doesn't
 // mention (i.e. beyond PositionalConstraints' length, or with no
 // OptionConstraint entry at all) are simply not checked (don't-care),
@@ -237,12 +228,32 @@ func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []Request
 	return true
 }
 
-// matchRule walks chain.Rules in order, returning the first one that
-// matches -- nil means terminal deny (every rule exhausted, none matched).
-func (h *Handler) matchRule(chain RuleChain, positionalArgs []string, options []RequestOption) *Rule {
-	for i := range chain.Rules {
-		if h.ruleMatches(chain.Rules[i], positionalArgs, options) {
-			return &chain.Rules[i]
+// composePolicy concatenates every given layer's Rules into one ordered
+// list -- v1's whole composition rule (see the plan discussion this
+// implements: "our v1 engine can simply concatenate them... re-evaluate
+// after realistic usage"). Layers are sorted by ID ascending first, so
+// composition order is stable and independent of whatever order the caller
+// (or auth_service's own query, which currently orders by name) happened to
+// supply them in.
+func composePolicy(layers []PolicyLayer) []Rule {
+	sorted := append([]PolicyLayer(nil), layers...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	var rules []Rule
+	for _, pl := range sorted {
+		rules = append(rules, pl.Rules...)
+	}
+	return rules
+}
+
+// matchPolicy composes layers into one Policy (see composePolicy) and walks
+// it in order, returning the first rule that matches -- nil means terminal
+// deny (every rule exhausted, none matched, including the case where layers
+// is empty or composes to zero rules).
+func (h *Handler) matchPolicy(layers []PolicyLayer, positionalArgs []string, options []RequestOption) *Rule {
+	rules := composePolicy(layers)
+	for i := range rules {
+		if h.ruleMatches(rules[i], positionalArgs, options) {
+			return &rules[i]
 		}
 	}
 	return nil
@@ -273,29 +284,31 @@ func buildArgv(extraPositionals []string, options []RequestOption) []string {
 	return append(argv, extraPositionals...)
 }
 
-// runRunRuleChainCall is the daemon's own enforcement point -- purely
-// structural, same as every other action in commands.go: matches the
-// model-supplied structured call (never a raw argv string -- see Request's
-// own doc comment) against chain.Rules in order, first match wins,
-// terminal deny. req.Path (reused from every path-taking action above) now
-// ALWAYS picks which confined directory to run in when given -- a
-// deliberate change from the old path_scoped boolean, matching how every
-// other confined action in this file already behaves; otherwise this just
-// uses whatever directory is currently tracked as cwd, itself always
-// already inside h.roots.
-func (h *Handler) runRunRuleChainCall(req *Request) (Result, error) {
-	chain, ok := h.findRuleChain(req.RuleChainID)
-	if !ok {
-		return Result{}, &ActionError{Detail: "Unknown or no longer enabled rule chain."}
-	}
+// runRunShellCommand is the daemon's own enforcement point -- purely
+// structural, same as every other action in commands.go: composes every
+// policy layer currently attached to this host into one Policy (see
+// composePolicy) and matches the model-supplied structured call (never a
+// raw argv string -- see Request's own doc comment) against it in order,
+// first match wins, terminal deny. Host-scoped, not layer-scoped: there's
+// no ID to look up here (GET /hosts/policy-layers already device-token-
+// scopes h.PolicyLayers() to this host's own attached layers -- see
+// config.FetchPolicyLayers) -- a rule is only ever evaluated as part of a
+// policy, never a layer standalone, so every real call composes the whole
+// set rather than the model picking one layer to check against. req.Path
+// (reused from every path-taking action above) now ALWAYS picks which
+// confined directory to run in when given -- a deliberate change from the
+// old path_scoped boolean, matching how every other confined action in
+// this file already behaves; otherwise this just uses whatever directory
+// is currently tracked as cwd, itself always already inside h.roots.
+func (h *Handler) runRunShellCommand(req *Request) (Result, error) {
 	if len(req.PositionalArgs) == 0 {
 		return Result{}, &ActionError{Detail: "'positional_args' must include at least the binary."}
 	}
-	rule := h.matchRule(chain, req.PositionalArgs, req.Options)
+	rule := h.matchPolicy(h.PolicyLayers(), req.PositionalArgs, req.Options)
 	if rule == nil {
 		return Result{}, &ActionError{Detail: "Denied: no matching rule for this call."}
 	}
-	// Tier is NOT enforced here -- same posture as before: pages/chat.py
+	// Tier is NOT enforced here -- same posture as before: the web app
 	// decides ask/allow/deny before ever calling this action; command_key
 	// possession remains the real security boundary.
 

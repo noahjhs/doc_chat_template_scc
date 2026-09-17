@@ -156,13 +156,13 @@ func main() {
 
 	state = newDaemonState(srv, cmdHandler, relayDomain, authDomain, routingKey, port, logf)
 	srv.OnSignOut = state.onSignOut
-	// Lets the web app's Resources page ask this daemon to re-fetch its own
-	// enabled rule chains on demand (see commands.Handler's
-	// runRefreshRuleChains), rather than waiting for the next
+	// Lets the web app's policy-authoring UI ask this daemon to re-fetch its
+	// own enabled policy layers on demand (see commands.Handler's
+	// runRefreshPolicyLayers), rather than waiting for the next
 	// pairing/resume -- a no-op while signed out (getDeviceToken() is "").
-	cmdHandler.SetRefreshRuleChainsFunc(func() {
+	cmdHandler.SetRefreshPolicyLayersFunc(func() {
 		if deviceToken := state.getDeviceToken(); deviceToken != "" {
-			state.refreshRuleChains(deviceToken)
+			state.refreshPolicyLayers(deviceToken)
 		}
 	})
 

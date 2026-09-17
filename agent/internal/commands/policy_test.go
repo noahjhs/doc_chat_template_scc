@@ -6,34 +6,32 @@ import (
 	"testing"
 )
 
-func mustWhitelist(pattern string) RuleChainPattern {
-	return RuleChainPattern{Whitelist: regexp.MustCompile(pattern)}
+func mustWhitelist(pattern string) Pattern {
+	return Pattern{Whitelist: regexp.MustCompile(pattern)}
 }
 
 // unconstrained is a blank pattern -- "value not required" -- used
 // throughout these tests as a convenient "match anything at this
-// position" filler, the same role the removed Wildcard sentinel used to
-// play (now redundant: a blank pattern matched against a missing value,
-// coerced to "", already matches -- see ruleMatches).
-func unconstrained() RuleChainPattern {
-	return RuleChainPattern{}
+// position" filler.
+func unconstrained() Pattern {
+	return Pattern{}
 }
 
-// valueNotAllowed matches only an empty string -- see RuleChainPattern's
-// own doc comment for why this is how a rule requires an argument or
-// option to have NO value.
-func valueNotAllowed() RuleChainPattern {
+// valueNotAllowed matches only an empty string -- see Pattern's own doc
+// comment for why this is how a rule requires an argument or option to
+// have NO value.
+func valueNotAllowed() Pattern {
 	return mustWhitelist("^$")
 }
 
-func rootsWhitelist() RuleChainPattern {
-	return RuleChainPattern{WhitelistRoots: true}
+func rootsWhitelist() Pattern {
+	return Pattern{WhitelistRoots: true}
 }
 
 func TestRuleMatches_Positional(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{mustWhitelist("^echo$"), mustWhitelist("^hello$")},
+		PositionalConstraints: []Pattern{mustWhitelist("^echo$"), mustWhitelist("^hello$")},
 		Tier:                  "allow",
 	}
 	if !h.ruleMatches(rule, []string{"echo", "hello"}, nil) {
@@ -66,7 +64,7 @@ func TestRuleMatches_EmptyPositionalConstraintsMatchAnyBinary(t *testing.T) {
 func TestRuleMatches_UnconstrainedEarlyPositionDoesntBlockALaterOne(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{unconstrained(), unconstrained(), mustWhitelist("^world$")},
+		PositionalConstraints: []Pattern{unconstrained(), unconstrained(), mustWhitelist("^world$")},
 		Tier:                  "allow",
 	}
 	if !h.ruleMatches(rule, []string{"echo", "hello", "world"}, nil) {
@@ -87,7 +85,7 @@ func TestRuleMatches_MissingPositionNeverSatisfiesRoots(t *testing.T) {
 	// through the actual ruleMatches loop that does the "missing position
 	// coerced to \"\"" step.
 	h, _ := newTestHandler(t)
-	rule := Rule{PositionalConstraints: []RuleChainPattern{mustWhitelist("^cat$"), rootsWhitelist()}, Tier: "ask"}
+	rule := Rule{PositionalConstraints: []Pattern{mustWhitelist("^cat$"), rootsWhitelist()}, Tier: "ask"}
 	if h.ruleMatches(rule, []string{"cat"}, nil) {
 		t.Fatal("expected no match -- position 1 (a real {roots} constraint) was never supplied")
 	}
@@ -101,7 +99,7 @@ func TestRuleMatches_PositionalValueNotAllowed(t *testing.T) {
 	// the position be either absent or an explicit empty string.
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{mustWhitelist("^rm$"), valueNotAllowed()},
+		PositionalConstraints: []Pattern{mustWhitelist("^rm$"), valueNotAllowed()},
 		Tier:                  "deny",
 	}
 	if !h.ruleMatches(rule, []string{"rm"}, nil) {
@@ -121,7 +119,7 @@ func TestRuleMatches_OptionEmptyStringWhitelistRequiresNoValue(t *testing.T) {
 	// string) is how a rule requires an option be present with NO value.
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{unconstrained()},
+		PositionalConstraints: []Pattern{unconstrained()},
 		OptionConstraints:     []OptionConstraint{{Long: "force", Pattern: mustWhitelist("^$")}},
 	}
 	noValue := "no"
@@ -139,8 +137,8 @@ func TestRuleMatches_OptionEmptyStringWhitelistRequiresNoValue(t *testing.T) {
 func TestRuleMatches_OptionBlankPatternAcceptsAnyOrNoValue(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{unconstrained()},
-		OptionConstraints:     []OptionConstraint{{Short: "v", Pattern: RuleChainPattern{}}},
+		PositionalConstraints: []Pattern{unconstrained()},
+		OptionConstraints:     []OptionConstraint{{Short: "v", Pattern: Pattern{}}},
 	}
 	anything := "anything"
 	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Short: "v", Value: nil}}) {
@@ -154,7 +152,7 @@ func TestRuleMatches_OptionBlankPatternAcceptsAnyOrNoValue(t *testing.T) {
 func TestRuleMatches_OptionValuePattern(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rule := Rule{
-		PositionalConstraints: []RuleChainPattern{unconstrained()},
+		PositionalConstraints: []Pattern{unconstrained()},
 		OptionConstraints:     []OptionConstraint{{Long: "format", Pattern: mustWhitelist("^json$")}},
 	}
 	jsonValue := "json"
@@ -170,25 +168,64 @@ func TestRuleMatches_OptionValuePattern(t *testing.T) {
 	}
 }
 
-func TestMatchRule_FirstMatchWins(t *testing.T) {
-	h, _ := newTestHandler(t)
-	chain := RuleChain{Rules: []Rule{
-		{ID: 1, PositionalConstraints: []RuleChainPattern{mustWhitelist("^echo$")}, Tier: "ask"},
-		{ID: 2, PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"},
-	}}
-	rule := h.matchRule(chain, []string{"echo"}, nil)
-	if rule == nil || rule.ID != 1 {
-		t.Fatalf("expected the first (more specific) rule to win, got %+v", rule)
+func TestComposePolicy_ConcatenatesInLayerIDOrder(t *testing.T) {
+	// Deliberately supplied out of ID order, to confirm composePolicy sorts
+	// by ID itself rather than trusting caller order (see its own doc
+	// comment -- v1's whole composition rule is "just concatenate them").
+	layers := []PolicyLayer{
+		{ID: 2, Rules: []Rule{{ID: 20, Tier: "ask"}}},
+		{ID: 1, Rules: []Rule{{ID: 10, Tier: "allow"}, {ID: 11, Tier: "deny"}}},
+	}
+	rules := composePolicy(layers)
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(rules))
+	}
+	got := []int{rules[0].ID, rules[1].ID, rules[2].ID}
+	want := []int{10, 11, 20}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected rule order %v (layer 1's rules, then layer 2's), got %v", want, got)
+		}
 	}
 }
 
-func TestMatchRule_TerminalDenyWhenNothingMatches(t *testing.T) {
+func TestMatchPolicy_FirstMatchWinsAcrossLayers(t *testing.T) {
+	// A rule is only ever evaluated as part of a policy, never a layer
+	// standalone -- confirms a call is checked against every attached
+	// layer's rules composed together, not just one layer the caller
+	// happens to pick.
 	h, _ := newTestHandler(t)
-	chain := RuleChain{Rules: []Rule{
-		{PositionalConstraints: []RuleChainPattern{mustWhitelist("^git$")}, Tier: "allow"},
-	}}
-	if h.matchRule(chain, []string{"echo"}, nil) != nil {
+	layers := []PolicyLayer{
+		{ID: 1, Rules: []Rule{{ID: 1, PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "ask"}}},
+		{ID: 2, Rules: []Rule{{ID: 2, PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}},
+	}
+	rule := h.matchPolicy(layers, []string{"echo"}, nil)
+	if rule == nil || rule.ID != 1 {
+		t.Fatalf("expected the first (more specific) rule, from layer 1, to win, got %+v", rule)
+	}
+	// A binary layer 1 doesn't recognize still matches, via layer 2's
+	// unconstrained rule -- proof both layers are actually composed, not
+	// just the first one checked.
+	rule = h.matchPolicy(layers, []string{"git"}, nil)
+	if rule == nil || rule.ID != 2 {
+		t.Fatalf("expected layer 2's rule to win for a binary layer 1 doesn't match, got %+v", rule)
+	}
+}
+
+func TestMatchPolicy_TerminalDenyWhenNothingMatches(t *testing.T) {
+	h, _ := newTestHandler(t)
+	layers := []PolicyLayer{
+		{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"}}},
+	}
+	if h.matchPolicy(layers, []string{"echo"}, nil) != nil {
 		t.Fatal("expected no match (terminal deny)")
+	}
+}
+
+func TestMatchPolicy_NoLayersMeansTerminalDeny(t *testing.T) {
+	h, _ := newTestHandler(t)
+	if h.matchPolicy(nil, []string{"echo"}, nil) != nil {
+		t.Fatal("expected no match -- zero layers attached composes to zero rules")
 	}
 }
 
@@ -262,18 +299,18 @@ func TestBuildArgv(t *testing.T) {
 	}
 }
 
-func TestRunRuleChainCall_Succeeds(t *testing.T) {
+func TestRunShellCommand_Succeeds(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.SetRuleChains([]RuleChain{{
+	h.SetPolicyLayers([]PolicyLayer{{
 		ID: 1,
 		Rules: []Rule{{
 			ID:                    1,
-			PositionalConstraints: []RuleChainPattern{mustWhitelist("^echo$"), mustWhitelist("^hello$")},
+			PositionalConstraints: []Pattern{mustWhitelist("^echo$"), mustWhitelist("^hello$")},
 			Tier:                  "allow",
 		}},
 	}})
 
-	res, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{"echo", "hello"}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hello"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -282,53 +319,71 @@ func TestRunRuleChainCall_Succeeds(t *testing.T) {
 	}
 }
 
-func TestRunRuleChainCall_RejectsUnknownRuleChainID(t *testing.T) {
+func TestRunShellCommand_ComposesEveryAttachedLayer(t *testing.T) {
+	// End-to-end version of TestMatchPolicy_FirstMatchWinsAcrossLayers,
+	// through Dispatch -- there's no layer ID in the request at all, so
+	// this also confirms the action genuinely doesn't need one.
 	h, _ := newTestHandler(t)
-	if _, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 99, PositionalArgs: []string{"echo"}}); err == nil {
-		t.Fatal("expected an ActionError for an unknown rule chain id")
+	h.SetPolicyLayers([]PolicyLayer{
+		{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"}}},
+		{ID: 2, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "allow"}}},
+	})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success -- layer 2's rule should have matched, got %+v", res)
 	}
 }
 
-func TestRunRuleChainCall_RejectsWhenNoRuleMatches(t *testing.T) {
+func TestRunShellCommand_RejectsWhenNoRuleMatches(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{
-		{PositionalConstraints: []RuleChainPattern{mustWhitelist("^git$")}, Tier: "allow"},
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{
+		{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"},
 	}}})
-	if _, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{"rm", "-rf", "/"}}); err == nil {
+	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"rm", "-rf", "/"}}); err == nil {
 		t.Fatal("expected an ActionError -- no rule matches, terminal deny")
 	}
 }
 
-func TestRunRuleChainCall_RequiresAtLeastTheBinary(t *testing.T) {
+func TestRunShellCommand_NoLayersAttachedMeansTerminalDeny(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}}})
-	if _, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{}}); err == nil {
+	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}}); err == nil {
+		t.Fatal("expected an ActionError -- zero policy layers attached composes to zero rules, terminal deny")
+	}
+}
+
+func TestRunShellCommand_RequiresAtLeastTheBinary(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}}})
+	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{}}); err == nil {
 		t.Fatal("expected an ActionError -- positional_args must include at least the binary")
 	}
 }
 
-func TestRunRuleChainCall_NoRootsMeansFail(t *testing.T) {
+func TestRunShellCommand_NoRootsMeansFail(t *testing.T) {
 	h := New(nil, nil)
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}}})
-	res, err := h.Dispatch(&Request{Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{"echo"}})
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Success {
-		t.Fatal("expected run_rule_chain_call to fail with zero roots, same as every other confined action")
+		t.Fatal("expected run_shell_command to fail with zero roots, same as every other confined action")
 	}
 }
 
-func TestRunRuleChainCall_PathRedirectsDirectoryUnconditionally(t *testing.T) {
+func TestRunShellCommand_PathRedirectsDirectoryUnconditionally(t *testing.T) {
 	h, root := newTestHandler(t)
 	subdir := root + "/subdir"
 	if err := os.Mkdir(subdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	h.SetRuleChains([]RuleChain{{ID: 1, Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}}})
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}}})
 
 	res, err := h.Dispatch(&Request{
-		Action: "run_rule_chain_call", RuleChainID: 1, PositionalArgs: []string{"echo", "hi"}, Path: subdir,
+		Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}, Path: subdir,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -338,21 +393,21 @@ func TestRunRuleChainCall_PathRedirectsDirectoryUnconditionally(t *testing.T) {
 	}
 }
 
-func TestListRuleChains(t *testing.T) {
+func TestListPolicyLayers(t *testing.T) {
 	h, _ := newTestHandler(t)
-	empty, err := h.Dispatch(&Request{Action: "list_rule_chains"})
-	if err != nil || empty.Stdout != "No rule chains enabled on this host." {
+	empty, err := h.Dispatch(&Request{Action: "list_policy_layers"})
+	if err != nil || empty.Stdout != "No policy layers enabled on this host." {
 		t.Fatalf("expected the empty message, got %q (err=%v)", empty.Stdout, err)
 	}
 
-	h.SetRuleChains([]RuleChain{
-		{ID: 1, Name: "test", Rules: []Rule{{PositionalConstraints: []RuleChainPattern{unconstrained()}, Tier: "allow"}}},
+	h.SetPolicyLayers([]PolicyLayer{
+		{ID: 1, Name: "test", Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}},
 	})
-	res, err := h.Dispatch(&Request{Action: "list_rule_chains"})
+	res, err := h.Dispatch(&Request{Action: "list_policy_layers"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.Stdout == "" || res.Stdout == "No rule chains enabled on this host." {
+	if res.Stdout == "" || res.Stdout == "No policy layers enabled on this host." {
 		t.Fatalf("expected a non-empty listing, got %q", res.Stdout)
 	}
 }

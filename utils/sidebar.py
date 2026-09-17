@@ -260,9 +260,9 @@ def _fetch_local_json(config, action, **kwargs):
             # ActionError -> 400 mapping) -- response.raise_for_status()'s
             # exception message would just be "400 Client Error: Bad
             # Request for url: ...", silently dropping the daemon's actual
-            # reason (e.g. "Unknown or no longer enabled rule chain."),
+            # reason (e.g. "Denied: no matching rule for this call."),
             # same fix as pages/chat.py's call_local_agent/
-            # call_rule_chain_call.
+            # call_shell_command.
             try:
                 detail = response.json().get("detail")
             except ValueError:
@@ -354,10 +354,12 @@ def _build_local_agent_configs(connected_hosts):
             "url": h["local_agent_url"].rstrip("/"),
             "api_key": h["command_key"],
             "workspace": h.get("workspace") or [],
-            # Rule chains enabled on this specific host -- see
-            # auth_service's HostInfo.rule_chains. pages/chat.py
-            # builds its run_rule_chain_call tool schema from these.
-            "rule_chains": h.get("rule_chains") or [],
+            # Policy layers enabled on this specific host -- see
+            # auth_service's HostInfo.policy_layers. pages/chat.py composes
+            # these into the host's Policy client-side, mirroring the
+            # daemon's own host-scoped composition (see policy.go's
+            # composePolicy), for its own tier-decision approximation.
+            "policy_layers": h.get("policy_layers") or [],
         }
     return configs
 

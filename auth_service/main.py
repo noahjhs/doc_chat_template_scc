@@ -29,10 +29,10 @@ from models import (
     HostListResponse,
     HostPairRequest,
     HostPairResponse,
+    HostPolicyLayerInfo,
+    HostPolicyLayerListResponse,
     HostPresenceReport,
     HostRenameRequest,
-    HostRuleChainInfo,
-    HostRuleChainListResponse,
     HostVerifyResponse,
     LoginRequest,
     PendingApprovalCreateRequest,
@@ -40,17 +40,17 @@ from models import (
     PendingApprovalDecisionRequest,
     PendingApprovalInfo,
     PendingApprovalListResponse,
+    PolicyLayerCreateRequest,
+    PolicyLayerInfo,
+    PolicyLayerListResponse,
+    PolicyLayerRenameRequest,
+    PolicyLayerRuleCreateRequest,
+    PolicyLayerRuleInfo,
+    PolicyLayerRuleReorderRequest,
+    PolicyLayerRuleUpdateRequest,
     ProfileInfo,
     ProfileUpdateRequest,
     RevokeResponse,
-    RuleChainCreateRequest,
-    RuleChainInfo,
-    RuleChainListResponse,
-    RuleChainRenameRequest,
-    RuleChainRuleCreateRequest,
-    RuleChainRuleInfo,
-    RuleChainRuleReorderRequest,
-    RuleChainRuleUpdateRequest,
     SignOutAllResponse,
     SignupRequest,
     StorageDeleteResponse,
@@ -80,15 +80,15 @@ def _validation_error_handler(request: Request, exc: RequestValidationError):
 def _first_validation_message(errors: list[dict]) -> str:
     """Shared by the global RequestValidationError handler above and by any
     handler that manually re-validates a merged PATCH body through a
-    *CreateRequest model (see update_rule_chain_rule).
+    *CreateRequest model (see update_policy_layer_rule).
 
     Prefers a "value_error" entry (a validator's own deliberately-written
-    message, e.g. RuleChainPattern's "Invalid regex ...") over a generic
+    message, e.g. Pattern's "Invalid regex ...") over a generic
     structural one (e.g. "literal_error") when both are present -- this
     mattered while positional_constraints/OptionConstraint.pattern were
-    still `Literal["*"] | RuleChainPattern` unions (since dropped in favor
-    of RuleChainPattern alone being expressive enough on its own): a
-    genuinely-invalid RuleChainPattern payload failed BOTH union branches
+    still `Literal["*"] | Pattern` unions (since dropped in favor
+    of Pattern alone being expressive enough on its own): a
+    genuinely-invalid Pattern payload failed BOTH union branches
     (not the literal "*", *and* the model's own validator rejected it),
     and pydantic reports every attempted branch's error in declaration
     order -- so without this, a real "invalid regex" mistake confusingly
@@ -355,26 +355,26 @@ def _environment_info(db, environment_id: int, name: str) -> EnvironmentInfo:
     return EnvironmentInfo(id=environment_id, name=name, host_ids=host_ids)
 
 
-def _user_owns_rule_chain(db, user_id: int, rule_chain_id: int) -> bool:
+def _user_owns_policy_layer(db, user_id: int, policy_layer_id: int) -> bool:
     return (
-        db.execute("SELECT 1 FROM rule_chains WHERE id = ? AND user_id = ?", (rule_chain_id, user_id)).fetchone()
+        db.execute("SELECT 1 FROM policy_layers WHERE id = ? AND user_id = ?", (policy_layer_id, user_id)).fetchone()
         is not None
     )
 
 
-def _user_owns_rule_chain_rule(db, user_id: int, rule_chain_id: int, rule_id: int) -> bool:
+def _user_owns_policy_layer_rule(db, user_id: int, policy_layer_id: int, rule_id: int) -> bool:
     return (
         db.execute(
-            "SELECT 1 FROM rule_chain_rules rcr JOIN rule_chains rc ON rc.id = rcr.rule_chain_id "
-            "WHERE rcr.id = ? AND rcr.rule_chain_id = ? AND rc.user_id = ?",
-            (rule_id, rule_chain_id, user_id),
+            "SELECT 1 FROM policy_layer_rules plr JOIN policy_layers pl ON pl.id = plr.policy_layer_id "
+            "WHERE plr.id = ? AND plr.policy_layer_id = ? AND pl.user_id = ?",
+            (rule_id, policy_layer_id, user_id),
         ).fetchone()
         is not None
     )
 
 
-def _rule_chain_rule_info(row) -> RuleChainRuleInfo:
-    return RuleChainRuleInfo(
+def _policy_layer_rule_info(row) -> PolicyLayerRuleInfo:
+    return PolicyLayerRuleInfo(
         id=row["id"],
         position=row["position"],
         positional_constraints=json.loads(row["positional_constraints"]),
@@ -383,24 +383,24 @@ def _rule_chain_rule_info(row) -> RuleChainRuleInfo:
     )
 
 
-def _rule_chain_rules(db, rule_chain_id: int) -> list[RuleChainRuleInfo]:
+def _policy_layer_rules(db, policy_layer_id: int) -> list[PolicyLayerRuleInfo]:
     rows = db.execute(
         "SELECT id, position, positional_constraints, option_constraints, tier "
-        "FROM rule_chain_rules WHERE rule_chain_id = ? ORDER BY position",
-        (rule_chain_id,),
+        "FROM policy_layer_rules WHERE policy_layer_id = ? ORDER BY position",
+        (policy_layer_id,),
     ).fetchall()
-    return [_rule_chain_rule_info(r) for r in rows]
+    return [_policy_layer_rule_info(r) for r in rows]
 
 
-def _rule_chain_info(db, rule_chain_id: int) -> RuleChainInfo:
-    row = db.execute("SELECT id, name FROM rule_chains WHERE id = ?", (rule_chain_id,)).fetchone()
+def _policy_layer_info(db, policy_layer_id: int) -> PolicyLayerInfo:
+    row = db.execute("SELECT id, name FROM policy_layers WHERE id = ?", (policy_layer_id,)).fetchone()
     host_ids = [
         r["host_id"]
         for r in db.execute(
-            "SELECT host_id FROM rule_chain_hosts WHERE rule_chain_id = ?", (rule_chain_id,)
+            "SELECT host_id FROM policy_layer_hosts WHERE policy_layer_id = ?", (policy_layer_id,)
         ).fetchall()
     ]
-    return RuleChainInfo(id=row["id"], name=row["name"], rules=_rule_chain_rules(db, rule_chain_id), host_ids=host_ids)
+    return PolicyLayerInfo(id=row["id"], name=row["name"], rules=_policy_layer_rules(db, policy_layer_id), host_ids=host_ids)
 
 
 # --- Host pairing / presence (daemon-initiated, device_token-gated) ------
@@ -488,38 +488,38 @@ def list_hosts(authorization: str = Header(default="")):
             """,
             (user_id,),
         ).fetchall()
-        chain_host_rows = db.execute(
+        layer_host_rows = db.execute(
             """
-            SELECT rch.host_id, rc.id, rc.name
-            FROM rule_chain_hosts rch JOIN rule_chains rc ON rc.id = rch.rule_chain_id
-            WHERE rc.user_id = ? ORDER BY rc.name COLLATE NOCASE
+            SELECT plh.host_id, pl.id, pl.name
+            FROM policy_layer_hosts plh JOIN policy_layers pl ON pl.id = plh.policy_layer_id
+            WHERE pl.user_id = ? ORDER BY pl.name COLLATE NOCASE
             """,
             (user_id,),
         ).fetchall()
         rule_rows = db.execute(
             """
-            SELECT rcr.rule_chain_id, rcr.id, rcr.position, rcr.positional_constraints,
-                   rcr.option_constraints, rcr.tier
-            FROM rule_chain_rules rcr JOIN rule_chains rc ON rc.id = rcr.rule_chain_id
-            WHERE rc.user_id = ? ORDER BY rcr.position
+            SELECT plr.policy_layer_id, plr.id, plr.position, plr.positional_constraints,
+                   plr.option_constraints, plr.tier
+            FROM policy_layer_rules plr JOIN policy_layers pl ON pl.id = plr.policy_layer_id
+            WHERE pl.user_id = ? ORDER BY plr.position
             """,
             (user_id,),
         ).fetchall()
     envs_by_host: dict[int, list[int]] = {}
     for r in env_rows:
         envs_by_host.setdefault(r["host_id"], []).append(r["environment_id"])
-    rules_by_chain: dict[int, list[RuleChainRuleInfo]] = {}
+    rules_by_layer: dict[int, list[PolicyLayerRuleInfo]] = {}
     for r in rule_rows:
-        rules_by_chain.setdefault(r["rule_chain_id"], []).append(_rule_chain_rule_info(r))
+        rules_by_layer.setdefault(r["policy_layer_id"], []).append(_policy_layer_rule_info(r))
     # Attached regardless of live connection state -- like environment_ids
     # above (persisted config), not like workspace/local_agent_url below
-    # (live daemon-reported state) -- a disconnected host's attached rule
-    # chains are still meaningful to show (e.g. in the Resources page's
-    # host-attachment grid).
-    chains_by_host: dict[int, list[HostRuleChainInfo]] = {}
-    for r in chain_host_rows:
-        chains_by_host.setdefault(r["host_id"], []).append(
-            HostRuleChainInfo(id=r["id"], name=r["name"], rules=rules_by_chain.get(r["id"], []))
+    # (live daemon-reported state) -- a disconnected host's attached
+    # policy layers are still meaningful to show (e.g. in a policy-authoring
+    # UI's host-attachment grid).
+    layers_by_host: dict[int, list[HostPolicyLayerInfo]] = {}
+    for r in layer_host_rows:
+        layers_by_host.setdefault(r["host_id"], []).append(
+            HostPolicyLayerInfo(id=r["id"], name=r["name"], rules=rules_by_layer.get(r["id"], []))
         )
     with _attached_lock:
         attached_snapshot = {k: dict(v) for k, v in _attached.items()}
@@ -535,7 +535,7 @@ def list_hosts(authorization: str = Header(default="")):
                 workspace=att["workspace"] if connected else [],
                 command_key=att["command_key"] if mine else None,
                 environment_ids=envs_by_host.get(r["id"], []),
-                rule_chains=chains_by_host.get(r["id"], []),
+                policy_layers=layers_by_host.get(r["id"], []),
             )
         )
     return HostListResponse(hosts=hosts_out)
@@ -731,91 +731,91 @@ def remove_host_from_environment(environment_id: int, host_id: int, authorizatio
         return _environment_info(db, environment_id, env["name"])
 
 
-# --- Rule Chains (browser-initiated CRUD, session-token-gated) -----------
+# --- Policy Layers (browser-initiated CRUD, session-token-gated) ---------
 # A user-authored, reusable, ORDERED list of rules for how the assistant
 # may invoke CLI commands on a host -- see db.py's own schema comment for
-# the full rule shape. Which hosts a chain is enabled on is separate
-# (rule_chain_hosts), mirroring environments/environment_hosts above.
-@app.get("/rule-chains", response_model=RuleChainListResponse)
-def list_rule_chains(authorization: str = Header(default="")):
+# the full rule shape. Which hosts a layer is enabled on is separate
+# (policy_layer_hosts), mirroring environments/environment_hosts above.
+@app.get("/policy-layers", response_model=PolicyLayerListResponse)
+def list_policy_layers(authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         rows = db.execute(
-            "SELECT id FROM rule_chains WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,)
+            "SELECT id FROM policy_layers WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,)
         ).fetchall()
-        return RuleChainListResponse(rule_chains=[_rule_chain_info(db, r["id"]) for r in rows])
+        return PolicyLayerListResponse(policy_layers=[_policy_layer_info(db, r["id"]) for r in rows])
 
 
-@app.post("/rule-chains", response_model=RuleChainInfo, status_code=201)
-def create_rule_chain(body: RuleChainCreateRequest, authorization: str = Header(default="")):
+@app.post("/policy-layers", response_model=PolicyLayerInfo, status_code=201)
+def create_policy_layer(body: PolicyLayerCreateRequest, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         existing = db.execute(
-            "SELECT id FROM rule_chains WHERE user_id = ? AND name = ? COLLATE NOCASE", (user_id, body.name)
+            "SELECT id FROM policy_layers WHERE user_id = ? AND name = ? COLLATE NOCASE", (user_id, body.name)
         ).fetchone()
         if existing:
-            raise HTTPException(status_code=409, detail="A rule chain with that name already exists.")
-        rule_chain_id = db.execute("INSERT INTO rule_chains (user_id, name) VALUES (?, ?)", (user_id, body.name)).lastrowid
-        return _rule_chain_info(db, rule_chain_id)
+            raise HTTPException(status_code=409, detail="A policy layer with that name already exists.")
+        policy_layer_id = db.execute("INSERT INTO policy_layers (user_id, name) VALUES (?, ?)", (user_id, body.name)).lastrowid
+        return _policy_layer_info(db, policy_layer_id)
 
 
-@app.patch("/rule-chains/{rule_chain_id}", response_model=RuleChainInfo)
-def rename_rule_chain(rule_chain_id: int, body: RuleChainRenameRequest, authorization: str = Header(default="")):
+@app.patch("/policy-layers/{policy_layer_id}", response_model=PolicyLayerInfo)
+def rename_policy_layer(policy_layer_id: int, body: PolicyLayerRenameRequest, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
-            raise HTTPException(status_code=404, detail="Rule chain not found.")
-        db.execute("UPDATE rule_chains SET name = ? WHERE id = ?", (body.name, rule_chain_id))
-        return _rule_chain_info(db, rule_chain_id)
+        if not _user_owns_policy_layer(db, user_id, policy_layer_id):
+            raise HTTPException(status_code=404, detail="Policy layer not found.")
+        db.execute("UPDATE policy_layers SET name = ? WHERE id = ?", (body.name, policy_layer_id))
+        return _policy_layer_info(db, policy_layer_id)
 
 
-@app.delete("/rule-chains/{rule_chain_id}", response_model=RevokeResponse)
-def delete_rule_chain(rule_chain_id: int, authorization: str = Header(default="")):
+@app.delete("/policy-layers/{policy_layer_id}", response_model=RevokeResponse)
+def delete_policy_layer(policy_layer_id: int, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
-            raise HTTPException(status_code=404, detail="Rule chain not found.")
-        db.execute("DELETE FROM rule_chain_hosts WHERE rule_chain_id = ?", (rule_chain_id,))
-        db.execute("DELETE FROM rule_chain_rules WHERE rule_chain_id = ?", (rule_chain_id,))
-        db.execute("DELETE FROM rule_chains WHERE id = ?", (rule_chain_id,))
+        if not _user_owns_policy_layer(db, user_id, policy_layer_id):
+            raise HTTPException(status_code=404, detail="Policy layer not found.")
+        db.execute("DELETE FROM policy_layer_hosts WHERE policy_layer_id = ?", (policy_layer_id,))
+        db.execute("DELETE FROM policy_layer_rules WHERE policy_layer_id = ?", (policy_layer_id,))
+        db.execute("DELETE FROM policy_layers WHERE id = ?", (policy_layer_id,))
     return RevokeResponse(revoked=True)
 
 
-@app.put("/rule-chains/{rule_chain_id}/hosts/{host_id}", response_model=RuleChainInfo)
-def add_rule_chain_to_host(rule_chain_id: int, host_id: int, authorization: str = Header(default="")):
+@app.put("/policy-layers/{policy_layer_id}/hosts/{host_id}", response_model=PolicyLayerInfo)
+def add_policy_layer_to_host(policy_layer_id: int, host_id: int, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain(db, user_id, rule_chain_id) or not _user_owns_host(db, user_id, host_id):
-            raise HTTPException(status_code=404, detail="Rule chain or host not found.")
+        if not _user_owns_policy_layer(db, user_id, policy_layer_id) or not _user_owns_host(db, user_id, host_id):
+            raise HTTPException(status_code=404, detail="Policy layer or host not found.")
         db.execute(
-            "INSERT OR IGNORE INTO rule_chain_hosts (rule_chain_id, host_id) VALUES (?, ?)",
-            (rule_chain_id, host_id),
+            "INSERT OR IGNORE INTO policy_layer_hosts (policy_layer_id, host_id) VALUES (?, ?)",
+            (policy_layer_id, host_id),
         )
-        return _rule_chain_info(db, rule_chain_id)
+        return _policy_layer_info(db, policy_layer_id)
 
 
-@app.delete("/rule-chains/{rule_chain_id}/hosts/{host_id}", response_model=RuleChainInfo)
-def remove_rule_chain_from_host(rule_chain_id: int, host_id: int, authorization: str = Header(default="")):
+@app.delete("/policy-layers/{policy_layer_id}/hosts/{host_id}", response_model=PolicyLayerInfo)
+def remove_policy_layer_from_host(policy_layer_id: int, host_id: int, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
-            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        if not _user_owns_policy_layer(db, user_id, policy_layer_id):
+            raise HTTPException(status_code=404, detail="Policy layer not found.")
         db.execute(
-            "DELETE FROM rule_chain_hosts WHERE rule_chain_id = ? AND host_id = ?", (rule_chain_id, host_id)
+            "DELETE FROM policy_layer_hosts WHERE policy_layer_id = ? AND host_id = ?", (policy_layer_id, host_id)
         )
-        return _rule_chain_info(db, rule_chain_id)
+        return _policy_layer_info(db, policy_layer_id)
 
 
 def _serialize_positional_constraints(constraints) -> str:
@@ -826,25 +826,25 @@ def _serialize_option_constraints(constraints) -> str:
     return json.dumps([{"short": c.short, "long": c.long, "pattern": c.pattern.model_dump()} for c in constraints])
 
 
-@app.post("/rule-chains/{rule_chain_id}/rules", response_model=RuleChainRuleInfo, status_code=201)
-def create_rule_chain_rule(
-    rule_chain_id: int, body: RuleChainRuleCreateRequest, authorization: str = Header(default="")
+@app.post("/policy-layers/{policy_layer_id}/rules", response_model=PolicyLayerRuleInfo, status_code=201)
+def create_policy_layer_rule(
+    policy_layer_id: int, body: PolicyLayerRuleCreateRequest, authorization: str = Header(default="")
 ):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
-            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        if not _user_owns_policy_layer(db, user_id, policy_layer_id):
+            raise HTTPException(status_code=404, detail="Policy layer not found.")
         next_position = db.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM rule_chain_rules WHERE rule_chain_id = ?",
-            (rule_chain_id,),
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM policy_layer_rules WHERE policy_layer_id = ?",
+            (policy_layer_id,),
         ).fetchone()["next_position"]
         rule_id = db.execute(
-            "INSERT INTO rule_chain_rules "
-            "(rule_chain_id, position, positional_constraints, option_constraints, tier) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO policy_layer_rules "
+            "(policy_layer_id, position, positional_constraints, option_constraints, tier) VALUES (?, ?, ?, ?, ?)",
             (
-                rule_chain_id,
+                policy_layer_id,
                 next_position,
                 _serialize_positional_constraints(body.positional_constraints),
                 _serialize_option_constraints(body.option_constraints),
@@ -853,18 +853,18 @@ def create_rule_chain_rule(
         ).lastrowid
         row = db.execute(
             "SELECT id, position, positional_constraints, option_constraints, tier "
-            "FROM rule_chain_rules WHERE id = ?",
+            "FROM policy_layer_rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
-        return _rule_chain_rule_info(row)
+        return _policy_layer_rule_info(row)
 
 
-@app.patch("/rule-chains/{rule_chain_id}/rules/{rule_id}", response_model=RuleChainRuleInfo)
-def update_rule_chain_rule(
-    rule_chain_id: int, rule_id: int, body: RuleChainRuleUpdateRequest, authorization: str = Header(default="")
+@app.patch("/policy-layers/{policy_layer_id}/rules/{rule_id}", response_model=PolicyLayerRuleInfo)
+def update_policy_layer_rule(
+    policy_layer_id: int, rule_id: int, body: PolicyLayerRuleUpdateRequest, authorization: str = Header(default="")
 ):
     """Re-validates the MERGED (current row + patch) shape by reconstructing
-    it through RuleChainRuleCreateRequest -- a partial patch can't be
+    it through PolicyLayerRuleCreateRequest -- a partial patch can't be
     cross-field-validated (position 0, "{roots}"+tier) in isolation, same
     merge-then-revalidate trick this service uses for every other partial
     update (see e.g. ProfileUpdateRequest's own docstring)."""
@@ -872,10 +872,10 @@ def update_rule_chain_rule(
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain_rule(db, user_id, rule_chain_id, rule_id):
+        if not _user_owns_policy_layer_rule(db, user_id, policy_layer_id, rule_id):
             raise HTTPException(status_code=404, detail="Rule not found.")
         current = db.execute(
-            "SELECT positional_constraints, option_constraints, tier FROM rule_chain_rules WHERE id = ?", (rule_id,)
+            "SELECT positional_constraints, option_constraints, tier FROM policy_layer_rules WHERE id = ?", (rule_id,)
         ).fetchone()
         merged = {
             "positional_constraints": json.loads(current["positional_constraints"]),
@@ -884,11 +884,11 @@ def update_rule_chain_rule(
         }
         merged.update(body.model_dump(exclude_unset=True))
         try:
-            validated = RuleChainRuleCreateRequest(**merged)
+            validated = PolicyLayerRuleCreateRequest(**merged)
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=_first_validation_message(e.errors())) from e
         db.execute(
-            "UPDATE rule_chain_rules SET positional_constraints = ?, option_constraints = ?, tier = ? WHERE id = ?",
+            "UPDATE policy_layer_rules SET positional_constraints = ?, option_constraints = ?, tier = ? WHERE id = ?",
             (
                 _serialize_positional_constraints(validated.positional_constraints),
                 _serialize_option_constraints(validated.option_constraints),
@@ -898,71 +898,71 @@ def update_rule_chain_rule(
         )
         row = db.execute(
             "SELECT id, position, positional_constraints, option_constraints, tier "
-            "FROM rule_chain_rules WHERE id = ?",
+            "FROM policy_layer_rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
-        return _rule_chain_rule_info(row)
+        return _policy_layer_rule_info(row)
 
 
-@app.delete("/rule-chains/{rule_chain_id}/rules/{rule_id}", response_model=RevokeResponse)
-def delete_rule_chain_rule(rule_chain_id: int, rule_id: int, authorization: str = Header(default="")):
+@app.delete("/policy-layers/{policy_layer_id}/rules/{rule_id}", response_model=RevokeResponse)
+def delete_policy_layer_rule(policy_layer_id: int, rule_id: int, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain_rule(db, user_id, rule_chain_id, rule_id):
+        if not _user_owns_policy_layer_rule(db, user_id, policy_layer_id, rule_id):
             raise HTTPException(status_code=404, detail="Rule not found.")
-        db.execute("DELETE FROM rule_chain_rules WHERE id = ?", (rule_id,))
+        db.execute("DELETE FROM policy_layer_rules WHERE id = ?", (rule_id,))
     return RevokeResponse(revoked=True)
 
 
-@app.put("/rule-chains/{rule_chain_id}/rules/reorder", response_model=RuleChainInfo)
-def reorder_rule_chain_rules(
-    rule_chain_id: int, body: RuleChainRuleReorderRequest, authorization: str = Header(default="")
+@app.put("/policy-layers/{policy_layer_id}/rules/reorder", response_model=PolicyLayerInfo)
+def reorder_policy_layer_rules(
+    policy_layer_id: int, body: PolicyLayerRuleReorderRequest, authorization: str = Header(default="")
 ):
     with get_db() as db:
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        if not _user_owns_rule_chain(db, user_id, rule_chain_id):
-            raise HTTPException(status_code=404, detail="Rule chain not found.")
+        if not _user_owns_policy_layer(db, user_id, policy_layer_id):
+            raise HTTPException(status_code=404, detail="Policy layer not found.")
         current_ids = {
-            r["id"] for r in db.execute("SELECT id FROM rule_chain_rules WHERE rule_chain_id = ?", (rule_chain_id,)).fetchall()
+            r["id"] for r in db.execute("SELECT id FROM policy_layer_rules WHERE policy_layer_id = ?", (policy_layer_id,)).fetchall()
         }
         if len(body.rule_ids) != len(current_ids) or set(body.rule_ids) != current_ids:
             raise HTTPException(
-                status_code=400, detail="rule_ids must be exactly a permutation of the chain's current rules."
+                status_code=400, detail="rule_ids must be exactly a permutation of the layer's current rules."
             )
         for position, rule_id in enumerate(body.rule_ids):
-            db.execute("UPDATE rule_chain_rules SET position = ? WHERE id = ?", (position, rule_id))
-        return _rule_chain_info(db, rule_chain_id)
+            db.execute("UPDATE policy_layer_rules SET position = ? WHERE id = ?", (position, rule_id))
+        return _policy_layer_info(db, policy_layer_id)
 
 
-# --- Rule Chains (daemon-facing fetch, device_token-gated) ---------------
+# --- Policy Layers (daemon-facing fetch, device_token-gated) -------------
 # What THIS host's own enforcement copy should be -- independent of GET
 # /hosts's browser-facing copy above (same underlying data, different
 # credential/audience). The daemon fetches this for itself rather than
 # trusting the browser/model to have applied a rule correctly -- every rule
 # is structurally re-enforced daemon-side regardless of what tier
 # pages/chat.py already decided client-side.
-@app.get("/hosts/rule-chains", response_model=HostRuleChainListResponse)
-def list_host_rule_chains(authorization: str = Header(default="")):
+@app.get("/hosts/policy-layers", response_model=HostPolicyLayerListResponse)
+def list_host_policy_layers(authorization: str = Header(default="")):
     attached = _resolve_attached(authorization)
     if attached is None:
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with get_db() as db:
-        chain_rows = db.execute(
+        layer_rows = db.execute(
             """
-            SELECT rc.id, rc.name
-            FROM rule_chain_hosts rch JOIN rule_chains rc ON rc.id = rch.rule_chain_id
-            WHERE rch.host_id = ? AND rc.user_id = ? ORDER BY rc.name COLLATE NOCASE
+            SELECT pl.id, pl.name
+            FROM policy_layer_hosts plh JOIN policy_layers pl ON pl.id = plh.policy_layer_id
+            WHERE plh.host_id = ? AND pl.user_id = ? ORDER BY pl.name COLLATE NOCASE
             """,
             (attached["host_id"], attached["user_id"]),
         ).fetchall()
-        rule_chains = [
-            HostRuleChainInfo(id=r["id"], name=r["name"], rules=_rule_chain_rules(db, r["id"])) for r in chain_rows
+        policy_layers = [
+            HostPolicyLayerInfo(id=r["id"], name=r["name"], rules=_policy_layer_rules(db, r["id"])) for r in layer_rows
         ]
-    return HostRuleChainListResponse(rule_chains=rule_chains)
+    return HostPolicyLayerListResponse(policy_layers=policy_layers)
 
 
 # --- Pending approvals (native-dialog relay) ------------------------------

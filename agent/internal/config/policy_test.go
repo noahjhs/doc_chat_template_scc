@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
+func TestFetchPolicyLayersDecodesPositionalAndOptionShapes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"rule_chains": []map[string]any{
+			"policy_layers": []map[string]any{
 				{
 					"id":   1,
 					"name": "npm scripts",
@@ -38,14 +38,14 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ruleChains, err := FetchRuleChains(testAuthDomain(server), "dev-token")
+	layers, err := FetchPolicyLayers(testAuthDomain(server), "dev-token")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if len(ruleChains) != 1 || len(ruleChains[0].Rules) != 1 {
-		t.Fatalf("unexpected shape: %+v", ruleChains)
+	if len(layers) != 1 || len(layers[0].Rules) != 1 {
+		t.Fatalf("unexpected shape: %+v", layers)
 	}
-	rule := ruleChains[0].Rules[0]
+	rule := layers[0].Rules[0]
 
 	pc := rule.PositionalConstraints
 	// Position 0 is the bare string "*" -- a stale pre-this-change wire
@@ -82,7 +82,7 @@ func TestFetchRuleChainsDecodesPositionalAndOptionShapes(t *testing.T) {
 	}
 }
 
-func TestFetchRuleChainsDecodesCurrentBlacklistDefault(t *testing.T) {
+func TestFetchPolicyLayersDecodesCurrentBlacklistDefault(t *testing.T) {
 	// auth_service now always sends a real blacklist string, never null --
 	// a "not specified" one defaults to BLACKLIST_MATCHES_NOTHING
 	// ("[^\s\S]", a character class that can never match anything). This
@@ -93,7 +93,7 @@ func TestFetchRuleChainsDecodesCurrentBlacklistDefault(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"rule_chains": []map[string]any{
+			"policy_layers": []map[string]any{
 				{
 					"id":   1,
 					"name": "test",
@@ -111,11 +111,11 @@ func TestFetchRuleChainsDecodesCurrentBlacklistDefault(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ruleChains, err := FetchRuleChains(testAuthDomain(server), "dev-token")
+	layers, err := FetchPolicyLayers(testAuthDomain(server), "dev-token")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	pc := ruleChains[0].Rules[0].PositionalConstraints[0]
+	pc := layers[0].Rules[0].PositionalConstraints[0]
 	if pc.Whitelist == nil || !pc.Whitelist.MatchString("anything") {
 		t.Fatalf("expected the empty whitelist to compile and match everything, got %+v", pc)
 	}
@@ -127,11 +127,11 @@ func TestFetchRuleChainsDecodesCurrentBlacklistDefault(t *testing.T) {
 	}
 }
 
-func TestFetchRuleChainsSkipsRuleWithUncompilablePattern(t *testing.T) {
+func TestFetchPolicyLayersSkipsRuleWithUncompilablePattern(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"rule_chains": []map[string]any{
+			"policy_layers": []map[string]any{
 				{
 					"id":   1,
 					"name": "mixed",
@@ -155,27 +155,27 @@ func TestFetchRuleChainsSkipsRuleWithUncompilablePattern(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ruleChains, err := FetchRuleChains(testAuthDomain(server), "dev-token")
+	layers, err := FetchPolicyLayers(testAuthDomain(server), "dev-token")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if len(ruleChains) != 1 {
-		t.Fatalf("expected the rule chain itself to still come through, got %+v", ruleChains)
+	if len(layers) != 1 {
+		t.Fatalf("expected the policy layer itself to still come through, got %+v", layers)
 	}
 	// Only rule 2 should have survived -- rule 1's bad regex means it's
 	// dropped (logged, not crashed) rather than silently under-enforced.
-	if len(ruleChains[0].Rules) != 1 || ruleChains[0].Rules[0].ID != 2 {
-		t.Fatalf("expected only rule 2 to survive, got %+v", ruleChains[0].Rules)
+	if len(layers[0].Rules) != 1 || layers[0].Rules[0].ID != 2 {
+		t.Fatalf("expected only rule 2 to survive, got %+v", layers[0].Rules)
 	}
 }
 
-func TestFetchRuleChainsUnexpectedStatusIsAnError(t *testing.T) {
+func TestFetchPolicyLayersUnexpectedStatusIsAnError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	if _, err := FetchRuleChains(testAuthDomain(server), "dev-token"); err == nil {
+	if _, err := FetchPolicyLayers(testAuthDomain(server), "dev-token"); err == nil {
 		t.Fatal("expected an error for a non-200 response")
 	}
 }
