@@ -37,6 +37,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: agent/go.mod
+      - name: Stub the embedded domain files
+        # internal/config/domain.go go:embeds these -- build/build_go_macos.sh
+        # normally stages them from the (gitignored, instance-specific)
+        # repo-root *_server.txt files, but no build/deploy happens here and
+        # no test reads the actual embedded value, so empty placeholders are
+        # enough to satisfy the embed directive and let the package compile.
+        run: |
+          mkdir -p agent/internal/config/embedded
+          : > agent/internal/config/embedded/app_server.txt
+          : > agent/internal/config/embedded/auth_server.txt
+          : > agent/internal/config/embedded/relay_server.txt
       - name: Build, vet, format-check, test agent
         working-directory: agent
         run: |
