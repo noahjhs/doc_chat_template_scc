@@ -39,7 +39,10 @@ check() {
 }
 
 echo "App ($APP_DOMAIN):"
-for path in "" "signin" "signup" "environments" "settings_profile" "settings_security" "download"; do
+# Only the public, unauthenticated pages -- sign-in/sign-up and everything
+# gated behind them (Environments, Settings) moved to the harness; those
+# pages no longer exist in this app at all.
+for path in "" "download"; do
   code=$("$CURL" -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${APP_DOMAIN}/${path}")
   check "/$path" "200" "$code"
 done

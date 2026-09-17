@@ -12,6 +12,9 @@ own toggle_debug()) prints every request/response when enabled, the
 the original harness design discussion."""
 
 import json
+import subprocess
+import sys
+from urllib.parse import quote
 
 import httpx
 
@@ -132,6 +135,102 @@ def report_host_presence(domain: str, device_token: str, local_agent_url: str, w
         token=device_token,
         json={"local_agent_url": local_agent_url, "workspace": workspace or []},
     )
+
+
+def rename_host(domain: str, token: str, host_id: int, label: str) -> dict:
+    return _request(domain, "PATCH", f"/hosts/{host_id}", token=token, json={"label": label})
+
+
+def forget_host(domain: str, token: str, host_id: int) -> dict:
+    return _request(domain, "DELETE", f"/hosts/{host_id}", token=token)
+
+
+# --- Environments ------------------------------------------------------------
+def list_environments(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/environments", token=token)
+
+
+def create_environment(domain: str, token: str, name: str) -> dict:
+    return _request(domain, "POST", "/environments", token=token, json={"name": name})
+
+
+def rename_environment(domain: str, token: str, environment_id: int, name: str) -> dict:
+    return _request(domain, "PATCH", f"/environments/{environment_id}", token=token, json={"name": name})
+
+
+def delete_environment(domain: str, token: str, environment_id: int) -> dict:
+    return _request(domain, "DELETE", f"/environments/{environment_id}", token=token)
+
+
+def add_host_to_environment(domain: str, token: str, environment_id: int, host_id: int) -> dict:
+    return _request(domain, "PUT", f"/environments/{environment_id}/hosts/{host_id}", token=token)
+
+
+def remove_host_from_environment(domain: str, token: str, environment_id: int, host_id: int) -> dict:
+    return _request(domain, "DELETE", f"/environments/{environment_id}/hosts/{host_id}", token=token)
+
+
+# --- Profile -----------------------------------------------------------------
+def get_profile(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/profile", token=token)
+
+
+def update_profile(domain: str, token: str, **fields) -> dict:
+    """PATCH /profile -- merge-updates only the given fields (any subset),
+    e.g. update_profile(domain, token, email="a@b.com")."""
+    return _request(domain, "PATCH", "/profile", token=token, json=fields)
+
+
+# --- Attended host / native-dialog-approval simulation ------------------------
+def set_attended_host(domain: str, token: str, host_id: int) -> dict:
+    return _request(domain, "PUT", "/users/me/attended-host", token=token, json={"host_id": host_id})
+
+
+def get_attended_host(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/users/me/attended-host", token=token)
+
+
+def clear_attended_host(domain: str, token: str) -> dict:
+    return _request(domain, "DELETE", "/users/me/attended-host", token=token)
+
+
+def list_pending_approvals(domain: str, device_token: str, wait_seconds: float | None = None) -> dict:
+    """GET /hosts/pending-approvals -- the attended daemon's own long-poll,
+    device_token-gated. Stands in for the real native-dialog relay: any
+    device_token that's currently the attended host for its user's account
+    can call this (and decide_pending_approval below) exactly as a real
+    daemon would -- see auth_service/main.py's list_pending_approvals_for_
+    attended_host, which has no binding to which daemon actually dispatches
+    a given call."""
+    params = {"wait_seconds": wait_seconds} if wait_seconds is not None else None
+    return _request(domain, "GET", "/hosts/pending-approvals", token=device_token, params=params)
+
+
+def decide_pending_approval(domain: str, device_token: str, approval_id: str, decision: str) -> dict:
+    return _request(
+        domain,
+        "POST",
+        f"/hosts/pending-approvals/{approval_id}/decision",
+        token=device_token,
+        json={"decision": decision},
+    )
+
+
+# --- Real-daemon pairing (manual verification only, not CI-automatable) ------
+def trigger_real_pairing(username: str, token: str) -> None:
+    """Fires the same casper://pair hand-off a browser sign-in click would,
+    via `open` -- the OS-level Apple Event dispatch this depends on is
+    macOS-only (matching this project's current single-platform reality),
+    and requires an already-installed, registered Casper.app on this same
+    machine (it doesn't need to already be running -- `open` launches it
+    fresh if not, and the event still delivers). Doesn't call auth_service
+    itself; the daemon that receives the event does that, exactly as it
+    does for a real sign-in. Not automatable in CI -- see harness/cli.py's
+    `pair-daemon` command, the intended manual-verification entry point."""
+    if sys.platform != "darwin":
+        raise RuntimeError("trigger_real_pairing is macOS-only (casper://pair is dispatched via an Apple Event).")
+    url = f"casper://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"
+    subprocess.run(["open", url], check=True)
 
 
 # --- Policy layers -----------------------------------------------------------

@@ -7,8 +7,8 @@ TAGLINE = "your friendly ghost."
 
 # A simple, original ghost illustration (not any existing character's
 # design) -- plain SVG markup, safe to render via st.markdown(unsafe_allow_html=True)
-# since it's static vector markup, not a <script> tag (which that mechanism
-# can't reliably execute -- see pages/signin.py's notes on st.iframe).
+# since it's static vector markup, not a <script> tag (which
+# unsafe_allow_html can't reliably execute at all).
 GHOST_SVG = """
 <svg width="{size}" height="{size}" viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg">
   <path d="M60 8 C31 8 8 31 8 62 L8 122
@@ -78,24 +78,19 @@ def hide_streamlit_chrome():
 
 def home_link_html(size=32):
     """HTML for the clickable brand+logo linking back to the home page --
-    shared by page_header() (rendered in the main content area) and
-    utils/topbar.py's render_topbar() (pinned to the top-left corner on
-    every real in-app page instead). Carries its own bottom margin so
-    whatever follows it in normal document flow -- the rest of a page's
-    content, for page_header() callers -- gets some breathing room rather
-    than sitting right against it (moot for render_topbar()'s own use,
-    which is the only thing in its fixed-position box, but harmless there).
+    used by page_header() below, rendered as normal in-flow content.
+    Carries its own bottom margin so whatever follows it in normal
+    document flow gets some breathing room rather than sitting right
+    against it.
 
     Links to www_subdomain_url() (utils/auth.py), not a bare relative "/"
-    -- every caller of this (signin.py, signup.py, download.py via
-    page_header(), and now every in-app page via render_topbar()) is
-    served from the *app* subdomain, where "/" resolves to nothing (fixed
-    directly: this was a dead link in practice). Since that makes it a
-    genuinely cross-subdomain link, target="_blank" + rel="noopener" now,
-    matching this codebase's own established rule for cross-subdomain
-    links elsewhere (see casper_app.py's own Sign in/Sign up links) --
-    opening in a new tab rather than abandoning whatever's active in this
-    one (an in-progress sign-in/sign-up flow, or a managed Environment)."""
+    -- download.py (via page_header()) is served from the *app* subdomain,
+    where "/" resolves to nothing (fixed directly: this was a dead link in
+    practice). Since that makes it a genuinely cross-subdomain link,
+    target="_blank" + rel="noopener" (matching this codebase's own
+    established rule for cross-subdomain links elsewhere -- see
+    casper_app.py's own Sign in/Sign up links) -- opening in a new tab
+    rather than abandoning whatever's active in this one."""
     return (
         f'<a href="{www_subdomain_url()}" target="_blank" rel="noopener" '
         f'style="text-decoration:none;color:inherit;'
@@ -106,12 +101,9 @@ def home_link_html(size=32):
 
 def page_header(size=32):
     """hide_streamlit_chrome() + the home link, rendered as normal in-flow
-    content -- so it gets the same padding as the rest of the page. What a
-    page with no real sidebar wants (signin.py, signup.py, download.py,
-    casper_app.py); a page with a real sidebar (environments.py,
-    settings_*.py) uses render_topbar()/render_sidebar() instead, which
-    hide Streamlit's chrome their own way (utils/sidebar.py's
-    _render_chrome_css) and pin the home link to a fixed corner rather
-    than rendering it in-flow here."""
+    content -- so it gets the same padding as the rest of the page. Used
+    by both of this app's remaining pages, casper_app.py and
+    pages/download.py -- both public, unauthenticated; sign-in/sign-up and
+    everything gated behind them moved to the harness (see harness/)."""
     hide_streamlit_chrome()
     st.markdown(home_link_html(size), unsafe_allow_html=True)

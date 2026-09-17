@@ -431,10 +431,10 @@ def _validate_email_value(value: str) -> str:
 def _validate_sms_number_value(value: str) -> str:
     """Normalizes to a canonical "(XXX) XXX-XXXX" US phone number -- the
     masking half of "input masking and data validation" happens here
-    (single source of truth, rather than duplicating this in
-    pages/settings_profile.py too): strips everything but digits, drops a
-    leading "1" country code if present, then requires exactly 10 digits
-    left. The client just displays whatever comes back in the response."""
+    (single source of truth, rather than duplicating this in every
+    caller): strips everything but digits, drops a leading "1" country
+    code if present, then requires exactly 10 digits left. The client
+    just displays whatever comes back in the response."""
     digits = re.sub(r"\D", "", value)
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
@@ -461,10 +461,9 @@ class ProfileInfo(BaseModel):
 
 
 class ProfileUpdateRequest(BaseModel):
-    """PATCH /profile's body -- every field optional, since each of
-    pages/settings_profile.py's/settings_security.py's controls saves
-    itself independently on change rather than resending the whole profile
-    just to flip one checkbox. Only the fields actually present in the
+    """PATCH /profile's body -- every field optional, so a caller can merge-
+    update any subset (e.g. flip just one notification toggle) without
+    resending the whole profile. Only the fields actually present in the
     request get merged into the stored profile (see main.py's
     update_profile)."""
 

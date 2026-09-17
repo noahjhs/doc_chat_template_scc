@@ -126,8 +126,6 @@ def test_full_flow_signup_through_eval(harness_env, tmp_path):
     non_matching = hc.eval_policy(DOMAIN, token, [layer["id"]], positional_args=["rm", "-rf"])
     assert non_matching["tier"] == "deny"
 
-    # roots via host_id -- host isn't connected yet, so an empty roots list
-    # is derived (same posture as GET /hosts' own HostInfo.workspace).
     hosts = hc.list_hosts(DOMAIN, token)["hosts"]
     assert hosts[0]["connected"] is False
 
@@ -218,3 +216,74 @@ def test_api_error_surfaces_status_and_detail(harness_env):
     with pytest.raises(hc.ApiError) as exc_info:
         hc.list_hosts(DOMAIN, "not-a-real-token")
     assert exc_info.value.status_code == 401
+
+
+def test_host_rename_and_forget_flow(harness_env):
+    """Covers the parity surface that replaced pages/environments.py's own
+    host-management controls."""
+    _main, hc = harness_env
+    signup = hc.signup(DOMAIN, "hostmgmtuser", "correct-horse-battery")
+    token = signup["token"]
+
+    pair = hc.pair_host(DOMAIN, token, "rk-hostmgmt-1", hostname="hostmgmt-host")
+    assert pair["label"] == "hostmgmt-host"
+
+    hc.rename_host(DOMAIN, token, pair["host_id"], "Renamed Host")
+    hosts = hc.list_hosts(DOMAIN, token)["hosts"]
+    assert hosts[0]["label"] == "Renamed Host"
+
+    hc.forget_host(DOMAIN, token, pair["host_id"])
+    assert hc.list_hosts(DOMAIN, token)["hosts"] == []
+
+
+def test_environment_crud_flow(harness_env):
+    """Covers the parity surface that replaced pages/environments.py's own
+    Environment-management controls."""
+    _main, hc = harness_env
+    signup = hc.signup(DOMAIN, "envmgmtuser", "correct-horse-battery")
+    token = signup["token"]
+    pair = hc.pair_host(DOMAIN, token, "rk-envmgmt-1", hostname="envmgmt-host")
+
+    created = hc.create_environment(DOMAIN, token, "Staging")
+    assert created["name"] == "Staging"
+    assert created["host_ids"] == []
+
+    listed = hc.list_environments(DOMAIN, token)["environments"]
+    assert any(e["id"] == created["id"] for e in listed)
+
+    renamed = hc.rename_environment(DOMAIN, token, created["id"], "Staging (renamed)")
+    assert renamed["name"] == "Staging (renamed)"
+
+    attached = hc.add_host_to_environment(DOMAIN, token, created["id"], pair["host_id"])
+    assert attached["host_ids"] == [pair["host_id"]]
+
+    detached = hc.remove_host_from_environment(DOMAIN, token, created["id"], pair["host_id"])
+    assert detached["host_ids"] == []
+
+    hc.delete_environment(DOMAIN, token, created["id"])
+    remaining_ids = [e["id"] for e in hc.list_environments(DOMAIN, token)["environments"]]
+    assert created["id"] not in remaining_ids
+
+
+def test_profile_get_and_merge_update_flow(harness_env):
+    """Covers the parity surface that replaced pages/settings_profile.py's
+    and pages/settings_security.py's own controls -- both were thin
+    wrappers over this same GET/PATCH /profile."""
+    _main, hc = harness_env
+    signup = hc.signup(DOMAIN, "profilemgmtuser", "correct-horse-battery")
+    token = signup["token"]
+
+    fresh = hc.get_profile(DOMAIN, token)
+    assert fresh["email"] == ""
+    assert fresh["allow_configure_hosts"] is False
+
+    updated = hc.update_profile(DOMAIN, token, email="a@example.com", allow_configure_hosts=True)
+    assert updated["email"] == "a@example.com"
+    assert updated["allow_configure_hosts"] is True
+
+    # A second, disjoint partial update leaves the first update's fields
+    # untouched -- confirms this is a real merge, not a full replace.
+    second = hc.update_profile(DOMAIN, token, sms_notifications_enabled=True)
+    assert second["email"] == "a@example.com"
+    assert second["allow_configure_hosts"] is True
+    assert second["sms_notifications_enabled"] is True

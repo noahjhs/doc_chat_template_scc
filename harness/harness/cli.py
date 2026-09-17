@@ -23,6 +23,12 @@ from . import client
 app = typer.Typer(help="Casper backend test harness -- drives auth_service directly, no GUI in the loop.")
 policy_app = typer.Typer(help="Manage policy layers.")
 app.add_typer(policy_app, name="policy")
+hosts_app = typer.Typer(help="Manage known hosts.")
+app.add_typer(hosts_app, name="hosts")
+environment_app = typer.Typer(help="Manage Environments.")
+app.add_typer(environment_app, name="environment")
+profile_app = typer.Typer(help="Manage account profile/notification/permission preferences.")
+app.add_typer(profile_app, name="profile")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -109,8 +115,8 @@ def logout():
     console.print("Logged out.")
 
 
-@app.command()
-def hosts():
+@hosts_app.command("list")
+def hosts_list():
     """List the caller's own known hosts."""
     domain, token = _require_session()
     try:
@@ -121,6 +127,31 @@ def hosts():
     for h in result["hosts"]:
         table.add_row(str(h["host_id"]), h["label"], str(h["connected"]), ", ".join(h["workspace"]))
     console.print(table)
+
+
+@hosts_app.command("rename")
+def hosts_rename(host: str, label: str):
+    """Rename one of the caller's own hosts (by current label or id)."""
+    domain, token = _require_session()
+    try:
+        host_id = _resolve_host_id(domain, token, host)
+        client.rename_host(domain, token, host_id, label)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print("[green]Renamed.[/green]")
+
+
+@hosts_app.command("forget")
+def hosts_forget(host: str):
+    """Forget one of the caller's own hosts (by label or id) -- removes it
+    from every Environment too."""
+    domain, token = _require_session()
+    try:
+        host_id = _resolve_host_id(domain, token, host)
+        client.forget_host(domain, token, host_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print("[green]Forgotten.[/green]")
 
 
 @app.command()
@@ -152,6 +183,132 @@ def report_presence(
     domain, _token = _require_session()
     try:
         result = client.report_host_presence(domain, device_token, local_agent_url, list(workspace))
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@environment_app.command("list")
+def environment_list():
+    domain, token = _require_session()
+    try:
+        result = client.list_environments(domain, token)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    table = Table("id", "name", "host_ids")
+    for env in result["environments"]:
+        table.add_row(str(env["id"]), env["name"], ", ".join(str(h) for h in env["host_ids"]))
+    console.print(table)
+
+
+@environment_app.command("create")
+def environment_create(name: str):
+    domain, token = _require_session()
+    try:
+        result = client.create_environment(domain, token, name)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+def _resolve_environment_id(domain: str, token: str, name_or_id: str) -> int:
+    if name_or_id.isdigit():
+        return int(name_or_id)
+    environments = client.list_environments(domain, token)["environments"]
+    match = next((e for e in environments if e["name"] == name_or_id), None)
+    if match is None:
+        err_console.print(f"[red]No Environment named {name_or_id!r}.[/red]")
+        raise typer.Exit(code=1)
+    return match["id"]
+
+
+@environment_app.command("rename")
+def environment_rename(environment: str, name: str):
+    domain, token = _require_session()
+    try:
+        environment_id = _resolve_environment_id(domain, token, environment)
+        result = client.rename_environment(domain, token, environment_id, name)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@environment_app.command("delete")
+def environment_delete(environment: str):
+    domain, token = _require_session()
+    try:
+        environment_id = _resolve_environment_id(domain, token, environment)
+        client.delete_environment(domain, token, environment_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print("[green]Deleted.[/green]")
+
+
+@environment_app.command("attach")
+def environment_attach(environment: str, host: str):
+    """Add a host (by label or id) to an Environment (by name or id)."""
+    domain, token = _require_session()
+    try:
+        environment_id = _resolve_environment_id(domain, token, environment)
+        host_id = _resolve_host_id(domain, token, host)
+        result = client.add_host_to_environment(domain, token, environment_id, host_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@environment_app.command("detach")
+def environment_detach(environment: str, host: str):
+    """Remove a host (by label or id) from an Environment (by name or id)."""
+    domain, token = _require_session()
+    try:
+        environment_id = _resolve_environment_id(domain, token, environment)
+        host_id = _resolve_host_id(domain, token, host)
+        result = client.remove_host_from_environment(domain, token, environment_id, host_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@profile_app.command("get")
+def profile_get():
+    domain, token = _require_session()
+    try:
+        result = client.get_profile(domain, token)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@profile_app.command("set")
+def profile_set(
+    email: Optional[str] = typer.Option(None, "--email"),
+    email_notifications: Optional[bool] = typer.Option(None, "--email-notifications/--no-email-notifications"),
+    sms_number: Optional[str] = typer.Option(None, "--sms"),
+    sms_notifications: Optional[bool] = typer.Option(None, "--sms-notifications/--no-sms-notifications"),
+    allow_configure_command_sets: Optional[bool] = typer.Option(None, "--allow-command-sets/--no-allow-command-sets"),
+    allow_configure_apps: Optional[bool] = typer.Option(None, "--allow-apps/--no-allow-apps"),
+    allow_configure_hosts: Optional[bool] = typer.Option(None, "--allow-hosts/--no-allow-hosts"),
+    allow_configure_environments: Optional[bool] = typer.Option(None, "--allow-environments/--no-allow-environments"),
+    allow_configure_local_agents: Optional[bool] = typer.Option(None, "--allow-local-agents/--no-allow-local-agents"),
+):
+    """Merge-update the caller's own profile -- only flags actually passed
+    are sent; everything else is left untouched server-side."""
+    fields = {
+        "email": email,
+        "email_notifications_enabled": email_notifications,
+        "sms_number": sms_number,
+        "sms_notifications_enabled": sms_notifications,
+        "allow_configure_command_sets": allow_configure_command_sets,
+        "allow_configure_apps": allow_configure_apps,
+        "allow_configure_hosts": allow_configure_hosts,
+        "allow_configure_environments": allow_configure_environments,
+        "allow_configure_local_agents": allow_configure_local_agents,
+    }
+    fields = {k: v for k, v in fields.items() if v is not None}
+    domain, token = _require_session()
+    try:
+        result = client.update_profile(domain, token, **fields)
     except client.ApiError as e:
         _handle_api_error(e)
     console.print(result)

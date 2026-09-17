@@ -39,11 +39,9 @@ MODEL = "gpt-4.1-mini"
 
 SERVER_STORAGE = "server storage"
 
-# Mirrors utils/sidebar.py's own COMMAND_CATEGORIES exactly -- duplicated,
-# not imported, since auth_service is a separate, independently-deployed
-# service with no shared package to pull it from (same posture as
-# BLACKLIST_MATCHES_NOTHING's own duplication in models.py). Keep in sync
-# by hand.
+# Mirrors the Go daemon's own allowlisted run_local_command actions
+# (agent/internal/commands/commands.go) -- two independent processes, so
+# this list is duplicated rather than imported. Keep in sync by hand.
 COMMAND_CATEGORIES = {
     "Git": ["status", "branch", "log"],
     "Navigation": ["pwd", "cd", "ls", "tree", "list_directories"],

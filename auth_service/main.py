@@ -1488,7 +1488,7 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
     )
 
 
-# --- Profile (pages/settings_profile.py, pages/settings_security.py) ----
+# --- Profile ---------------------------------------------------------------
 # Notification contact info + the "allow chat to configure..." checkboxes
 # are plain per-user preferences -- persisted here, but not enforced
 # anywhere yet (nothing in conversations.py's tool-calling loop reads
