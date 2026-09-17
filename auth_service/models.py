@@ -233,6 +233,48 @@ class PolicyLayerListResponse(BaseModel):
     policy_layers: list[PolicyLayerInfo]
 
 
+class PolicyEvalOption(BaseModel):
+    """One supplied option for POST /policies/eval -- the same {short, long,
+    value} shape run_shell_command's own tool schema uses; value omitted
+    (None) means a valueless option, matched as "" same as everywhere else
+    in this schema."""
+
+    short: str | None = None
+    long: str | None = None
+    value: str | None = None
+
+
+class PolicyEvalRequest(BaseModel):
+    """POST /policies/eval's body -- composes policy_layer_ids (sorted
+    ascending, concatenated -- the same v1 composition rule the Go daemon's
+    composePolicy and the browser's own _compose_policy use) into one
+    Policy and evaluates one hypothetical call against it. No side effects,
+    no daemon involved -- the fast/deterministic bottom of the testing
+    pyramid. roots and host_id are mutually exclusive: roots lets a caller
+    test a "{roots}" rule with no real host needed at all; host_id instead
+    derives it from one of the caller's own hosts' live, daemon-reported
+    workspace (same posture as GET /hosts' own HostInfo.workspace -- empty
+    for a host that isn't currently connected)."""
+
+    policy_layer_ids: list[int] = Field(default_factory=list)
+    positional_args: list[str] = Field(default_factory=list)
+    options: list[PolicyEvalOption] = Field(default_factory=list)
+    roots: list[str] | None = None
+    host_id: int | None = None
+
+    @model_validator(mode="after")
+    def _roots_xor_host(self):
+        if self.roots is not None and self.host_id is not None:
+            raise ValueError("Specify at most one of roots/host_id, not both.")
+        return self
+
+
+class PolicyEvalResponse(BaseModel):
+    tier: Literal["allow", "ask", "deny"]
+    matched_layer_id: int | None = None
+    matched_rule: PolicyLayerRuleInfo | None = None
+
+
 class HostInfo(BaseModel):
     host_id: int
     label: str
