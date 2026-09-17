@@ -11,6 +11,7 @@ retired throughout."""
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -152,6 +153,53 @@ def hosts_forget(host: str):
     except client.ApiError as e:
         _handle_api_error(e)
     console.print("[green]Forgotten.[/green]")
+
+
+@app.command("pair-daemon")
+def pair_daemon(
+    timeout: float = typer.Option(15.0, "--timeout", help="Seconds to wait for the host to appear connected."),
+):
+    """Pair a REAL, already-installed Casper.app on this machine -- fires
+    the same casper://pair hand-off a browser sign-in click would (see
+    client.trigger_real_pairing), then polls GET /hosts until a newly-
+    connected host shows up. macOS only. Not automatable in CI -- a manual
+    verification tool, same posture as a real (non-mock) `harness chat`
+    run: use this after any change that could affect pairing, not as part
+    of routine automated testing (use `pair`, below, for that -- a fake
+    host needs no real daemon at all)."""
+    session = _load_session()
+    if session is None:
+        err_console.print("[red]Not logged in.[/red] Run `harness login` or `harness signup` first.")
+        raise typer.Exit(code=1)
+    domain, token, username = session["domain"], session["token"], session["username"]
+    try:
+        before = {h["host_id"] for h in client.list_hosts(domain, token)["hosts"] if h["connected"]}
+        client.trigger_real_pairing(username, token)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        err_console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print("Pairing dispatched -- waiting for a newly-connected host...")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            hosts = client.list_hosts(domain, token)["hosts"]
+        except client.ApiError as e:
+            _handle_api_error(e)
+        newly_connected = [h for h in hosts if h["connected"] and h["host_id"] not in before]
+        if newly_connected:
+            console.print("[green]Paired.[/green]")
+            for h in newly_connected:
+                console.print(f"  {h['label']} (id={h['host_id']})")
+            return
+        time.sleep(1)
+    err_console.print(
+        "[red]Timed out waiting for a newly-connected host.[/red] Confirm Casper.app is installed "
+        "and registered for casper://, and try again."
+    )
+    raise typer.Exit(code=1)
 
 
 @app.command()
