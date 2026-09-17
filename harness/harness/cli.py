@@ -1,0 +1,389 @@
+"""Thin Typer CLI over harness/client.py -- session persistence, table/JSON
+rendering (rich), and the interactive approve/deny + chat loops live here;
+client.py itself stays a plain HTTP wrapper with no CLI dependency (see its
+own module docstring). Verb naming follows the project's own settled
+vocabulary (see the top-level plan): `eval` (pure rule matching, no
+execution, no daemon) -> `call-tool [--mock]` (a live/mocked reproduction
+of one tool call, via direct injection) -> `chat [--mock]` (a real
+conversational turn, the model decides what to call) -- an escalating
+ladder of what's actually exercised, "force"/"forced" language deliberately
+retired throughout."""
+
+import json
+import os
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from . import client
+
+app = typer.Typer(help="Casper backend test harness -- drives auth_service directly, no GUI in the loop.")
+policy_app = typer.Typer(help="Manage policy layers.")
+app.add_typer(policy_app, name="policy")
+
+console = Console()
+err_console = Console(stderr=True)
+
+DEFAULT_DOMAIN = "localhost:8100"
+SESSION_PATH = Path(os.environ.get("CASPER_HARNESS_SESSION", str(Path.home() / ".casper-harness" / "session.json")))
+
+
+def _load_session() -> Optional[dict]:
+    if not SESSION_PATH.exists():
+        return None
+    return json.loads(SESSION_PATH.read_text())
+
+
+def _save_session(domain: str, username: str, token: str) -> None:
+    SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_PATH.write_text(json.dumps({"domain": domain, "username": username, "token": token}))
+
+
+def _require_session() -> tuple[str, str]:
+    session = _load_session()
+    if session is None:
+        err_console.print("[red]Not logged in.[/red] Run `harness login` or `harness signup` first.")
+        raise typer.Exit(code=1)
+    return session["domain"], session["token"]
+
+
+def _handle_api_error(e: client.ApiError):
+    err_console.print(f"[red]Error {e.status_code}:[/red] {e.detail}")
+    raise typer.Exit(code=1)
+
+
+@app.callback()
+def main(debug: bool = typer.Option(False, "--debug", "--raw", help="Print every request/response.")):
+    """Casper backend test harness."""
+    client.toggle_debug(debug)
+
+
+@app.command()
+def signup(
+    username: str,
+    domain: str = typer.Option(DEFAULT_DOMAIN, "--domain", "-d", envvar="CASPER_HARNESS_DOMAIN"),
+    password: str = typer.Option(..., prompt=True, hide_input=True, confirmation_prompt=True),
+):
+    """Create a new account and save the resulting session."""
+    try:
+        result = client.signup(domain, username, password)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    _save_session(domain, result["username"], result["token"])
+    console.print(f"[green]Signed up as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
+
+
+@app.command()
+def login(
+    username: str,
+    domain: str = typer.Option(DEFAULT_DOMAIN, "--domain", "-d", envvar="CASPER_HARNESS_DOMAIN"),
+    password: str = typer.Option(..., prompt=True, hide_input=True),
+):
+    """Sign in and save the resulting session."""
+    try:
+        result = client.signin(domain, username, password)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    _save_session(domain, result["username"], result["token"])
+    console.print(f"[green]Signed in as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
+
+
+@app.command()
+def whoami():
+    """Show the currently saved session, if any."""
+    session = _load_session()
+    if session is None:
+        console.print("Not logged in.")
+        raise typer.Exit(code=1)
+    console.print(f"{session['username']} @ {session['domain']}")
+
+
+@app.command()
+def logout():
+    """Discard the saved session."""
+    if SESSION_PATH.exists():
+        SESSION_PATH.unlink()
+    console.print("Logged out.")
+
+
+@app.command()
+def hosts():
+    """List the caller's own known hosts."""
+    domain, token = _require_session()
+    try:
+        result = client.list_hosts(domain, token)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    table = Table("id", "label", "connected", "workspace")
+    for h in result["hosts"]:
+        table.add_row(str(h["host_id"]), h["label"], str(h["connected"]), ", ".join(h["workspace"]))
+    console.print(table)
+
+
+@app.command()
+def pair(
+    routing_key: str,
+    hostname: Optional[str] = typer.Option(None, "--hostname"),
+    label: Optional[str] = typer.Option(None, "--label"),
+):
+    """Pair a (possibly fake/test) host under a routing_key -- a real
+    daemon does this itself; useful here for standing up a test host with
+    no live daemon at all, e.g. to exercise policy layer attachment/eval."""
+    domain, token = _require_session()
+    try:
+        result = client.pair_host(domain, token, routing_key, hostname, label)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+@app.command("report-presence")
+def report_presence(
+    device_token: str,
+    local_agent_url: str = typer.Option(..., "--url"),
+    workspace: list[str] = typer.Option([], "--root", help="An addressable directory -- may be repeated."),
+):
+    """Make a paired test host "connected" (see `pair`), with the given
+    workspace roots -- so policy eval/enforcement can exercise a
+    {roots}-using rule with no real machine involved."""
+    domain, _token = _require_session()
+    try:
+        result = client.report_host_presence(domain, device_token, local_agent_url, list(workspace))
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+def _print_layer(layer: dict):
+    console.print(f"[bold]{layer['name']}[/bold] (id={layer['id']}, hosts={layer['host_ids']})")
+    table = Table("#", "positional", "options", "tier")
+    for i, rule in enumerate(layer["rules"]):
+        positional = "; ".join(f"{p.get('whitelist', '')!r}/{p.get('blacklist', '')!r}" for p in rule["positional_constraints"])
+        options = "; ".join(
+            f"{o.get('short') or o.get('long')}:{o['pattern'].get('whitelist', '')!r}" for o in rule["option_constraints"]
+        )
+        table.add_row(str(i), positional, options, rule["tier"])
+    console.print(table)
+
+
+@policy_app.command("list")
+def policy_list():
+    """List every policy layer the caller owns."""
+    domain, token = _require_session()
+    try:
+        result = client.list_policy_layers(domain, token)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    for layer in result["policy_layers"]:
+        _print_layer(layer)
+
+
+@policy_app.command("apply")
+def policy_apply(yaml_path: str):
+    """kubectl apply-style: create-or-replace a policy layer's rules from
+    a YAML file -- see harness/client.py's load_policy_layer_yaml for the
+    file format."""
+    domain, token = _require_session()
+    try:
+        layer = client.apply_policy_layer(domain, token, yaml_path)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print("[green]Applied.[/green]")
+    _print_layer(layer)
+
+
+@policy_app.command("delete")
+def policy_delete(name_or_id: str):
+    """Delete a policy layer by name or numeric id."""
+    domain, token = _require_session()
+    try:
+        layer_id = _resolve_layer_id(domain, token, name_or_id)
+        client.delete_policy_layer(domain, token, layer_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print("[green]Deleted.[/green]")
+
+
+def _resolve_layer_id(domain: str, token: str, name_or_id: str) -> int:
+    if name_or_id.isdigit():
+        return int(name_or_id)
+    layers = client.list_policy_layers(domain, token)["policy_layers"]
+    match = next((layer for layer in layers if layer["name"] == name_or_id), None)
+    if match is None:
+        err_console.print(f"[red]No policy layer named {name_or_id!r}.[/red]")
+        raise typer.Exit(code=1)
+    return match["id"]
+
+
+def _resolve_host_id(domain: str, token: str, label_or_id: str) -> int:
+    if label_or_id.isdigit():
+        return int(label_or_id)
+    all_hosts = client.list_hosts(domain, token)["hosts"]
+    match = next((h for h in all_hosts if h["label"] == label_or_id), None)
+    if match is None:
+        err_console.print(f"[red]No host labeled {label_or_id!r}.[/red]")
+        raise typer.Exit(code=1)
+    return match["host_id"]
+
+
+@policy_app.command("attach")
+def policy_attach(layer: str, host: str):
+    """Attach a policy layer (by name or id) to a host (by label or id)."""
+    domain, token = _require_session()
+    try:
+        layer_id = _resolve_layer_id(domain, token, layer)
+        host_id = _resolve_host_id(domain, token, host)
+        result = client.add_policy_layer_to_host(domain, token, layer_id, host_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    _print_layer(result)
+
+
+@policy_app.command("detach")
+def policy_detach(layer: str, host: str):
+    """Detach a policy layer (by name or id) from a host (by label or id)."""
+    domain, token = _require_session()
+    try:
+        layer_id = _resolve_layer_id(domain, token, layer)
+        host_id = _resolve_host_id(domain, token, host)
+        result = client.remove_policy_layer_from_host(domain, token, layer_id, host_id)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    _print_layer(result)
+
+
+@app.command()
+def eval(
+    layer: list[str] = typer.Option([], "--layer", "-l", help="A policy layer name or id -- may be repeated."),
+    arg: list[str] = typer.Option([], "--arg", "-a", help="A positional argument, in order -- may be repeated."),
+    option: list[str] = typer.Option(
+        [], "--option", "-o", help="short=VALUE, long=VALUE, or a bare short/long with no value -- may be repeated."
+    ),
+    root: list[str] = typer.Option([], "--root", help="A workspace root, for a {roots} rule -- may be repeated."),
+    host: Optional[str] = typer.Option(None, "--host", help="Derive roots from this host's own live workspace instead."),
+):
+    """Evaluate a hypothetical call against a composed policy -- no
+    execution, no daemon involved. The fastest, most deterministic rung of
+    the testing ladder."""
+    domain, token = _require_session()
+    try:
+        layer_ids = [_resolve_layer_id(domain, token, name_or_id) for name_or_id in layer]
+        host_id = _resolve_host_id(domain, token, host) if host else None
+        options = [_parse_option(o) for o in option]
+        result = client.eval_policy(
+            domain, token, layer_ids, positional_args=list(arg), options=options, roots=list(root) or None, host_id=host_id
+        )
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(result)
+
+
+def _parse_option(spec: str) -> dict:
+    """"long=value" / "long" (no "=") -- a single leading letter before
+    "=" or standalone is treated as short, anything longer as long, same
+    convention run_shell_command's own tool schema follows."""
+    name, _, value = spec.partition("=")
+    key = "short" if len(name) == 1 else "long"
+    result = {key: name}
+    if value:
+        result["value"] = value
+    return result
+
+
+def _print_step_result(result: dict):
+    if result["status"] == "done":
+        console.print(f"[bold cyan]assistant:[/bold cyan] {result['message']}")
+        for entry in result["turn"]["aggregate"].get("shell_command_calls", []):
+            console.print(f"  [dim]$ {entry['args'].get('positional_args')} -> {entry['output']}[/dim]")
+        for entry in result["turn"]["aggregate"].get("local_agent_calls", []):
+            console.print(f"  [dim]$ {entry['action']} -> {entry['output']}[/dim]")
+    else:
+        pending = result["pending_approval"]
+        console.print(
+            f"[yellow]Approval needed[/yellow] on {pending.get('host')}: "
+            f"{pending['args'].get('positional_args') or pending['args']}"
+        )
+
+
+def _resolve_pending_approval(turn: dict, domain: str, token: str, mock: bool, default_host: Optional[str], auto: Optional[str]):
+    """Interactively (or via --approve/--deny) resolves a paused turn,
+    looping until it's fully done -- shared by call-tool and chat."""
+    while True:
+        decision = auto
+        if decision is None:
+            decision = typer.prompt("Approve this call? [allow/deny]", default="allow")
+        try:
+            result = client.conversation_step(
+                domain, token, turn=turn, approval_decision=decision, default_host=default_host, mock=mock
+            )
+        except client.ApiError as e:
+            _handle_api_error(e)
+        _print_step_result(result)
+        if result["status"] == "done":
+            return result
+        turn = result["turn"]
+
+
+@app.command("call-tool")
+def call_tool_cmd(
+    name: str,
+    arg: list[str] = typer.Option([], "--arg", help="key=json_value -- may be repeated, e.g. --arg positional_args='[\"npm\",\"run\"]'"),
+    host: Optional[str] = typer.Option(None, "--host"),
+    mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
+    approve: bool = typer.Option(False, "--approve", help="Auto-approve any resulting ask-tier pause."),
+    deny: bool = typer.Option(False, "--deny", help="Auto-deny any resulting ask-tier pause."),
+):
+    """Inject a tool call directly, as if the model had already decided to
+    make it -- a live (or, with --mock, daemon-free) reproduction of one
+    tool call, exercising the exact same tier-decision/dispatch/approval
+    path a real model-issued call goes through."""
+    domain, token = _require_session()
+    arguments = {}
+    for a in arg:
+        key, _, raw_value = a.partition("=")
+        try:
+            arguments[key] = json.loads(raw_value)
+        except json.JSONDecodeError:
+            arguments[key] = raw_value
+    try:
+        result = client.call_tool(domain, token, name, arguments, mock=mock, default_host=host)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    _print_step_result(result)
+    if result["status"] == "pending_approval":
+        auto = "allow" if approve else ("deny" if deny else None)
+        _resolve_pending_approval(result["turn"], domain, token, mock, host, auto)
+
+
+@app.command()
+def chat(
+    host: Optional[str] = typer.Option(None, "--host"),
+    mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
+):
+    """A real conversational turn -- the model decides what (if anything)
+    to call. Ctrl-C or an empty line to exit."""
+    domain, token = _require_session()
+    turn = None
+    console.print("Casper harness chat. Empty line or Ctrl-C to exit.")
+    while True:
+        try:
+            message = typer.prompt("you")
+        except (typer.Abort, KeyboardInterrupt):
+            break
+        if not message.strip():
+            break
+        try:
+            result = client.chat_step(domain, token, message=message, turn=turn, default_host=host, mock=mock)
+        except client.ApiError as e:
+            _handle_api_error(e)
+        _print_step_result(result)
+        if result["status"] == "pending_approval":
+            result = _resolve_pending_approval(result["turn"], domain, token, mock, host, None)
+        turn = result["turn"]
+
+
+if __name__ == "__main__":
+    app()
