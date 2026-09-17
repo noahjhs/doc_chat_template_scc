@@ -1,0 +1,53 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r auth_service/requirements.txt
+          pip install -e harness/
+          pip install pytest pyflakes
+      - name: pyflakes
+        run: pyflakes auth_service utils pages casper_app.py harness/harness tests
+      - name: pytest
+        run: pytest tests/ -v
+
+  go:
+    # macos-latest, not ubuntu -- agent/ has Darwin-tagged build-constrained
+    # files (statusicon_darwin.go, workspace_darwin.go, etc.) with no Linux
+    # fallback, since this project doesn't target Linux at all; running on
+    # the platform it actually builds for is simpler than fighting build
+    # tags on a runner nothing here is meant to run on.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+      - name: Build, vet, format-check, test agent
+        working-directory: agent
+        run: |
+          go build ./...
+          go vet ./...
+          test -z "$(gofmt -l .)"
+          go test ./...
+      - name: Build, vet, format-check, test relay
+        working-directory: relay
+        run: |
+          go build ./...
+          go vet ./...
+          test -z "$(gofmt -l .)"
+          go test ./...
