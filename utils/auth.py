@@ -1,3 +1,6 @@
+from urllib.parse import quote
+
+import requests
 import streamlit as st
 
 
@@ -8,13 +11,11 @@ def _base_url(domain):
 
 
 def app_subdomain_url():
-    """Base URL (with scheme) of this deployment's "app" subdomain. Used by
-    the www-hosted landing/download pages to link there across subdomains
-    (see APP_SUBDOMAIN_DOMAIN in docker/app-entrypoint.sh) -- the app
-    subdomain itself no longer hosts anything but the harness now drives
-    (sign-in/sign-up/Environments/Settings moved there; see harness/), so
-    this link mainly points a real end user at instructions rather than a
-    live page today."""
+    """Base URL (with scheme) of this deployment's "app" subdomain -- where
+    /signin and /signup live (Environments/Settings/chat do not -- those
+    stay retired in favor of the harness, see harness/). Used by the
+    www-hosted landing/download pages to link there across subdomains (see
+    APP_SUBDOMAIN_DOMAIN in docker/app-entrypoint.sh)."""
     return _base_url(st.secrets["APP_SUBDOMAIN_DOMAIN"])
 
 
@@ -69,3 +70,69 @@ def require_www_subdomain():
     if host == app_host.split(":")[0].strip().lower():
         st.write("Page not found.")
         st.stop()
+
+
+def require_app_subdomain():
+    """Gate an app-only page (signin, signup): st.stop()s with a plain
+    "not found" if reached via the www subdomain (or anything else)
+    instead. A no-op for localhost and if APP_SUBDOMAIN_DOMAIN isn't
+    configured -- same reasoning as require_www_subdomain()."""
+    host = _current_host()
+    app_host = st.secrets.get("APP_SUBDOMAIN_DOMAIN", "")
+    if _is_local_host(host) or not app_host:
+        return
+    if host != app_host.split(":")[0].strip().lower():
+        st.write("Page not found.")
+        st.stop()
+
+
+def _error_detail(response, fallback):
+    try:
+        return response.json().get("detail", fallback)
+    except ValueError:
+        return fallback
+
+
+def signup_with_auth_service(auth_domain, username, password):
+    """POST /signup. Returns {"username", "token"} on success, or
+    {"error": str} -- a taken username, a validation failure, and a network
+    problem all collapse to the same shape so the signup page can just
+    st.error() whatever comes back."""
+    try:
+        response = requests.post(
+            f"{_base_url(auth_domain)}/signup",
+            json={"username": username, "password": password},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        return {"error": f"Couldn't reach the auth service: {e}"}
+    if response.status_code == 201:
+        return response.json()
+    return {"error": _error_detail(response, "Sign up failed.")}
+
+
+def login_with_auth_service(auth_domain, username, password):
+    """POST /login. Same {"username", "token"} / {"error": str} shape."""
+    try:
+        response = requests.post(
+            f"{_base_url(auth_domain)}/login",
+            json={"username": username, "password": password},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        return {"error": f"Couldn't reach the auth service: {e}"}
+    if response.status_code == 200:
+        return response.json()
+    return {"error": _error_detail(response, "Log in failed.")}
+
+
+def build_pair_url(token, username):
+    """The casper://pair URL pages/signin.py and pages/signup.py fire on
+    success -- the OS hands this to the user's already-running (or
+    freshly-launched) Casper daemon as an Apple Event (see
+    agent/internal/urlscheme), which is what actually completes pairing.
+    token is the plain session token /signup or /login just returned --
+    the daemon exchanges it server-side for its own independent
+    device_token/command_key (see config.ExchangePairingToken), so this is
+    a one-time bootstrap value, not the daemon's long-lived credential."""
+    return f"casper://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"

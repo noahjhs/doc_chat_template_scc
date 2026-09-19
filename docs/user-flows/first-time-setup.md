@@ -48,17 +48,22 @@ from the landing page to a paired, working daemon.
       daemon confines itself to the home directory automatically now).
       **Expected:** icon appears; no picker; a native "Add Casper to your
       login items?" dialog appears once (first cold launch only).
-- [ ] 6. Back on the download page, click **Sign in**.
-      **Expected:** opens the app subdomain's sign-in page in a new tab.
-      **🛑 Known broken as of 2026-09-19 — see Known Issues below.** This
-      step currently 404s. Note whatever the actual behavior is; don't
-      silently route around it (e.g. via `harness signup`) and call the
-      flow "passed" — a real first-time user has no such workaround.
-- [ ] 7. Sign up / sign in.
-      **Expected:** on success, the browser hands `Casper.app` a
+- [ ] 6. Back on the download page, click **Sign in** (or **Sign up**, for
+      a genuinely new account).
+      **Expected:** opens `pages/signin.py`/`pages/signup.py` on the app
+      subdomain in a new tab, with a username/password form.
+      **Fixed 2026-09-19** — was 404ing (see Known Issues). Re-verify this
+      step specifically the next time this flow runs; it hasn't had a real
+      run-through since the fix, only `AppTest`-level (no live network)
+      checks that the page renders without an exception.
+- [ ] 7. Submit the form.
+      **Expected:** on success, the page shows "Signed in as
+      &lt;username&gt;." and the browser hands `Casper.app` a
       `casper://pair?token=...&username=...` URL (an OS-level hand-off,
       not a visible browser action) — the already-running app receives it
-      with no further clicks.
+      with no further clicks. No further page navigation happens (there's
+      no post-pairing page to send you to anymore) — the page's own text
+      says to check your computer and close the tab.
 - [ ] 8. Confirm pairing actually succeeded.
       **Expected:** ⚠ there is currently no end-user-facing UI that shows
       this (the authenticated Streamlit surface — Environments/hosts list
@@ -78,16 +83,23 @@ doc's Known Issues below and its step text).
 
 ## Known issues
 
-- **Dead "Sign in" link from `/download`** (found 2026-09-19, drafting
-  this doc). `pages/download.py` links to `{app_subdomain_url()}/signin`;
-  `pages/signin.py` was deleted in `3491faf` ("Retire the authenticated
-  Streamlit surface"). Blocks step 6 — a real first-time user cannot
-  currently pair a host through the documented flow at all.
-- **No end-user-facing pairing confirmation** (found 2026-09-19). Step 8
-  requires `harness` (an internal dev tool) to verify success; there's no
-  product-facing way for a real user to see "yes, my machine is
-  connected." Not necessarily a bug (the front end doesn't exist yet), but
-  worth tracking as a known gap in this flow specifically.
-- **Gatekeeper warning copy may be stale** (flagged 2026-09-19, unverified
-  — see step 4). Confirm actual behavior with a real notarized build
-  before editing the copy either way.
+- ~~**Dead "Sign in" link from `/download`**~~ **Fixed 2026-09-19.**
+  `pages/signin.py`/`signup.py` were deleted in `3491faf` ("Retire the
+  authenticated Streamlit surface") without updating `pages/download.py`'s
+  link, which depended on them. Restored both pages (trimmed: no more
+  cross-tab localStorage session recovery or `/environments` redirect,
+  since that page is gone for good — success now just fires the
+  `casper://pair` hand-off and stops) plus the `utils/auth.py`/
+  `utils/browser_nav.py` helpers they need. Verified the pages load and
+  execute without exception (`streamlit.testing.v1.AppTest`) and via a
+  real local `streamlit run` hitting `/signin`/`/signup` directly — **not
+  yet verified with a real form submission against a live deployment**;
+  step 6/7 above still need a real run-through.
+- **No end-user-facing pairing confirmation** (found 2026-09-19, still
+  open). Step 8 requires `harness` (an internal dev tool) to verify
+  success; there's no product-facing way for a real user to see "yes, my
+  machine is connected." Not necessarily a bug (the front end doesn't
+  exist yet), but worth tracking as a known gap in this flow specifically.
+- **Gatekeeper warning copy may be stale** (flagged 2026-09-19, still
+  unverified — see step 4). Confirm actual behavior with a real notarized
+  build before editing the copy either way.

@@ -102,8 +102,12 @@ def home_link_html(size=32):
 def page_header(size=32):
     """hide_streamlit_chrome() + the home link, rendered as normal in-flow
     content -- so it gets the same padding as the rest of the page. Used
-    by both of this app's remaining pages, casper_app.py and
-    pages/download.py -- both public, unauthenticated; sign-in/sign-up and
-    everything gated behind them moved to the harness (see harness/)."""
+    by every page this app still has: casper_app.py and pages/download.py
+    (public, unauthenticated) plus pages/signin.py and pages/signup.py
+    (the app subdomain's own pages -- see utils/auth.py's
+    require_app_subdomain). Everything gated *behind* a session
+    (Environments/Settings/chat) stays retired in favor of the harness
+    (see harness/) -- sign-in/sign-up themselves came back since a real
+    end user still needs a way to pair a host without it."""
     hide_streamlit_chrome()
     st.markdown(home_link_html(size), unsafe_allow_html=True)
