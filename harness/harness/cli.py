@@ -11,6 +11,7 @@ retired throughout."""
 
 import json
 import os
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -183,10 +184,76 @@ def _resolve_domain(username: str, domain: Optional[str], dev: bool, prod: bool)
     return _load_known_domains().get(username, DEFAULT_DOMAIN)
 
 
-@app.callback()
-def main(debug: bool = typer.Option(False, "--debug", "--raw", help="Print every request/response.")):
-    """Casper backend test harness."""
+def _run_interactive() -> None:
+    """A REPL over this same Typer app -- each line typed is exactly the
+    argument list that would otherwise follow `harness` on a real command
+    line (so e.g. `login demo --dev` here is exactly `harness login demo
+    --dev` from a shell), dispatched via Click's own documented embedding
+    mechanism (standalone_mode=False -- see Click's docs on "using Click
+    in a REPL"): app(...) then returns/raises instead of calling
+    sys.exit() itself, so one bad/failing command doesn't kill the whole
+    session. A plain `typer.Exit` (e.g. from _handle_api_error) is
+    swallowed by Click itself in this mode (returned as an exit code,
+    never raised).
+
+    typer.Abort (Ctrl-C mid password-prompt) is caught by class -- it's
+    Typer's own public, stable exception. A genuine usage error (unknown
+    command, bad option, ...) is NOT caught by class: this Typer version
+    (0.27) fully vendors its OWN private copy of Click's exceptions
+    (typer._click.exceptions), entirely unrelated to the top-level click
+    package's classes -- confirmed directly (isinstance/issubclass both
+    False against click.exceptions.ClickException) -- so depending on
+    click.exceptions.ClickException here silently never matches, and
+    depending on typer._click.exceptions.ClickException instead is
+    depending on a private, unstable-across-versions module path. Duck-
+    typing on the one thing every one of these actually guarantees (a
+    .show() method, per Click's own ClickException API contract, which
+    this vendored fork faithfully replicates) is what's actually robust
+    here -- anything else unexpected still gets printed (as
+    "ExceptionType: message"), never silently swallowed, just without the
+    same formatted "Usage: ..." presentation."""
+    console.print("Casper harness -- interactive mode. Type a command (no leading 'harness'), or 'exit'/Ctrl-D to quit.")
+    while True:
+        try:
+            line = input("harness> ")
+        except EOFError:
+            console.print()
+            break
+        except KeyboardInterrupt:
+            console.print()
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("exit", "quit"):
+            break
+        try:
+            args = shlex.split(line)
+        except ValueError as e:
+            err_console.print(f"[red]{e}[/red]")
+            continue
+        try:
+            app(args=args, prog_name="harness", standalone_mode=False)
+        except typer.Abort:
+            err_console.print("Aborted.")
+        except KeyboardInterrupt:
+            err_console.print()
+        except Exception as e:
+            if callable(getattr(e, "show", None)):
+                e.show()
+            else:
+                err_console.print(f"[red]{type(e).__name__}:[/red] {e}")
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    debug: bool = typer.Option(False, "--debug", "--raw", help="Print every request/response."),
+):
+    """Casper backend test harness. Run with no command for interactive mode."""
     client.toggle_debug(debug)
+    if ctx.invoked_subcommand is None:
+        _run_interactive()
 
 
 @app.command()
