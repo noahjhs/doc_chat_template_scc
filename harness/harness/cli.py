@@ -30,7 +30,7 @@ from . import client
 # tolerate not existing at all on another platform. _authenticate_device_owner
 # below degrades to "no biometric gate available" (never raises) either way.
 try:
-    from LocalAuthentication import LAContext, LAPolicyDeviceOwnerAuthentication
+    from LocalAuthentication import LAContext, LAPolicyDeviceOwnerAuthenticationWithBiometrics
 except ImportError:  # non-macOS, or the platform-conditional dep isn't installed
     LAContext = None
 
@@ -127,19 +127,31 @@ def _authenticate_device_owner(reason: str) -> bool:
     (see this module's own docstring), so a saved password should feel like
     a browser's saved password, not a bypass.
 
-    LAPolicyDeviceOwnerAuthentication (not the Biometrics-only variant)
-    falls back to the account password if Touch ID isn't available/
-    enrolled/declined -- same fallback a browser's own Touch ID prompt
-    gives you. Returns False (never raises) on any failure, cancellation,
-    or unavailability (including simply not being on macOS, or the
-    platform-conditional pyobjc dependency not being installed -- see
-    LAContext's own import above) -- callers fall back to an interactive
-    password prompt, exactly like declining a browser's Touch ID dialog
-    still lets you type the password by hand."""
+    Uses LAPolicyDeviceOwnerAuthenticationWithBiometrics, NOT the plain
+    LAPolicyDeviceOwnerAuthentication this started out with -- switched
+    after a real, reported false pass: the plain policy has a documented
+    macOS behavior where it can succeed silently, with no prompt shown at
+    all, whenever the Mac is already unlocked and actively in use (it
+    treats "you're already sitting at an unlocked session" as sufficient
+    proof of device-owner presence on its own) -- which is true for
+    essentially every real terminal session, so it was never actually
+    gating anything in practice. The Biometrics-only variant has no such
+    session-already-unlocked shortcut; it always requires either a fresh
+    Touch ID read or its own "Enter Password" fallback button, both inside
+    the same real, visible system sheet -- so the fallback a browser's own
+    Touch ID prompt gives you is still there, just genuinely gated behind
+    that visible sheet rather than an invisible one this project's own
+    password could bypass entirely. Returns False (never raises) on any
+    failure, cancellation, or unavailability (including simply not being
+    on macOS, no biometry enrolled at all, or the platform-conditional
+    pyobjc dependency not being installed -- see LAContext's own import
+    above) -- callers fall back to an interactive password prompt for the
+    saved account itself, exactly like declining a browser's Touch ID
+    dialog still lets you type the password by hand."""
     if LAContext is None:
         return False
     context = LAContext.alloc().init()
-    can_evaluate, _err = context.canEvaluatePolicy_error_(LAPolicyDeviceOwnerAuthentication, None)
+    can_evaluate, _err = context.canEvaluatePolicy_error_(LAPolicyDeviceOwnerAuthenticationWithBiometrics, None)
     if not can_evaluate:
         return False
 
@@ -150,7 +162,7 @@ def _authenticate_device_owner(reason: str) -> bool:
         outcome["success"] = bool(success)
         done.set()
 
-    context.evaluatePolicy_localizedReason_reply_(LAPolicyDeviceOwnerAuthentication, reason, _reply)
+    context.evaluatePolicy_localizedReason_reply_(LAPolicyDeviceOwnerAuthenticationWithBiometrics, reason, _reply)
     done.wait()
     return outcome["success"]
 
