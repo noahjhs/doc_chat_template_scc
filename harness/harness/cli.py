@@ -11,15 +11,27 @@ retired throughout."""
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
+import keyring
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from . import client
+
+# LocalAuthentication (Touch ID/password) is macOS-only -- pyobjc-framework-
+# LocalAuthentication is a platform-conditional dependency (see
+# pyproject.toml's `sys_platform == 'darwin'` marker), so this import must
+# tolerate not existing at all on another platform. _authenticate_device_owner
+# below degrades to "no biometric gate available" (never raises) either way.
+try:
+    from LocalAuthentication import LAContext, LAPolicyDeviceOwnerAuthentication
+except ImportError:  # non-macOS, or the platform-conditional dep isn't installed
+    LAContext = None
 
 app = typer.Typer(help="Casper backend test harness -- drives auth_service directly, no GUI in the loop.")
 policy_app = typer.Typer(help="Manage policy layers.")
@@ -35,7 +47,32 @@ console = Console()
 err_console = Console(stderr=True)
 
 DEFAULT_DOMAIN = "localhost:8100"
+# This project's two actual deployed auth domains -- mirrors
+# scripts/smoke_test.sh's own AUTH_DOMAIN defaults for dev/prod. --dev/--prod
+# (see _resolve_domain) are just a memorable shorthand for these, so a
+# caller never has to remember or retype the real hostname.
+DEV_AUTH_DOMAIN = "dev-auth.casperagent.dev"
+PROD_AUTH_DOMAIN = "auth.casperagent.dev"
 SESSION_PATH = Path(os.environ.get("CASPER_HARNESS_SESSION", str(Path.home() / ".casper-harness" / "session.json")))
+# Remembers, per username, which domain was last used to log in as it --
+# separate from SESSION_PATH (which holds only the one CURRENTLY active
+# session) since this needs to persist across switching users/domains, not
+# just describe the current one. Keyed by username alone (not
+# domain+username) -- deliberately: the whole point is "what domain does
+# this username belong to", so it's a username -> domain map, not the other
+# way around.
+KNOWN_DOMAINS_PATH = SESSION_PATH.parent / "known_domains.json"
+
+# The OS keychain service name every saved password is filed under (see
+# keyring's own docs -- it namespaces by (service, username) pairs).
+# _keyring_key folds domain into keyring's "username" field since the same
+# account username can plausibly exist on both dev and prod as unrelated
+# accounts.
+KEYRING_SERVICE = "casper-harness"
+
+
+def _keyring_key(domain: str, username: str) -> str:
+    return f"{domain}:{username}"
 
 
 def _load_session() -> Optional[dict]:
@@ -62,6 +99,90 @@ def _handle_api_error(e: client.ApiError):
     raise typer.Exit(code=1)
 
 
+def _authenticate_device_owner(reason: str) -> bool:
+    """Prompts the OS's own Touch ID/password dialog (LocalAuthentication --
+    the same framework Safari/Chrome gate password-autofill behind) and
+    blocks until the user responds. This is a deliberate step up from
+    keyring's own default (silent once the requesting process is trusted,
+    no prompt of any kind) -- part of this CLI's job is to mirror the
+    experience the eventual front end will have, not just work functionally
+    (see this module's own docstring), so a saved password should feel like
+    a browser's saved password, not a bypass.
+
+    LAPolicyDeviceOwnerAuthentication (not the Biometrics-only variant)
+    falls back to the account password if Touch ID isn't available/
+    enrolled/declined -- same fallback a browser's own Touch ID prompt
+    gives you. Returns False (never raises) on any failure, cancellation,
+    or unavailability (including simply not being on macOS, or the
+    platform-conditional pyobjc dependency not being installed -- see
+    LAContext's own import above) -- callers fall back to an interactive
+    password prompt, exactly like declining a browser's Touch ID dialog
+    still lets you type the password by hand."""
+    if LAContext is None:
+        return False
+    context = LAContext.alloc().init()
+    can_evaluate, _err = context.canEvaluatePolicy_error_(LAPolicyDeviceOwnerAuthentication, None)
+    if not can_evaluate:
+        return False
+
+    done = threading.Event()
+    outcome = {"success": False}
+
+    def _reply(success, _error):
+        outcome["success"] = bool(success)
+        done.set()
+
+    context.evaluatePolicy_localizedReason_reply_(LAPolicyDeviceOwnerAuthentication, reason, _reply)
+    done.wait()
+    return outcome["success"]
+
+
+def _maybe_save_password(key: str, password: str) -> None:
+    """Mirrors a browser's own "save this password?" prompt -- asks before
+    writing a password to the keychain. Only ever called (see signup/login)
+    for a password a human just typed into an interactive prompt -- never
+    for one reused from the keychain (nothing new to save then), and never
+    for one supplied via --password (a scripted/automated caller isn't the
+    thing a browser's own save-prompt reacts to; that path doesn't call
+    this at all, so a --password run is never saved and never asks)."""
+    if typer.confirm("Save this password to the keychain for next time?", default=True):
+        keyring.set_password(KEYRING_SERVICE, key, password)
+    else:
+        console.print("[dim]Not saved.[/dim]")
+
+
+def _load_known_domains() -> dict:
+    if not KNOWN_DOMAINS_PATH.exists():
+        return {}
+    return json.loads(KNOWN_DOMAINS_PATH.read_text())
+
+
+def _remember_domain(username: str, domain: str) -> None:
+    known = _load_known_domains()
+    known[username] = domain
+    KNOWN_DOMAINS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    KNOWN_DOMAINS_PATH.write_text(json.dumps(known))
+
+
+def _resolve_domain(username: str, domain: Optional[str], dev: bool, prod: bool) -> str:
+    """--dev/--prod win whenever given. Otherwise an explicit --domain (or
+    CASPER_HARNESS_DOMAIN -- typer's envvar handling can't tell those two
+    apart, so this doesn't try to) wins next. Only when NONE of those three
+    were given does this fall back to whatever domain `username` last
+    logged into (see _remember_domain), then finally DEFAULT_DOMAIN if
+    even that's unknown."""
+    if dev and prod:
+        err_console.print("[red]--dev and --prod are mutually exclusive.[/red]")
+        raise typer.Exit(code=1)
+    if dev:
+        return DEV_AUTH_DOMAIN
+    if prod:
+        return PROD_AUTH_DOMAIN
+    if domain is not None:
+        return domain
+    return _load_known_domains().get(username, DEFAULT_DOMAIN)
+
+
 @app.callback()
 def main(debug: bool = typer.Option(False, "--debug", "--raw", help="Print every request/response.")):
     """Casper backend test harness."""
@@ -71,14 +192,26 @@ def main(debug: bool = typer.Option(False, "--debug", "--raw", help="Print every
 @app.command()
 def signup(
     username: str,
-    domain: str = typer.Option(DEFAULT_DOMAIN, "--domain", "-d", envvar="CASPER_HARNESS_DOMAIN"),
-    password: str = typer.Option(..., prompt=True, hide_input=True, confirmation_prompt=True),
+    domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
+    dev: bool = typer.Option(False, "--dev", help=f"Use the dev deployment ({DEV_AUTH_DOMAIN})."),
+    prod: bool = typer.Option(False, "--prod", help=f"Use the prod deployment ({PROD_AUTH_DOMAIN})."),
+    password: Optional[str] = typer.Option(None, "--password", hide_input=True, help="Omit to be prompted (with confirmation)."),
 ):
-    """Create a new account and save the resulting session."""
+    """Create a new account and save the resulting session. When the
+    password is typed interactively (not supplied via --password), asks
+    before saving it to the OS keychain -- same as a browser's own
+    save-password prompt."""
+    domain = _resolve_domain(username, domain, dev, prod)
+    typed_fresh = password is None
+    if password is None:
+        password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
     try:
         result = client.signup(domain, username, password)
     except client.ApiError as e:
         _handle_api_error(e)
+    if typed_fresh:
+        _maybe_save_password(_keyring_key(domain, result["username"]), password)
+    _remember_domain(result["username"], domain)
     _save_session(domain, result["username"], result["token"])
     console.print(f"[green]Signed up as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
 
@@ -86,16 +219,81 @@ def signup(
 @app.command()
 def login(
     username: str,
-    domain: str = typer.Option(DEFAULT_DOMAIN, "--domain", "-d", envvar="CASPER_HARNESS_DOMAIN"),
-    password: str = typer.Option(..., prompt=True, hide_input=True),
+    domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
+    dev: bool = typer.Option(False, "--dev", help=f"Use the dev deployment ({DEV_AUTH_DOMAIN})."),
+    prod: bool = typer.Option(False, "--prod", help=f"Use the prod deployment ({PROD_AUTH_DOMAIN})."),
+    password: Optional[str] = typer.Option(
+        None, "--password", hide_input=True, help="Omit to use a saved OS-keychain password, or be prompted."
+    ),
 ):
-    """Sign in and save the resulting session."""
+    """Sign in and save the resulting session. Without --domain/--dev/--prod,
+    reuses whichever domain this username last logged into. Without
+    --password, reuses a password already saved in the OS keychain for this
+    domain+username -- gated behind a Touch ID/password check each time
+    (see `harness forget-password` to clear it), same as a browser's own
+    saved-password autofill -- falling back to an interactive prompt the
+    first time, if Touch ID is declined/unavailable, or if the saved
+    password stops working. A freshly-typed password that signs in
+    successfully is offered to be saved (see _maybe_save_password) rather
+    than saved automatically -- same as a browser's own save-password
+    prompt."""
+    domain = _resolve_domain(username, domain, dev, prod)
+    key = _keyring_key(domain, username)
+
+    from_keychain = False
+    typed_fresh = False
+    if password is None:
+        stored = keyring.get_password(KEYRING_SERVICE, key)
+        if stored is not None:
+            if _authenticate_device_owner(f"unlock the saved Casper harness password for {username}@{domain}"):
+                password = stored
+                from_keychain = True
+            else:
+                err_console.print("[dim]Touch ID/password check declined or unavailable -- type it instead.[/dim]")
+    if password is None:
+        password = typer.prompt("Password", hide_input=True)
+        typed_fresh = True
+
     try:
         result = client.signin(domain, username, password)
     except client.ApiError as e:
-        _handle_api_error(e)
+        if not (from_keychain and e.status_code == 401):
+            _handle_api_error(e)
+        # The saved password no longer works (changed/rotated elsewhere) --
+        # drop it rather than keep silently failing with it, and fall back
+        # to one interactive prompt.
+        keyring.delete_password(KEYRING_SERVICE, key)
+        err_console.print("[yellow]Saved password didn't work -- it's been forgotten.[/yellow]")
+        password = typer.prompt("Password", hide_input=True)
+        typed_fresh = True
+        try:
+            result = client.signin(domain, username, password)
+        except client.ApiError as e2:
+            _handle_api_error(e2)
+
+    if typed_fresh:
+        _maybe_save_password(key, password)
+    _remember_domain(result["username"], domain)
     _save_session(domain, result["username"], result["token"])
     console.print(f"[green]Signed in as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
+
+
+@app.command("forget-password")
+def forget_password(
+    username: str,
+    domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
+    dev: bool = typer.Option(False, "--dev", help=f"Use the dev deployment ({DEV_AUTH_DOMAIN})."),
+    prod: bool = typer.Option(False, "--prod", help=f"Use the prod deployment ({PROD_AUTH_DOMAIN})."),
+):
+    """Clear a password saved in the OS keychain by a previous `login` --
+    does not touch the current session (see `logout` for that)."""
+    domain = _resolve_domain(username, domain, dev, prod)
+    try:
+        keyring.delete_password(KEYRING_SERVICE, _keyring_key(domain, username))
+    except keyring.errors.PasswordDeleteError:
+        console.print(f"No saved password for {username}@{domain}.")
+        return
+    console.print(f"[green]Forgot the saved password for {username}@{domain}.[/green]")
 
 
 @app.command()
@@ -110,7 +308,10 @@ def whoami():
 
 @app.command()
 def logout():
-    """Discard the saved session."""
+    """Discard the saved session -- leaves any OS-keychain-saved password
+    (see `login`) and remembered domain (see `login`'s own docstring)
+    alone, so the next `login` for this username still skips both prompts.
+    Use `forget-password` to also clear the saved password."""
     if SESSION_PATH.exists():
         SESSION_PATH.unlink()
     console.print("Logged out.")
