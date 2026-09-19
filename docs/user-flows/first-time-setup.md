@@ -83,18 +83,24 @@ doc's Known Issues below and its step text).
 
 ## Known issues
 
-- ~~**Dead "Sign in" link from `/download`**~~ **Fixed 2026-09-19.**
-  `pages/signin.py`/`signup.py` were deleted in `3491faf` ("Retire the
-  authenticated Streamlit surface") without updating `pages/download.py`'s
-  link, which depended on them. Restored both pages (trimmed: no more
-  cross-tab localStorage session recovery or `/environments` redirect,
-  since that page is gone for good — success now just fires the
-  `casper://pair` hand-off and stops) plus the `utils/auth.py`/
-  `utils/browser_nav.py` helpers they need. Verified the pages load and
-  execute without exception (`streamlit.testing.v1.AppTest`) and via a
-  real local `streamlit run` hitting `/signin`/`/signup` directly — **not
-  yet verified with a real form submission against a live deployment**;
-  step 6/7 above still need a real run-through.
+- ~~**Dead "Sign in" link from `/download`**~~ **Fixed 2026-09-19,
+  deployed to dev.** `pages/signin.py`/`signup.py` were deleted in
+  `3491faf` ("Retire the authenticated Streamlit surface") without
+  updating `pages/download.py`'s link, which depended on them. Restored
+  both pages (trimmed: no more cross-tab localStorage session recovery or
+  `/environments` redirect, since that page is gone for good — success now
+  just fires the `casper://pair` hand-off and stops) plus the
+  `utils/auth.py`/`utils/browser_nav.py` helpers they need. Verified: the
+  pages load and execute without exception (`streamlit.testing.v1.
+  AppTest`); `https://dev-app.casperagent.dev/signin` and `/signup` both
+  serve real 200s post-deploy; `signup_with_auth_service` called directly
+  against the live dev `auth_service` returns a real token and
+  `build_pair_url` forms a correct `casper://pair?...` URL from it — i.e.
+  every piece of the page's own logic has been exercised against the real
+  live deployment. **Still not verified: an actual browser click through
+  the full page (form submit → `casper://pair` Apple Event → a real
+  daemon receiving it)** — that needs a human at a real browser; step 6/7
+  above should get a real run-through next time this flow runs.
 - **No end-user-facing pairing confirmation** (found 2026-09-19, still
   open). Step 8 requires `harness` (an internal dev tool) to verify
   success; there's no product-facing way for a real user to see "yes, my
