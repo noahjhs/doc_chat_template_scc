@@ -34,6 +34,18 @@ try:
 except ImportError:  # non-macOS, or the platform-conditional dep isn't installed
     LAContext = None
 
+# Importing readline (before any input() call) is what makes input() support
+# up/down-arrow history navigation and basic emacs-style line editing at
+# all -- without it, input() still works, just with no history and minimal
+# editing. Standard library on macOS/Linux (backed by libedit or GNU
+# readline); not available on Windows without the separate pyreadline3
+# package, so _run_interactive below tolerates this being None (no history
+# navigation there, same as today, never a crash).
+try:
+    import readline
+except ImportError:  # Windows without pyreadline3
+    readline = None
+
 app = typer.Typer(help="Casper backend test harness -- drives auth_service directly, no GUI in the loop.")
 policy_app = typer.Typer(help="Manage policy layers.")
 app.add_typer(policy_app, name="policy")
@@ -63,6 +75,11 @@ SESSION_PATH = Path(os.environ.get("CASPER_HARNESS_SESSION", str(Path.home() / "
 # this username belong to", so it's a username -> domain map, not the other
 # way around.
 KNOWN_DOMAINS_PATH = SESSION_PATH.parent / "known_domains.json"
+# Interactive-mode command history (see _run_interactive) -- persisted
+# across separate `harness` launches, same "don't make me retype things"
+# spirit as everything else here, not just scrollable within one session.
+HISTORY_PATH = SESSION_PATH.parent / "history"
+HISTORY_MAX_ENTRIES = 1000
 
 # The OS keychain service name every saved password is filed under (see
 # keyring's own docs -- it namespaces by (service, username) pairs).
@@ -211,38 +228,67 @@ def _run_interactive() -> None:
     this vendored fork faithfully replicates) is what's actually robust
     here -- anything else unexpected still gets printed (as
     "ExceptionType: message"), never silently swallowed, just without the
-    same formatted "Usage: ..." presentation."""
+    same formatted "Usage: ..." presentation.
+
+    Up/down-arrow history navigation comes from readline itself (see this
+    module's own import of it) -- input() automatically records each line
+    into readline's history the moment readline is imported, with no
+    add_history() call needed here; what this function adds on top is
+    just PERSISTENCE across separate `harness` launches (read the saved
+    file in before the loop, write it back out after) -- the same
+    "don't make me retype things" spirit as the remembered domain/
+    keychain password elsewhere in this file. Silently does neither if
+    readline isn't available (Windows without pyreadline3) -- history
+    navigation itself just doesn't work there, same as it wouldn't with a
+    bare `input()` and no readline at all."""
+    if readline is not None:
+        readline.set_history_length(HISTORY_MAX_ENTRIES)
+        try:
+            readline.read_history_file(HISTORY_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            err_console.print(f"[dim]Couldn't load command history: {e}[/dim]")
+
     console.print("Casper harness -- interactive mode. Type a command (no leading 'harness'), or 'exit'/Ctrl-D to quit.")
-    while True:
-        try:
-            line = input("harness> ")
-        except EOFError:
-            console.print()
-            break
-        except KeyboardInterrupt:
-            console.print()
-            continue
-        line = line.strip()
-        if not line:
-            continue
-        if line in ("exit", "quit"):
-            break
-        try:
-            args = shlex.split(line)
-        except ValueError as e:
-            err_console.print(f"[red]{e}[/red]")
-            continue
-        try:
-            app(args=args, prog_name="harness", standalone_mode=False)
-        except typer.Abort:
-            err_console.print("Aborted.")
-        except KeyboardInterrupt:
-            err_console.print()
-        except Exception as e:
-            if callable(getattr(e, "show", None)):
-                e.show()
-            else:
-                err_console.print(f"[red]{type(e).__name__}:[/red] {e}")
+    try:
+        while True:
+            try:
+                line = input("harness> ")
+            except EOFError:
+                console.print()
+                break
+            except KeyboardInterrupt:
+                console.print()
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            if line in ("exit", "quit"):
+                break
+            try:
+                args = shlex.split(line)
+            except ValueError as e:
+                err_console.print(f"[red]{e}[/red]")
+                continue
+            try:
+                app(args=args, prog_name="harness", standalone_mode=False)
+            except typer.Abort:
+                err_console.print("Aborted.")
+            except KeyboardInterrupt:
+                err_console.print()
+            except Exception as e:
+                if callable(getattr(e, "show", None)):
+                    e.show()
+                else:
+                    err_console.print(f"[red]{type(e).__name__}:[/red] {e}")
+    finally:
+        if readline is not None:
+            HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                readline.write_history_file(HISTORY_PATH)
+            except OSError as e:
+                err_console.print(f"[dim]Couldn't save command history: {e}[/dim]")
 
 
 @app.callback(invoke_without_command=True)
