@@ -48,9 +48,12 @@ class HostVerifyResponse(BaseModel):
 
 class HostPresenceReport(BaseModel):
     local_agent_url: str
-    # A set of addressable directories, not one fixed workspace -- may be
-    # empty (nothing added on that host yet).
-    workspace: list[str] = []
+    # The daemon's own single confined directory (its homeRoot -- see
+    # agent/internal/commands.Handler) -- reported so this service can
+    # cache it and use it as the join base for a rule's best-effort "."
+    # path_resolution preview (see policy.py's module docstring); the Go
+    # daemon itself is what actually enforces this accurately.
+    cwd: str = ""
 
 
 # The "matches nothing" sentinel a blank blacklist defaults to -- a
@@ -84,7 +87,22 @@ class Pattern(BaseModel):
     history). A rule author wanting that protection today writes a plain
     regex instead (e.g. a blacklist on "^/" and "\\.\\." to reject
     absolute paths and traversal), the same way every other constraint in
-    this schema already works.
+    this schema already works -- optionally with path_resolution set so
+    that regex is checked against a RESOLVED value (see the Go daemon's
+    own resolveForMatch, agent/internal/commands/policy.go) rather than
+    the raw argument string, closing a real blind spot plain regex alone
+    can't see (a "safe-looking" relative argument that's secretly a
+    symlink into somewhere unsafe). path_resolution is one of "" (no
+    resolution, today's raw-string behavior), "." (relative to the call's
+    own cwd), "$PATH", or "MANPATH" -- see PolicyLayerRuleCreateRequest's
+    own docstring for why position 0 (the binary) and cwd itself never
+    need this flag. This service can only best-effort APPROXIMATE "."
+    resolution (string-join against a cached cwd -- see
+    _connected_host_configs) and can't meaningfully resolve "$PATH"/
+    "MANPATH" at all, since it has no access to the real target
+    filesystem/environment -- the Go daemon alone can do this accurately,
+    and is what actually enforces it; see policy.py's own module
+    docstring for why that's still safe.
 
     Both fields are always real regex strings, never absent/null -- a
     blank whitelist defaults to "" (an empty RE2 pattern matches
@@ -110,6 +128,7 @@ class Pattern(BaseModel):
 
     whitelist: str = Field(default="", max_length=500)
     blacklist: str = Field(default=BLACKLIST_MATCHES_NOTHING, max_length=500)
+    path_resolution: Literal["", ".", "$PATH", "MANPATH"] = ""
 
     @model_validator(mode="after")
     def _validate(self):
@@ -147,13 +166,25 @@ class OptionConstraint(BaseModel):
 class PolicyLayerRuleCreateRequest(BaseModel):
     """One rule within a Policy Layer -- see policy_layer_rules' own
     schema comment in db.py for the full shape. positional_constraints'
-    list index IS the argv position (index 0 = the binary). Position 0 is
+    list index IS the argv position (index 0 = the binary, always matched
+    by the Go daemon against its own $PATH-resolved absolute path -- see
+    agent/internal/commands/policy.go's Rule -- so a rule constraining
+    position 0 should match a real absolute path, not a bare command
+    name; this service's own approximate preview, see policy.py, can't
+    replicate that resolution and matches position 0 raw). Position 0 is
     optional exactly like every other position -- an empty list, or a
     blank entry, both mean "value not required" there too; there's
-    nothing special required about constraining the binary itself."""
+    nothing special required about constraining the binary itself. cwd
+    optionally constrains the directory the call runs in -- unlike a
+    positional/option constraint, it's never resolution-flagged (see
+    Pattern's own docstring): cwd isn't a command argument, it's something
+    the daemon already knows and has already resolved to an absolute path
+    by the time it's checked, so no path_resolution mechanism applies to
+    it. A blank cwd (the Pattern default) means "any directory"."""
 
     positional_constraints: list[Pattern] = Field(default_factory=list)
     option_constraints: list[OptionConstraint] = Field(default_factory=list)
+    cwd: Pattern = Field(default_factory=Pattern)
     tier: Literal["allow", "ask", "deny"] = "ask"
 
 
@@ -164,6 +195,7 @@ class PolicyLayerRuleUpdateRequest(BaseModel):
 
     positional_constraints: list[Pattern] | None = None
     option_constraints: list[OptionConstraint] | None = None
+    cwd: Pattern | None = None
     tier: Literal["allow", "ask", "deny"] | None = None
 
 
@@ -172,6 +204,7 @@ class PolicyLayerRuleInfo(BaseModel):
     position: int
     positional_constraints: list[Pattern]
     option_constraints: list[OptionConstraint]
+    cwd: Pattern = Field(default_factory=Pattern)
     tier: str
 
 
@@ -236,6 +269,7 @@ class PolicyEvalRequest(BaseModel):
     policy_layer_ids: list[int] = Field(default_factory=list)
     positional_args: list[str] = Field(default_factory=list)
     options: list[PolicyEvalOption] = Field(default_factory=list)
+    cwd: str = ""
 
 
 class PolicyEvalResponse(BaseModel):
@@ -270,10 +304,9 @@ class ConversationStepRequest(BaseModel):
         (a turn already mid-hop can't have a new message injected into it).
     default_host names which of the caller's own connected hosts a tool
     call should default to when it doesn't specify one and more than one
-    is connected (mirrors run_shell_command's/run_local_command's own
-    `host` field -- this is a label, never a URL/API key; the server looks
-    those up itself from its own state). mock, see conversations.py's own
-    module docstring."""
+    is connected (mirrors run_shell_command's own `host` field -- this is
+    a label, never a URL/API key; the server looks those up itself from
+    its own state). mock, see conversations.py's own module docstring."""
 
     turn: dict[str, Any] | None = None
     message: str | None = None
@@ -309,7 +342,7 @@ class HostInfo(BaseModel):
     hostname: str | None = None
     connected: bool
     local_agent_url: str | None = None
-    workspace: list[str] = []
+    cwd: str = ""
     command_key: str | None = None
     environment_ids: list[int] = []
     policy_layers: list[HostPolicyLayerInfo] = []

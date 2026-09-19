@@ -13,7 +13,10 @@ import (
 )
 
 func newTestServer() *Server {
-	return New("initial-key", commands.New(nil, nil), log.New(logDiscard{}, "", 0))
+	// homeRoot is irrelevant here -- this file tests the HTTP layer
+	// (health/sign-out/API-key auth), never an action that actually
+	// touches the filesystem.
+	return New("initial-key", commands.New(""), log.New(logDiscard{}, "", 0))
 }
 
 type logDiscard struct{}

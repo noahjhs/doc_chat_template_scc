@@ -165,6 +165,52 @@ func TestFetchPolicyLayersSkipsRuleWithUncompilablePattern(t *testing.T) {
 	}
 }
 
+func TestFetchPolicyLayersDecodesCwdAndPathResolution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"policy_layers": []map[string]any{
+				{
+					"id":   1,
+					"name": "cwd-scoped",
+					"rules": []map[string]any{
+						{
+							"id": 1,
+							"positional_constraints": []any{
+								map[string]any{},
+								map[string]any{"whitelist": "^safe.*", "path_resolution": "."},
+							},
+							"option_constraints": []map[string]any{},
+							"cwd":                map[string]any{"whitelist": "^/home/.+"},
+							"tier":               "allow",
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	layers, err := FetchPolicyLayers(testAuthDomain(server), "dev-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	rule := layers[0].Rules[0]
+	if rule.Cwd.Whitelist == nil || !rule.Cwd.Whitelist.MatchString("/home/alice") {
+		t.Fatalf("expected cwd's whitelist to compile and match, got %+v", rule.Cwd)
+	}
+	pc := rule.PositionalConstraints
+	if len(pc) != 2 {
+		t.Fatalf("expected 2 positional constraints, got %d", len(pc))
+	}
+	if pc[0].PathResolution != "" {
+		t.Fatalf("expected an absent path_resolution to decode as \"\" (none), got %q", pc[0].PathResolution)
+	}
+	if pc[1].PathResolution != "." {
+		t.Fatalf("expected position 1's path_resolution to decode as \".\", got %q", pc[1].PathResolution)
+	}
+}
+
 func TestFetchPolicyLayersUnexpectedStatusIsAnError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

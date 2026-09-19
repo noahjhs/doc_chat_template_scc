@@ -9,23 +9,22 @@ import (
 
 // ReportPresence POSTs to the auth service's /hosts/presence endpoint,
 // telling it where this daemon is currently reachable (its relay URL) and
-// which directories it currently has confined and addressable (see
-// commands.Handler.Roots -- a set now, not one fixed workspace, and
-// possibly empty), authenticated with this installation's own
-// device_token. Returns unauthorized=true when the auth service no longer
+// its own confined directory (see commands.Handler.HomeRoot -- a single
+// fixed directory, not a dynamic set), authenticated with this
+// installation's own device_token. Letting auth_service cache this cwd is
+// what lets its own best-effort policy preview do "." path_resolution
+// without a live round-trip on every call -- see policy.py's module
+// docstring. Returns unauthorized=true when the auth service no longer
 // recognizes that token (e.g. after a remote bulk sign-out, or an
 // auth_service restart -- its attachment tracking is in-memory, see
 // auth_service/main.py's _attached) so the caller can self-heal (clear its
 // local session, go idle) instead of retrying forever against a dead
 // credential. Otherwise best-effort: a network failure just means the web
 // app sees "not connected" until the next successful report.
-func ReportPresence(authDomain, deviceToken, localAgentURL string, workspaceDirs []string) (unauthorized bool) {
-	if workspaceDirs == nil {
-		workspaceDirs = []string{}
-	}
+func ReportPresence(authDomain, deviceToken, localAgentURL, cwd string) (unauthorized bool) {
 	body, err := json.Marshal(map[string]any{
 		"local_agent_url": localAgentURL,
-		"workspace":       workspaceDirs,
+		"cwd":             cwd,
 	})
 	if err != nil {
 		return false

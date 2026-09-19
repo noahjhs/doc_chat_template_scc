@@ -15,9 +15,10 @@ st.caption(TAGLINE)
 st.write(
     f"**{NAME}** is an AI assistant with real tools. It can search the web, run code, "
     "and generate images out of the box — and once you connect the small desktop app, "
-    "it can work directly in a folder on your own machine too: reading files, running "
-    "git commands, searching your codebase. Everything it touches is confined to a "
-    "workspace you choose, and every action it takes is shown back to you."
+    "it can work directly on your own machine too: reading files, running shell "
+    "commands, searching your codebase, all governed by a policy you control. "
+    "Everything it touches is confined to your home directory, and every action it "
+    "takes is shown back to you."
 )
 
 # Download stays on this same subdomain (same-tab, plain relative link).

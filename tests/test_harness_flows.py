@@ -129,12 +129,12 @@ def test_full_flow_signup_through_eval(harness_env, tmp_path):
     hosts = hc.list_hosts(DOMAIN, token)["hosts"]
     assert hosts[0]["connected"] is False
 
-    presence = hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/flow", ["/tmp/ws"])
+    presence = hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/flow", "/tmp/ws")
     assert presence["connected"] is True
 
     hosts_after = hc.list_hosts(DOMAIN, token)["hosts"]
     assert hosts_after[0]["connected"] is True
-    assert hosts_after[0]["workspace"] == ["/tmp/ws"]
+    assert hosts_after[0]["cwd"] == "/tmp/ws"
 
 
 def test_mock_call_tool_flow(harness_env):
@@ -144,16 +144,19 @@ def test_mock_call_tool_flow(harness_env):
 
     pair = hc.pair_host(DOMAIN, token, "rk-toolflow-1", hostname="toolflow-host")
     hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/toolflow")
+    layer = hc.create_policy_layer(DOMAIN, token, "toolflow layer")
+    hc.create_policy_layer_rule(DOMAIN, token, layer["id"], [{"whitelist": "^pwd$"}], [], "allow")
+    hc.add_policy_layer_to_host(DOMAIN, token, layer["id"], pair["host_id"])
 
     main._get_openai_client = lambda: FakeClient([FakeResponse(id="resp_1", output_text="Ran it.")])
 
-    result = hc.call_tool(DOMAIN, token, "run_local_command", {"action": "pwd"}, mock=True)
+    result = hc.call_tool(DOMAIN, token, "run_shell_command", {"positional_args": ["pwd"]}, mock=True)
     assert result["status"] == "done"
-    calls = result["turn"]["aggregate"]["local_agent_calls"]
+    calls = result["turn"]["aggregate"]["shell_command_calls"]
     assert len(calls) == 1
     output = json.loads(calls[0]["output"])
     assert output["mock"] is True
-    assert output["action"] == "pwd"
+    assert output["positional_args"] == ["pwd"]
 
 
 def test_mock_chat_flow_with_approval(harness_env, tmp_path):

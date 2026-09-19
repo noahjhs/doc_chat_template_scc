@@ -126,9 +126,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"detail": "Invalid request body."})
 		return
 	}
-	req.ApplyDefaults()
-
-	s.Logger.Printf("RUN action=%s path=%q destination=%q pattern=%q", req.Action, req.Path, req.Destination, req.Pattern)
+	s.Logger.Printf("RUN action=%s path=%q", req.Action, req.Path)
 	result, err := s.Commands.Dispatch(&req)
 	if err != nil {
 		if ae, ok := err.(*commands.ActionError); ok {

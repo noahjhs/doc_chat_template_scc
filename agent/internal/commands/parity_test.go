@@ -31,6 +31,7 @@ type parityCase struct {
 	Rules                    []parityRule    `json:"rules"`
 	PositionalArgs           []string        `json:"positional_args"`
 	Options                  []RequestOption `json:"options"`
+	Cwd                      string          `json:"cwd"`
 	ExpectedTier             string          `json:"expected_tier"`
 	ExpectedMatchedRuleIndex *int            `json:"expected_matched_rule_index"`
 }
@@ -38,6 +39,7 @@ type parityCase struct {
 type parityRule struct {
 	PositionalConstraints []parityPattern          `json:"positional_constraints"`
 	OptionConstraints     []parityOptionConstraint `json:"option_constraints"`
+	Cwd                   parityPattern            `json:"cwd"`
 	Tier                  string                   `json:"tier"`
 }
 
@@ -103,11 +105,11 @@ func TestPolicyParityFixture(t *testing.T) {
 				for j, ow := range rw.OptionConstraints {
 					options[j] = OptionConstraint{Short: ow.Short, Long: ow.Long, Pattern: ow.Pattern.compile(t)}
 				}
-				rules[i] = Rule{ID: i, PositionalConstraints: positional, OptionConstraints: options, Tier: rw.Tier}
+				rules[i] = Rule{ID: i, PositionalConstraints: positional, OptionConstraints: options, Cwd: rw.Cwd.compile(t), Tier: rw.Tier}
 			}
 			layers := []PolicyLayer{{ID: 0, Rules: rules}}
 
-			matched := h.matchPolicy(layers, c.PositionalArgs, c.Options)
+			matched := h.matchPolicy(layers, c.PositionalArgs, c.Options, c.Cwd)
 
 			tier := "deny"
 			if matched != nil {

@@ -52,12 +52,15 @@ def test_parity_case(policy_module, case):
                 position=i,
                 positional_constraints=rule["positional_constraints"],
                 option_constraints=rule["option_constraints"],
+                cwd=rule.get("cwd", {}),
                 tier=rule["tier"],
             ),
         )
         for i, rule in enumerate(case["rules"])
     ]
-    matched_rule_index, matched_rule = policy_module.match_policy(composed, case["positional_args"], case["options"])
+    matched_rule_index, matched_rule = policy_module.match_policy(
+        composed, case["positional_args"], case["options"], case.get("cwd", "")
+    )
     tier = matched_rule.tier if matched_rule else "deny"
     assert tier == case["expected_tier"], f"{case['name']}: expected tier {case['expected_tier']!r}, got {tier!r}"
     assert matched_rule_index == case["expected_matched_rule_index"], (

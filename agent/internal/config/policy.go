@@ -17,8 +17,9 @@ import (
 // symmetric -- see commands.Pattern's own doc comment for why neither
 // needs a "*"/wildcard sentinel).
 type patternWire struct {
-	whitelist *string
-	blacklist *string
+	whitelist      *string
+	blacklist      *string
+	pathResolution string
 }
 
 func (p *patternWire) UnmarshalJSON(data []byte) error {
@@ -33,14 +34,16 @@ func (p *patternWire) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var obj struct {
-		Whitelist *string `json:"whitelist"`
-		Blacklist *string `json:"blacklist"`
+		Whitelist      *string `json:"whitelist"`
+		Blacklist      *string `json:"blacklist"`
+		PathResolution string  `json:"path_resolution"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return err
 	}
 	p.whitelist = obj.Whitelist
 	p.blacklist = obj.Blacklist
+	p.pathResolution = obj.PathResolution
 	return nil
 }
 
@@ -51,9 +54,14 @@ func (p *patternWire) UnmarshalJSON(data []byte) error {
 // auth_service already validates with google-re2 (a different, if
 // syntax-compatible, RE2 binding) at authoring time, so this should be
 // rare -- a small parity gap is still possible, and this is the
-// deliberate defense against it.
+// deliberate defense against it. An unrecognized path_resolution value
+// (e.g. a future auth_service adding a mode this daemon build doesn't know
+// yet) is carried through as-is -- commands.resolveForMatch's own default
+// case already treats any unrecognized mode as a no-op passthrough, same
+// as PathResolutionNone, so an older daemon build degrades to raw-string
+// matching for that constraint rather than failing to compile the rule.
 func (p patternWire) compile() (commands.Pattern, error) {
-	out := commands.Pattern{}
+	out := commands.Pattern{PathResolution: p.pathResolution}
 	if p.whitelist != nil {
 		re, err := regexp.Compile(*p.whitelist)
 		if err != nil {
@@ -81,6 +89,7 @@ type ruleWire struct {
 	ID                    int                    `json:"id"`
 	PositionalConstraints []patternWire          `json:"positional_constraints"`
 	OptionConstraints     []optionConstraintWire `json:"option_constraints"`
+	Cwd                   patternWire            `json:"cwd"`
 	Tier                  string                 `json:"tier"`
 }
 
@@ -112,7 +121,11 @@ func compileRule(w ruleWire) (commands.Rule, error) {
 		}
 		options = append(options, commands.OptionConstraint{Short: ow.Short, Long: ow.Long, Pattern: compiled})
 	}
-	return commands.Rule{ID: w.ID, PositionalConstraints: positional, OptionConstraints: options, Tier: w.Tier}, nil
+	cwd, err := w.Cwd.compile()
+	if err != nil {
+		return commands.Rule{}, fmt.Errorf("cwd: %w", err)
+	}
+	return commands.Rule{ID: w.ID, PositionalConstraints: positional, OptionConstraints: options, Cwd: cwd, Tier: w.Tier}, nil
 }
 
 // FetchPolicyLayers GETs this installation's own enabled policy layers from

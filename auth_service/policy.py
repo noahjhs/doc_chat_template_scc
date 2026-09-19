@@ -3,23 +3,37 @@ source of truth for what a given (positional_args, options) call resolves
 to under a composed Policy (concatenated Policy Layers). Mirrors the Go
 daemon's own authoritative matcher (agent/internal/commands/policy.go)
 exactly -- that daemon-side copy remains the one that's truly authoritative
-for a real dispatched call (it alone has real filesystem access to check
-where a shell command's own working directory ends up), but this is the
-canonical *server-side* copy: both POST /policies/eval and
-conversations.py's own tool-dispatch tier decision evaluate purely against
-this."""
+for a real dispatched call (it alone has real filesystem access, so it
+alone can genuinely resolve a "." /"$PATH"/"MANPATH"-flagged constraint --
+see _pattern_matches below), but this is the canonical *server-side* copy:
+both POST /policies/eval and conversations.py's own tool-dispatch tier
+decision evaluate purely against this."""
 
 import re2
 
 from models import BLACKLIST_MATCHES_NOTHING, Pattern, PolicyLayerRuleInfo
 
 
-def _pattern_matches(value: str, pattern: Pattern) -> bool:
+def _pattern_matches(value: str, pattern: Pattern, cwd: str = "") -> bool:
     """Matches if (value matches whitelist) AND (value does NOT match
     blacklist) -- see Pattern's own docstring for the full three-state
     semantics this implements. Uses google-re2, not stdlib re, to preserve
     the no-catastrophic-backtracking property the whole schema is built
-    around, since these patterns evaluate agent-influenced input."""
+    around, since these patterns evaluate agent-influenced input.
+
+    pattern.path_resolution is only ever best-effort here, unlike the Go
+    daemon's own accurate resolveForMatch: this service has no access to
+    the real target machine's filesystem/$PATH/man pages. "." does a plain
+    string-join against cwd (no symlink resolution -- see
+    conversations.py's own _connected_host_configs for where that cwd
+    comes from); "$PATH"/"MANPATH" can't be approximated at all without
+    guessing at the remote environment, so those are matched raw, same as
+    "" (no resolution). This is deliberately safe to under-approximate: the
+    daemon's own match (accurate, and the real enforcement point
+    regardless of what tier this preview decided) is what actually gates
+    execution -- see policy.go's own runRunShellCommand."""
+    if pattern.path_resolution == "." and value and not value.startswith("/"):
+        value = f"{cwd.rstrip('/')}/{value}" if cwd else value
     if pattern.whitelist and not re2.search(pattern.whitelist, value):
         return False
     if pattern.blacklist and re2.search(pattern.blacklist, value):
@@ -34,14 +48,18 @@ def _find_option(options: list[dict], short: str | None, long: str | None) -> di
     return None
 
 
-def _rule_matches(rule: PolicyLayerRuleInfo, positional_args: list[str], options: list[dict]) -> bool:
+def _rule_matches(rule: PolicyLayerRuleInfo, positional_args: list[str], options: list[dict], cwd: str = "") -> bool:
     """A positional_constraints entry beyond what was actually supplied is
     matched as "" -- same coercion the option loop below uses for a missing
     value -- so a blank pattern there means "value not required" with no
-    separate sentinel needed."""
+    separate sentinel needed. cwd is checked against rule.cwd RAW (no
+    path_resolution mechanism applies to it -- see Pattern's own docstring
+    for why), same as the Go daemon's own ruleMatches."""
+    if not _pattern_matches(cwd, rule.cwd):
+        return False
     for i, pattern in enumerate(rule.positional_constraints):
         value = positional_args[i] if i < len(positional_args) else ""
-        if not _pattern_matches(value, pattern):
+        if not _pattern_matches(value, pattern, cwd):
             return False
     for constraint in rule.option_constraints:
         supplied = _find_option(options, constraint.short, constraint.long)
@@ -53,7 +71,7 @@ def _rule_matches(rule: PolicyLayerRuleInfo, positional_args: list[str], options
         value = supplied.get("value")
         if value is None:
             value = ""
-        if not _pattern_matches(value, constraint.pattern):
+        if not _pattern_matches(value, constraint.pattern, cwd):
             return False
     return True
 
@@ -80,13 +98,15 @@ def match_policy(
     composed: list[tuple[int, PolicyLayerRuleInfo]],
     positional_args: list[str],
     options: list[dict],
+    cwd: str = "",
 ) -> tuple[int | None, PolicyLayerRuleInfo | None]:
     """First-match-wins over an already-composed policy (see compose_policy
     above). Returns (None, None) -- terminal deny -- when nothing matches,
     including when the policy has no rules at all (e.g. zero layers
-    supplied)."""
+    supplied). cwd is this call's effective directory (best-effort here --
+    see _pattern_matches -- accurate only on the Go daemon's own copy)."""
     for layer_id, rule in composed:
-        if _rule_matches(rule, positional_args, options):
+        if _rule_matches(rule, positional_args, options, cwd):
             return layer_id, rule
     return None, None
 
@@ -96,7 +116,8 @@ def describe_pattern(pattern: Pattern) -> str:
     Pattern object -- used by conversations.py's run_shell_command tool
     description, so the model sees a host's effective policy in plain
     English. See Pattern's own docstring (models.py) for the three-state
-    whitelist/blacklist semantics this renders."""
+    whitelist/blacklist semantics this renders, and for what
+    path_resolution means."""
     has_blacklist = pattern.blacklist and pattern.blacklist != BLACKLIST_MATCHES_NOTHING
     if pattern.whitelist == "^$" and not has_blacklist:
         return "value not allowed"
@@ -105,6 +126,8 @@ def describe_pattern(pattern: Pattern) -> str:
         parts.append(f"must match {pattern.whitelist!r}")
     if has_blacklist:
         parts.append(f"must not match {pattern.blacklist!r}")
+    if pattern.path_resolution:
+        parts.append(f"checked against its {pattern.path_resolution!r}-resolved value")
     return ", ".join(parts) if parts else "value not required"
 
 
@@ -112,7 +135,7 @@ def describe_rule(rule: PolicyLayerRuleInfo) -> str:
     """One rule's constraints + tier in prose -- see describe_pattern."""
     lines = []
     for i, pattern in enumerate(rule.positional_constraints):
-        label = "binary" if i == 0 else f"position {i}"
+        label = "binary (always checked against its $PATH-resolved path)" if i == 0 else f"position {i}"
         lines.append(f"{label}: {describe_pattern(pattern)}")
     for opt in rule.option_constraints:
         if opt.long and opt.short:
@@ -122,5 +145,7 @@ def describe_rule(rule: PolicyLayerRuleInfo) -> str:
         else:
             name = f"-{opt.short}"
         lines.append(f"option {name}: {describe_pattern(opt.pattern)}")
+    if rule.cwd.whitelist or (rule.cwd.blacklist and rule.cwd.blacklist != BLACKLIST_MATCHES_NOTHING):
+        lines.append(f"cwd: {describe_pattern(rule.cwd)}")
     body = "; ".join(lines) if lines else "(no constraints)"
     return f"tier={rule.tier}: {body}"

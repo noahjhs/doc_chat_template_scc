@@ -3,44 +3,33 @@
 *your friendly ghost.*
 
 A small background app (the Go agent, in `agent/`) that lets your account's
-signed-in web session act on your own machine: a fixed, allowlisted set of
-local commands confined to a workspace of directories you choose, a
-policy-governed shell command tool (rules you author yourself, see the
-`harness` package), and file transfer to/from another connected machine or
-your own private server storage.
+signed-in web session act on your own machine: a policy-governed shell
+command tool (rules you author yourself, see the `harness` package), plus
+file transfer to/from another connected machine or your own private server
+storage.
 
 ## Run it
 
-Move it wherever you'd like its workspace to live, then open it once.
-Casper appears as a small icon in your status bar (look for 👻) and quietly
-waits there — consider adding it to your Login Items so it's always ready.
+Open it once. Casper appears as a small icon in your status bar (look for
+👻) and quietly waits there — consider adding it to your Login Items so
+it's always ready.
 
 It doesn't open a sign-in tab itself. Instead, sign in from the website
 (wherever `AUTH_SERVICE_DOMAIN`/`APP_SUBDOMAIN_DOMAIN` point this build at)
 — on success, the site hands a `casper://pair` URL to this app, which
-completes pairing automatically, no copy-pasting a token or key. From then
-on, add directories to its workspace from the site's own sidebar ("Add
-directory" opens a native folder picker on this machine).
+completes pairing automatically, no copy-pasting a token or key.
 
 ## What it can do
 
-**Addressable directories** — whichever folders you've added via the web
-app's own "Add directory" control (sidebar's Workspace section). Every
-action below is confined to those trees; it can never read, write, or
-navigate outside them, no matter what path a request asks for (including
-via `..` or a symlink).
-
-**Local commands** (a fixed allowlist, always available):
-- Git — `status`, `branch -a`, `log --oneline`
-- Navigation — `pwd`, `cd`, `ls`, `tree`, `list_directories`
-- Management — `mkdir`, `touch`, `cp`, `mv`, `rm`, `rmdir` (`rm` only
-  deletes a single file; `rmdir` only removes an already-empty directory —
-  neither one ever deletes recursively)
-- Viewing & Searching — `cat`, `less`, `head`, `tail`, `grep`, `find`
+**Confined directory** — everything below is confined to your home
+directory (computed once at startup); it can never read, write, or run in
+anything outside it, no matter what path a request asks for (including via
+`..` or a symlink).
 
 **Shell commands** — arbitrary binaries/arguments, but only ever run if
 they match a rule in one of the Policy Layers attached to this host (see
-the `harness` package's `policy apply` for authoring these); an
+the `harness` package's `policy apply` for authoring these, including
+optional `cwd` and per-argument `path_resolution` constraints); an
 unattached-by-default host runs nothing at all. Each rule's tier decides
 what happens next: `allow` runs immediately, `ask` pauses for your
 explicit approval (in the client driving the conversation, or as a native
@@ -75,5 +64,5 @@ baked-in `auth_server.dev.txt`/`relay_server.dev.txt`/`app_server.dev.txt`
 domain files instead of the plain (prod) ones — see the script's own
 comments for the full dev/prod domain-targeting story. There is currently
 no equivalent Windows build script, even though the agent's own source has
-Windows-specific files (`agent/internal/config/workspace_windows.go` etc.)
-— Windows support is a known, tracked gap, not yet built.
+Windows-specific files — Windows support is a known, tracked gap, not yet
+built.

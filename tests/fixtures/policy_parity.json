@@ -1,12 +1,26 @@
 {
-  "$comment": "Shared parity fixture for the two independent rule-matching implementations: agent/internal/commands/policy.go (matchPolicy, authoritative for a real dispatched call) and auth_service/policy.py (match_policy, canonical for /policies/eval and the tier decision). Both agent/internal/commands/parity_test.go and tests/test_policy_parity.py load this exact file and must agree on every case. Deliberately excludes any \"{roots}\" rule -- the two implementations are intentionally NOT comparable there (Go resolves against a real filesystem/cwd; Python only approximates against a supplied roots list) -- see Pattern's own docstring in auth_service/models.py.",
+  "$comment": "Shared parity fixture for the two independent rule-matching implementations: agent/internal/commands/policy.go (matchPolicy, authoritative for a real dispatched call) and auth_service/policy.py (match_policy, canonical for /policies/eval and the tier decision). Both agent/internal/commands/parity_test.go and tests/test_policy_parity.py load this exact file and must agree on every case. Deliberately excludes any \"{roots}\" rule -- the two implementations are intentionally NOT comparable there (Go resolves against a real filesystem/cwd; Python only approximates against a supplied roots list) -- see Pattern's own docstring in auth_service/models.py. Also deliberately excludes any path_resolution value other than \"\" (none) -- Go's resolveForMatch does real filesystem/$PATH/MANPATH resolution, Python's own copy can only best-effort string-join for \".\" and matches \"$PATH\"/\"MANPATH\" raw, so the two are not comparable there either; a case's own top-level \"cwd\" (the call's effective directory) and a rule's own \"cwd\" (its Cwd Pattern) ARE comparable, since cwd is never resolution-flagged on either side.",
   "cases": [
     {
       "name": "single rule, exact positional match, allow",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^npm$"
+            },
+            {
+              "whitelist": "^run$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["npm", "run"],
+      "positional_args": [
+        "npm",
+        "run"
+      ],
       "options": [],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
@@ -14,9 +28,23 @@
     {
       "name": "no rule matches, no catch-all -> terminal deny",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^npm$"
+            },
+            {
+              "whitelist": "^run$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["rm", "-rf"],
+      "positional_args": [
+        "rm",
+        "-rf"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
@@ -24,7 +52,9 @@
     {
       "name": "zero rules at all -> terminal deny",
       "rules": [],
-      "positional_args": ["anything"],
+      "positional_args": [
+        "anything"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
@@ -32,10 +62,25 @@
     {
       "name": "first match wins -- earlier allow rule shadows a later catch-all deny",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^npm$"}], "option_constraints": [], "tier": "allow"},
-        {"positional_constraints": [], "option_constraints": [], "tier": "deny"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^npm$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        },
+        {
+          "positional_constraints": [],
+          "option_constraints": [],
+          "tier": "deny"
+        }
       ],
-      "positional_args": ["npm", "run"],
+      "positional_args": [
+        "npm",
+        "run"
+      ],
       "options": [],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
@@ -43,10 +88,25 @@
     {
       "name": "fall through non-matching rule to catch-all deny",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^npm$"}], "option_constraints": [], "tier": "allow"},
-        {"positional_constraints": [], "option_constraints": [], "tier": "deny"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^npm$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        },
+        {
+          "positional_constraints": [],
+          "option_constraints": [],
+          "tier": "deny"
+        }
       ],
-      "positional_args": ["rm", "-rf"],
+      "positional_args": [
+        "rm",
+        "-rf"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": 1
@@ -54,9 +114,20 @@
     {
       "name": "blacklist rejects a value the whitelist alone would accept",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^.*$", "blacklist": "rf"}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^.*$",
+              "blacklist": "rf"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["-rf"],
+      "positional_args": [
+        "-rf"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
@@ -64,9 +135,20 @@
     {
       "name": "blank pattern at a position means value not required -- absent value matches",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^rm$"}, {}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^rm$"
+            },
+            {}
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["rm"],
+      "positional_args": [
+        "rm"
+      ],
       "options": [],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
@@ -74,9 +156,21 @@
     {
       "name": "blank pattern at a position also matches when a value IS supplied",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^rm$"}, {}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^rm$"
+            },
+            {}
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["rm", "anything-at-all"],
+      "positional_args": [
+        "rm",
+        "anything-at-all"
+      ],
       "options": [],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
@@ -84,9 +178,22 @@
     {
       "name": "whitelist \"^$\" means value not allowed -- absent value satisfies it",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^rm$"}, {"whitelist": "^$"}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^rm$"
+            },
+            {
+              "whitelist": "^$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["rm"],
+      "positional_args": [
+        "rm"
+      ],
       "options": [],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
@@ -94,9 +201,23 @@
     {
       "name": "whitelist \"^$\" rejects a position that DOES have a value",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^rm$"}, {"whitelist": "^$"}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^rm$"
+            },
+            {
+              "whitelist": "^$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["rm", "-rf"],
+      "positional_args": [
+        "rm",
+        "-rf"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
@@ -104,19 +225,54 @@
     {
       "name": "required option present with matching value",
       "rules": [
-        {"positional_constraints": [{}], "option_constraints": [{"long": "output", "pattern": {"whitelist": ".+"}}], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {}
+          ],
+          "option_constraints": [
+            {
+              "long": "output",
+              "pattern": {
+                "whitelist": ".+"
+              }
+            }
+          ],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["cmd"],
-      "options": [{"long": "output", "value": "out.txt"}],
+      "positional_args": [
+        "cmd"
+      ],
+      "options": [
+        {
+          "long": "output",
+          "value": "out.txt"
+        }
+      ],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
     },
     {
       "name": "required option missing entirely -- rule does not match",
       "rules": [
-        {"positional_constraints": [{}], "option_constraints": [{"long": "output", "pattern": {"whitelist": ".+"}}], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {}
+          ],
+          "option_constraints": [
+            {
+              "long": "output",
+              "pattern": {
+                "whitelist": ".+"
+              }
+            }
+          ],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["cmd"],
+      "positional_args": [
+        "cmd"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
@@ -124,39 +280,106 @@
     {
       "name": "option pattern \"^$\" requires presence with no value -- valueless option satisfies it",
       "rules": [
-        {"positional_constraints": [{}], "option_constraints": [{"long": "force", "pattern": {"whitelist": "^$"}}], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {}
+          ],
+          "option_constraints": [
+            {
+              "long": "force",
+              "pattern": {
+                "whitelist": "^$"
+              }
+            }
+          ],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["cmd"],
-      "options": [{"long": "force"}],
+      "positional_args": [
+        "cmd"
+      ],
+      "options": [
+        {
+          "long": "force"
+        }
+      ],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
     },
     {
       "name": "option pattern \"^$\" rejects the option when it DOES carry a value",
       "rules": [
-        {"positional_constraints": [{}], "option_constraints": [{"long": "force", "pattern": {"whitelist": "^$"}}], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {}
+          ],
+          "option_constraints": [
+            {
+              "long": "force",
+              "pattern": {
+                "whitelist": "^$"
+              }
+            }
+          ],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["cmd"],
-      "options": [{"long": "force", "value": "yes"}],
+      "positional_args": [
+        "cmd"
+      ],
+      "options": [
+        {
+          "long": "force",
+          "value": "yes"
+        }
+      ],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
     },
     {
       "name": "option matched by short form when rule constrains by long form's counterpart short",
       "rules": [
-        {"positional_constraints": [{}], "option_constraints": [{"short": "f", "pattern": {}}], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {}
+          ],
+          "option_constraints": [
+            {
+              "short": "f",
+              "pattern": {}
+            }
+          ],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["cmd"],
-      "options": [{"short": "f", "value": "anything"}],
+      "positional_args": [
+        "cmd"
+      ],
+      "options": [
+        {
+          "short": "f",
+          "value": "anything"
+        }
+      ],
       "expected_tier": "allow",
       "expected_matched_rule_index": 0
     },
     {
       "name": "anchored whitelist does not match a superstring",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^npm$"}], "option_constraints": [], "tier": "allow"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^npm$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
       ],
-      "positional_args": ["npmx"],
+      "positional_args": [
+        "npmx"
+      ],
       "options": [],
       "expected_tier": "deny",
       "expected_matched_rule_index": null
@@ -164,10 +387,28 @@
     {
       "name": "multiple layers concatenated -- second layer's rule matches after first layer's rules fall through",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^npm$"}], "option_constraints": [], "tier": "allow"},
-        {"positional_constraints": [{"whitelist": "^git$"}], "option_constraints": [], "tier": "ask"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^npm$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        },
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^git$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "ask"
+        }
       ],
-      "positional_args": ["git"],
+      "positional_args": [
+        "git"
+      ],
       "options": [],
       "expected_tier": "ask",
       "expected_matched_rule_index": 1
@@ -175,11 +416,90 @@
     {
       "name": "deny-tier rule can itself be the match (not just the implicit terminal deny)",
       "rules": [
-        {"positional_constraints": [{"whitelist": "^curl$"}], "option_constraints": [], "tier": "deny"}
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^curl$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "deny"
+        }
       ],
-      "positional_args": ["curl"],
+      "positional_args": [
+        "curl"
+      ],
       "options": [],
       "expected_tier": "deny",
+      "expected_matched_rule_index": 0
+    },
+    {
+      "name": "cwd constraint matches inside the confined directory",
+      "rules": [
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^ls$"
+            }
+          ],
+          "option_constraints": [],
+          "cwd": {
+            "whitelist": "^/home/alice(/.*)?$"
+          },
+          "tier": "allow"
+        }
+      ],
+      "positional_args": [
+        "ls"
+      ],
+      "options": [],
+      "cwd": "/home/alice/project",
+      "expected_tier": "allow",
+      "expected_matched_rule_index": 0
+    },
+    {
+      "name": "cwd constraint rejects outside the confined directory, falls through to deny",
+      "rules": [
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^ls$"
+            }
+          ],
+          "option_constraints": [],
+          "cwd": {
+            "whitelist": "^/home/alice(/.*)?$"
+          },
+          "tier": "allow"
+        }
+      ],
+      "positional_args": [
+        "ls"
+      ],
+      "options": [],
+      "cwd": "/etc",
+      "expected_tier": "deny",
+      "expected_matched_rule_index": null
+    },
+    {
+      "name": "blank cwd on the rule means any directory",
+      "rules": [
+        {
+          "positional_constraints": [
+            {
+              "whitelist": "^ls$"
+            }
+          ],
+          "option_constraints": [],
+          "tier": "allow"
+        }
+      ],
+      "positional_args": [
+        "ls"
+      ],
+      "options": [],
+      "cwd": "/anywhere/at/all",
+      "expected_tier": "allow",
       "expected_matched_rule_index": 0
     }
   ]

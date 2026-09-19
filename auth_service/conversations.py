@@ -39,16 +39,6 @@ MODEL = "gpt-4.1-mini"
 
 SERVER_STORAGE = "server storage"
 
-# Mirrors the Go daemon's own allowlisted run_local_command actions
-# (agent/internal/commands/commands.go) -- two independent processes, so
-# this list is duplicated rather than imported. Keep in sync by hand.
-COMMAND_CATEGORIES = {
-    "Git": ["status", "branch", "log"],
-    "Navigation": ["pwd", "cd", "ls", "tree", "list_directories"],
-    "Management": ["mkdir", "touch", "cp", "mv", "rm", "rmdir"],
-    "Viewing & Searching": ["cat", "less", "head", "tail", "grep", "find"],
-}
-
 BUILTIN_TOOLS = [
     {"type": "web_search"},
     {"type": "code_interpreter", "container": {"type": "auto"}},
@@ -81,7 +71,6 @@ def _empty_aggregate() -> dict:
         "searches": [],
         "sources": [],
         "code_blocks": [],
-        "local_agent_calls": [],
         "transfer_calls": [],
         "shell_command_calls": [],
         "image": None,
@@ -132,78 +121,6 @@ def is_in_flight(turn: dict | None) -> bool:
     in the same conversation (message/tool_call required, previous
     turn's previous_response_id carried forward)."""
     return turn is not None and (turn.get("pending_calls") is not None or turn.get("awaiting_approval") is not None)
-
-
-def _build_local_agent_tool(configs: dict[str, dict]) -> dict:
-    return {
-        "type": "function",
-        "name": "run_local_command",
-        "description": (
-            "Run a command on the user's local machine via Casper, their local "
-            "agent -- not arbitrary shell access, but a fixed, allowlisted set "
-            "of commands, confined to whichever directories the user has "
-            "explicitly added on that machine (it can't read, write, or "
-            "navigate outside those trees; use 'list_directories' to see what's "
-            "currently addressable -- there may be none yet). "
-            "Categories: Git (status/branch/log), Navigation "
-            "(pwd/cd/ls/tree/list_directories), Management (mkdir/touch/cp/mv/"
-            "rm/rmdir -- 'rm' only deletes a file and 'rmdir' only an "
-            "already-empty directory, never recursively), and Viewing & "
-            "Searching (cat/less/head/tail/grep/find)."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": [cmd for commands in COMMAND_CATEGORIES.values() for cmd in commands],
-                    "description": "Which local command to run.",
-                },
-                "path": {
-                    "type": "string",
-                    "description": (
-                        "Target file or directory. Absolute, or relative to the "
-                        "current directory. Required by most actions except the "
-                        "git ones and 'pwd'; for 'cp'/'mv' this is the source."
-                    ),
-                },
-                "destination": {
-                    "type": "string",
-                    "description": "Destination path -- only used by 'cp' and 'mv'.",
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": (
-                        "Search pattern -- a regex for 'grep', a filename glob "
-                        "like '*.py' for 'find' (defaults to matching everything)."
-                    ),
-                },
-                "lines": {
-                    "type": "integer",
-                    "description": "Number of lines -- only used by 'head' and 'tail' (default 10).",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": (
-                        "Max results -- git log entry count, or max matches for "
-                        "'grep'/'find' (default 5)."
-                    ),
-                },
-                "host": {
-                    "type": "string",
-                    "enum": list(configs.keys()),
-                    "description": (
-                        "Which connected machine to run this on. Usually fine "
-                        "to omit -- if the user is talking about a specific "
-                        "one, name it explicitly, but otherwise it defaults to "
-                        "the only connected host (or whichever default_host "
-                        "was supplied)."
-                    ),
-                },
-            },
-            "required": ["action"],
-        },
-    }
 
 
 def _build_transfer_tool(configs: dict[str, dict]) -> dict:
@@ -257,8 +174,8 @@ def _build_shell_tool(configs: dict[str, dict]) -> dict | None:
     supplies which host to run on, and the daemon (and this description's
     own preview) composes whatever policy layers are attached to THAT host
     into its Policy. Returns None (no tool at all) when no connected host
-    has any policy layers attached, mirroring how run_local_command/
-    transfer_file are only added when configs is non-empty."""
+    has any policy layers attached, mirroring how transfer_file is only
+    added when configs is non-empty."""
     lines = []
     for host, config in configs.items():
         composed = compose_policy(config["policy_layers"])
@@ -317,7 +234,7 @@ def _build_shell_tool(configs: dict[str, dict]) -> dict | None:
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional -- which addressable directory to run in. Defaults to the currently selected directory.",
+                    "description": "Optional -- directory to run in. Defaults to the machine's own confined directory.",
                 },
                 "host": {
                     "type": "string",
@@ -325,8 +242,7 @@ def _build_shell_tool(configs: dict[str, dict]) -> dict | None:
                     "description": (
                         "Which connected machine to run this on. Usually fine to "
                         "omit -- defaults to the only connected host (or "
-                        "whichever default_host was supplied), same as "
-                        "run_local_command."
+                        "whichever default_host was supplied)."
                     ),
                 },
             },
@@ -338,7 +254,6 @@ def _build_shell_tool(configs: dict[str, dict]) -> dict | None:
 def build_tools(configs: dict[str, dict]) -> list[dict]:
     tools = list(BUILTIN_TOOLS)
     if configs:
-        tools.append(_build_local_agent_tool(configs))
         tools.append(_build_transfer_tool(configs))
     shell_tool = _build_shell_tool(configs)
     if shell_tool:
@@ -355,10 +270,10 @@ def _daemon_error_detail(response, fallback: str) -> str:
 
 
 def _fetch_local_json(config: dict, action: str, **kwargs) -> dict:
-    """Like _call_local_agent below, but returns the parsed response dict
-    (or an error dict in the same {success, stdout, stderr} shape
-    commands.Result already uses) instead of a model-facing string -- used
-    by _call_transfer_file's read/write-a-connected-host halves."""
+    """POSTs one daemon action and returns the parsed response dict (or an
+    error dict in the same {success, stdout, stderr} shape commands.Result
+    already uses) -- used by _call_transfer_file's read/write-a-connected-
+    host halves."""
     try:
         response = requests.post(
             f"{config['url']}/api/command",
@@ -401,28 +316,6 @@ def _resolve_host(
         available = ", ".join(configs)
         return None, None, f"unknown host {host!r}. Available: {available}."
     return host, config, None
-
-
-def _call_local_agent(configs, action, host, default_host, mock, **kwargs) -> str:
-    _resolved_host, config, err = _resolve_host(configs, host, default_host)
-    if err:
-        return f"Local agent error: {err}"
-    if mock:
-        return json.dumps({"mock": True, "action": action, **{k: v for k, v in kwargs.items() if v is not None}})
-    try:
-        response = requests.post(
-            f"{config['url']}/api/command",
-            json={"action": action, **kwargs},
-            headers={"X-API-Key": config["api_key"]},
-            timeout=15,
-        )
-        if response.status_code == 401:
-            return "Local agent error: invalid API key."
-        if response.status_code >= 400:
-            return f"Local agent error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
-        return json.dumps(response.json())
-    except requests.RequestException as e:
-        return f"Local agent error: {e}"
 
 
 def _call_shell_command(configs, positional_args, options, host, default_host, path, mock) -> str:
@@ -511,22 +404,7 @@ def _dispatch_tool_call(call: dict, ctx: DispatchContext, aggregate: dict) -> st
     run_shell_command still awaiting approval; _drain_pending_calls
     intercepts those before they ever reach here."""
     args = json.loads(call["arguments"])
-    if call["name"] == "run_local_command":
-        action = args.get("action", "")
-        output = _call_local_agent(
-            ctx.configs,
-            action,
-            host=args.get("host"),
-            default_host=ctx.default_host,
-            mock=ctx.mock,
-            path=args.get("path"),
-            destination=args.get("destination"),
-            pattern=args.get("pattern"),
-            lines=args.get("lines", 10),
-            limit=args.get("limit", 5),
-        )
-        aggregate["local_agent_calls"].append({"action": action, "args": args, "output": output})
-    elif call["name"] == "transfer_file":
+    if call["name"] == "transfer_file":
         output = _call_transfer_file(
             ctx.configs, args.get("source"), args.get("source_path"), args.get("destination"), args.get("destination_path"), ctx
         )
@@ -551,9 +429,18 @@ def _decide_tier(resolved_config: dict | None, args: dict) -> str:
     """Finds the first matching rule in the already-composed policy of the
     host resolve_host resolved (None if that failed -- an unresolved host
     has no policy to check, so this falls back to "deny", same "absence
-    means deny" posture the daemon itself uses) and returns its tier."""
+    means deny" posture the daemon itself uses) and returns its tier. cwd
+    is the call's own path (args["path"], already threaded through by
+    run_shell_command's own tool schema) when the model explicitly
+    overrode it, else resolved_config's own cached cwd -- the daemon's
+    reported homeRoot (see main.py's report_host_presence), kept fresh
+    without a live round-trip on every call (see
+    agent/internal/config/presence.go's own doc comment). Still only ever
+    a best-effort preview (see match_policy's own docstring) -- the Go
+    daemon's own resolvePath-derived cwd is what's actually enforced."""
     composed = compose_policy(resolved_config["policy_layers"]) if resolved_config else []
-    _, matched_rule = match_policy(composed, args.get("positional_args") or [], args.get("options") or [])
+    cwd = args.get("path") or (resolved_config or {}).get("cwd") or ""
+    _, matched_rule = match_policy(composed, args.get("positional_args") or [], args.get("options") or [], cwd)
     return matched_rule.tier if matched_rule else "deny"
 
 

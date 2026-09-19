@@ -38,16 +38,15 @@ def _create_policy_layer(client, headers, name="npm scripts"):
     return client.post("/policy-layers", json={"name": name}, headers=headers).json()
 
 
-def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask"):
-    return client.post(
-        f"/policy-layers/{layer_id}/rules",
-        json={
-            "positional_constraints": positional_constraints,
-            "option_constraints": option_constraints or [],
-            "tier": tier,
-        },
-        headers=headers,
-    ).json()
+def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask", cwd=None):
+    body = {
+        "positional_constraints": positional_constraints,
+        "option_constraints": option_constraints or [],
+        "tier": tier,
+    }
+    if cwd is not None:
+        body["cwd"] = cwd
+    return client.post(f"/policy-layers/{layer_id}/rules", json=body, headers=headers).json()
 
 
 def _eval(client, headers, **body):
@@ -160,6 +159,78 @@ def test_eval_option_pattern_states(client):
         options=[{"long": "force", "value": "yes"}, {"long": "output", "value": "out.txt"}],
     ).json()
     assert force_with_disallowed_value["tier"] == "deny"
+
+
+def test_eval_cwd_constraint(client):
+    signup = _signup(client, "cwd-user")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    layer = _create_policy_layer(client, headers)
+    _add_rule(
+        client, headers, layer["id"], [{}], tier="allow", cwd={"whitelist": "^/home/alice(/.*)?$"}
+    )
+
+    inside = _eval(
+        client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"], cwd="/home/alice/project"
+    ).json()
+    assert inside["tier"] == "allow"
+
+    outside = _eval(
+        client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"], cwd="/etc"
+    ).json()
+    assert outside["tier"] == "deny"
+
+    # cwd omitted entirely ("") doesn't satisfy a non-blank cwd pattern --
+    # same fail-closed posture as every other constraint.
+    omitted = _eval(client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"]).json()
+    assert omitted["tier"] == "deny"
+
+
+def test_eval_blank_cwd_means_any_directory(client):
+    signup = _signup(client, "cwd-user2")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    layer = _create_policy_layer(client, headers)
+    _add_rule(client, headers, layer["id"], [{}], tier="allow")
+
+    matched = _eval(
+        client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"], cwd="/anywhere/at/all"
+    ).json()
+    assert matched["tier"] == "allow"
+
+
+def test_eval_dot_path_resolution_is_best_effort_join(client):
+    """This service can't resolve symlinks (no real filesystem access) --
+    it does a plain string-join of a relative value against cwd, matched
+    against the pattern as given. See policy.py's own module docstring for
+    why the Go daemon, not this preview, is what actually enforces this
+    accurately."""
+    signup = _signup(client, "cwd-user3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    layer = _create_policy_layer(client, headers)
+    _add_rule(
+        client,
+        headers,
+        layer["id"],
+        [{}, {"whitelist": "^/home/alice/notes\\.txt$", "path_resolution": "."}],
+        tier="allow",
+    )
+
+    joined = _eval(
+        client,
+        headers,
+        policy_layer_ids=[layer["id"]],
+        positional_args=["cat", "notes.txt"],
+        cwd="/home/alice",
+    ).json()
+    assert joined["tier"] == "allow"
+
+    elsewhere = _eval(
+        client,
+        headers,
+        policy_layer_ids=[layer["id"]],
+        positional_args=["cat", "notes.txt"],
+        cwd="/etc",
+    ).json()
+    assert elsewhere["tier"] == "deny"
 
 
 def test_eval_ownership_enforced(client):

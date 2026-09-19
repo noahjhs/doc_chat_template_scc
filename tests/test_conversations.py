@@ -73,12 +73,12 @@ def _signup(client, username):
     return client.post("/signup", json={"username": username, "password": "correct-horse"}).json()
 
 
-def _pair_and_connect_host(client, headers, routing_key, hostname, workspace=None):
+def _pair_and_connect_host(client, headers, routing_key, hostname, cwd=""):
     pair = client.post("/hosts/pair", json={"routing_key": routing_key, "hostname": hostname}, headers=headers).json()
     device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
     client.post(
         "/hosts/presence",
-        json={"local_agent_url": f"https://relay.example/agent/{hostname}", "workspace": workspace or []},
+        json={"local_agent_url": f"https://relay.example/agent/{hostname}", "cwd": cwd},
         headers=device_headers,
     )
     return pair
@@ -88,12 +88,11 @@ def _create_policy_layer(client, headers, name="test layer"):
     return client.post("/policy-layers", json={"name": name}, headers=headers).json()
 
 
-def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask"):
-    return client.post(
-        f"/policy-layers/{layer_id}/rules",
-        json={"positional_constraints": positional_constraints, "option_constraints": option_constraints or [], "tier": tier},
-        headers=headers,
-    ).json()
+def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask", cwd=None):
+    body = {"positional_constraints": positional_constraints, "option_constraints": option_constraints or [], "tier": tier}
+    if cwd is not None:
+        body["cwd"] = cwd
+    return client.post(f"/policy-layers/{layer_id}/rules", json=body, headers=headers).json()
 
 
 def _step(client, headers, **body):
@@ -153,7 +152,7 @@ def test_conversation_rejects_message_and_tool_call_together(app_env):
     _main, client = app_env
     signup = _signup(client, "dave")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    r = _step(client, headers, message="hi", tool_call={"name": "run_local_command", "arguments": {}})
+    r = _step(client, headers, message="hi", tool_call={"name": "run_shell_command", "arguments": {}})
     assert r.status_code == 422
 
 
@@ -161,7 +160,10 @@ def test_conversation_tool_call_injection_dispatches_with_mock(app_env):
     main, client = app_env
     signup = _signup(client, "erin")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    _pair_and_connect_host(client, headers, "rk-erin-1", "erins-mac")
+    pair = _pair_and_connect_host(client, headers, "rk-erin-1", "erins-mac")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^echo$"}], tier="allow")
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
 
     fake = FakeClient([FakeResponse(id="resp_1", output_text="Ran it.")])
     main._get_openai_client = lambda: fake
@@ -169,17 +171,17 @@ def test_conversation_tool_call_injection_dispatches_with_mock(app_env):
     r = _step(
         client,
         headers,
-        tool_call={"name": "run_local_command", "arguments": {"action": "pwd"}},
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["echo", "hi"]}},
         mock=True,
     )
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "done"
-    calls = body["turn"]["aggregate"]["local_agent_calls"]
+    calls = body["turn"]["aggregate"]["shell_command_calls"]
     assert len(calls) == 1
     output = json.loads(calls[0]["output"])
     assert output["mock"] is True
-    assert output["action"] == "pwd"
+    assert output["positional_args"] == ["echo", "hi"]
     # The model saw the forced call's own function_call + function_call_output
     # as its first-hop input -- confirmed by the fake having been called at
     # all with previous_response_id None (a fresh conversation).
@@ -247,6 +249,67 @@ def test_conversation_shell_command_ask_tier_pauses_then_resumes(app_env):
     assert len(fake.responses.calls) == 1  # the follow-up hop, after resuming
 
 
+def test_conversation_shell_command_cwd_scoped_tier_decision(app_env):
+    """_decide_tier threads args["path"] through as cwd -- a rule scoped to
+    one directory allows a call whose path matches it and denies (never
+    pauses) one that doesn't, purely from this service's own tier preview,
+    no daemon/mock dispatch needed to observe the decision."""
+    main, client = app_env
+    signup = _signup(client, "iris")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    pair = _pair_and_connect_host(client, headers, "rk-iris-1", "iris-mac")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(
+        client, headers, layer["id"], [{"whitelist": "^ls$"}], tier="allow", cwd={"whitelist": "^/home/iris(/.*)?$"}
+    )
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+
+    fake = FakeClient([FakeResponse(id="resp_1", output_text="done"), FakeResponse(id="resp_2", output_text="done")])
+    main._get_openai_client = lambda: fake
+
+    allowed = _step(
+        client,
+        headers,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["ls"], "path": "/home/iris/docs"}},
+        mock=True,
+    ).json()
+    assert allowed["status"] == "done"
+    assert json.loads(allowed["turn"]["aggregate"]["shell_command_calls"][0]["output"])["mock"] is True
+
+    denied = _step(
+        client,
+        headers,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["ls"], "path": "/etc"}},
+        mock=True,
+    ).json()
+    assert denied["status"] == "done"
+    assert denied["turn"]["aggregate"]["shell_command_calls"][0]["output"] == "Denied by policy (no matching rule allows this call)."
+
+
+def test_conversation_shell_command_falls_back_to_presence_reported_cwd(app_env):
+    """When the model's own call doesn't override `path`, _decide_tier uses
+    the host's presence-reported cwd (its daemon's own homeRoot) as the
+    join base for a cwd-constrained rule -- no explicit path needed."""
+    main, client = app_env
+    signup = _signup(client, "jill")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    pair = _pair_and_connect_host(client, headers, "rk-jill-1", "jills-mac", cwd="/home/jill")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(
+        client, headers, layer["id"], [{"whitelist": "^ls$"}], tier="allow", cwd={"whitelist": "^/home/jill(/.*)?$"}
+    )
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+
+    fake = FakeClient([FakeResponse(id="resp_1", output_text="done")])
+    main._get_openai_client = lambda: fake
+
+    r = _step(
+        client, headers, tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["ls"]}}, mock=True
+    ).json()
+    assert r["status"] == "done"
+    assert json.loads(r["turn"]["aggregate"]["shell_command_calls"][0]["output"])["mock"] is True
+
+
 def test_conversation_shell_command_denied_by_user(app_env):
     main, client = app_env
     signup = _signup(client, "hank")
@@ -294,7 +357,10 @@ def test_conversation_default_host_used_for_ambiguous_call(app_env):
     signup = _signup(client, "jack")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     _pair_and_connect_host(client, headers, "rk-jack-1", "jacks-laptop")
-    _pair_and_connect_host(client, headers, "rk-jack-2", "jacks-mini")
+    pair2 = _pair_and_connect_host(client, headers, "rk-jack-2", "jacks-mini")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^pwd$"}], tier="allow")
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair2['host_id']}", headers=headers)
 
     fake = FakeClient([FakeResponse(id="resp_1", output_text="done")])
     main._get_openai_client = lambda: fake
@@ -302,16 +368,21 @@ def test_conversation_default_host_used_for_ambiguous_call(app_env):
     r = _step(
         client,
         headers,
-        tool_call={"name": "run_local_command", "arguments": {"action": "pwd"}},
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["pwd"]}},
         default_host="jacks-mini",
         mock=True,
     ).json()
     assert r["status"] == "done"
-    output = json.loads(r["turn"]["aggregate"]["local_agent_calls"][0]["output"])
+    output = json.loads(r["turn"]["aggregate"]["shell_command_calls"][0]["output"])
     assert output["mock"] is True
 
 
 def test_conversation_ambiguous_host_without_default_errors(app_env):
+    """Unlike a tool that resolves its own host directly (e.g. transfer_file),
+    run_shell_command's host resolution happens as a side effect of tier
+    decision (_decide_tier composes an unresolved host's policy as empty) --
+    an ambiguous host with no default therefore surfaces as a policy denial,
+    not a distinct "which host?" error message."""
     main, client = app_env
     signup = _signup(client, "karen")
     headers = {"Authorization": f"Bearer {signup['token']}"}
@@ -322,10 +393,10 @@ def test_conversation_ambiguous_host_without_default_errors(app_env):
     main._get_openai_client = lambda: fake
 
     r = _step(
-        client, headers, tool_call={"name": "run_local_command", "arguments": {"action": "pwd"}}, mock=True
+        client, headers, tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["pwd"]}}, mock=True
     ).json()
-    output = r["turn"]["aggregate"]["local_agent_calls"][0]["output"]
-    assert "multiple machines connected" in output
+    output = r["turn"]["aggregate"]["shell_command_calls"][0]["output"]
+    assert output == "Denied by policy (no matching rule allows this call)."
 
 
 def test_conversation_model_initiated_tool_call(app_env):
@@ -335,7 +406,10 @@ def test_conversation_model_initiated_tool_call(app_env):
     main, client = app_env
     signup = _signup(client, "laura")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    _pair_and_connect_host(client, headers, "rk-laura-1", "lauras-mac")
+    pair = _pair_and_connect_host(client, headers, "rk-laura-1", "lauras-mac")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^pwd$"}], tier="allow")
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
 
     first_hop = FakeResponse(
         id="resp_1",
@@ -344,8 +418,8 @@ def test_conversation_model_initiated_tool_call(app_env):
             FakeItem(
                 type="function_call",
                 call_id="call_abc",
-                name="run_local_command",
-                arguments=json.dumps({"action": "pwd"}),
+                name="run_shell_command",
+                arguments=json.dumps({"positional_args": ["pwd"]}),
             )
         ],
     )
@@ -356,7 +430,7 @@ def test_conversation_model_initiated_tool_call(app_env):
     r = _step(client, headers, message="where am I?", mock=True).json()
     assert r["status"] == "done"
     assert r["message"] == "You're in /Users/laura."
-    assert len(r["turn"]["aggregate"]["local_agent_calls"]) == 1
+    assert len(r["turn"]["aggregate"]["shell_command_calls"]) == 1
     # The second hop's input was the function_call_output fed back.
     second_call_input = fake.responses.calls[1]["input"]
     assert second_call_input[0]["type"] == "function_call_output"

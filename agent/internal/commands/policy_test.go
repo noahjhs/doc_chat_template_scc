@@ -2,12 +2,27 @@ package commands
 
 import (
 	"os"
+	"os/exec"
 	"regexp"
 	"testing"
 )
 
 func mustWhitelist(pattern string) Pattern {
 	return Pattern{Whitelist: regexp.MustCompile(pattern)}
+}
+
+// mustResolvedBinaryWhitelist builds an exact-match whitelist against name's
+// own $PATH-resolved absolute path -- what a position-0 constraint must
+// match against now that runRunShellCommand always resolves the binary
+// before matching (see Rule's own doc comment), rather than the bare name a
+// pre-resolution rule could match directly.
+func mustResolvedBinaryWhitelist(t *testing.T, name string) Pattern {
+	t.Helper()
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s not found on $PATH -- skipping", name)
+	}
+	return mustWhitelist("^" + regexp.QuoteMeta(resolved) + "$")
 }
 
 // unconstrained is a blank pattern -- "value not required" -- used
@@ -30,13 +45,13 @@ func TestRuleMatches_Positional(t *testing.T) {
 		PositionalConstraints: []Pattern{mustWhitelist("^echo$"), mustWhitelist("^hello$")},
 		Tier:                  "allow",
 	}
-	if !h.ruleMatches(rule, []string{"echo", "hello"}, nil) {
+	if !h.ruleMatches(rule, []string{"echo", "hello"}, nil, "") {
 		t.Fatal("expected a match")
 	}
-	if h.ruleMatches(rule, []string{"echo", "goodbye"}, nil) {
+	if h.ruleMatches(rule, []string{"echo", "goodbye"}, nil, "") {
 		t.Fatal("expected no match -- position 1 doesn't satisfy the pattern")
 	}
-	if h.ruleMatches(rule, []string{"echo"}, nil) {
+	if h.ruleMatches(rule, []string{"echo"}, nil, "") {
 		t.Fatal("expected no match -- position 1 has a real constraint but nothing was supplied")
 	}
 }
@@ -49,10 +64,10 @@ func TestRuleMatches_EmptyPositionalConstraintsMatchAnyBinary(t *testing.T) {
 	// it, same as any position beyond a shorter list already does.
 	h, _ := newTestHandler(t)
 	rule := Rule{Tier: "allow"}
-	if !h.ruleMatches(rule, []string{"echo", "hello"}, nil) {
+	if !h.ruleMatches(rule, []string{"echo", "hello"}, nil, "") {
 		t.Fatal("expected a match -- no positional constraints at all")
 	}
-	if !h.ruleMatches(rule, []string{"rm", "-rf", "/"}, nil) {
+	if !h.ruleMatches(rule, []string{"rm", "-rf", "/"}, nil, "") {
 		t.Fatal("expected a match -- still no positional constraints, regardless of the binary")
 	}
 }
@@ -63,15 +78,15 @@ func TestRuleMatches_UnconstrainedEarlyPositionDoesntBlockALaterOne(t *testing.T
 		PositionalConstraints: []Pattern{unconstrained(), unconstrained(), mustWhitelist("^world$")},
 		Tier:                  "allow",
 	}
-	if !h.ruleMatches(rule, []string{"echo", "hello", "world"}, nil) {
+	if !h.ruleMatches(rule, []string{"echo", "hello", "world"}, nil, "") {
 		t.Fatal("expected a match -- positions 0/1 accept anything, only position 2 is real")
 	}
-	if h.ruleMatches(rule, []string{"echo", "hello", "there"}, nil) {
+	if h.ruleMatches(rule, []string{"echo", "hello", "there"}, nil, "") {
 		t.Fatal("expected no match -- position 2 fails")
 	}
 	// Positions 0/1 don't even need to be SUPPLIED, not just any value --
 	// same coercion-to-"" the option loop uses.
-	if h.ruleMatches(rule, []string{"echo"}, nil) {
+	if h.ruleMatches(rule, []string{"echo"}, nil, "") {
 		t.Fatal("expected no match -- position 2 still has nothing to check against")
 	}
 }
@@ -87,13 +102,13 @@ func TestRuleMatches_PositionalValueNotAllowed(t *testing.T) {
 		PositionalConstraints: []Pattern{mustWhitelist("^rm$"), valueNotAllowed()},
 		Tier:                  "deny",
 	}
-	if !h.ruleMatches(rule, []string{"rm"}, nil) {
+	if !h.ruleMatches(rule, []string{"rm"}, nil, "") {
 		t.Fatal("expected a match -- position 1 wasn't supplied at all")
 	}
-	if !h.ruleMatches(rule, []string{"rm", ""}, nil) {
+	if !h.ruleMatches(rule, []string{"rm", ""}, nil, "") {
 		t.Fatal("expected a match -- position 1 was explicitly supplied as an empty string")
 	}
-	if h.ruleMatches(rule, []string{"rm", "-rf"}, nil) {
+	if h.ruleMatches(rule, []string{"rm", "-rf"}, nil, "") {
 		t.Fatal("expected no match -- position 1 has a real value, which \"^$\" forbids")
 	}
 }
@@ -108,13 +123,13 @@ func TestRuleMatches_OptionEmptyStringWhitelistRequiresNoValue(t *testing.T) {
 		OptionConstraints:     []OptionConstraint{{Long: "force", Pattern: mustWhitelist("^$")}},
 	}
 	noValue := "no"
-	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "force", Value: nil}}) {
+	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "force", Value: nil}}, "") {
 		t.Fatal("expected a match -- option present with no value, matched as \"\"")
 	}
-	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "force", Value: &noValue}}) {
+	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "force", Value: &noValue}}, "") {
 		t.Fatal("expected no match -- a value was supplied but the constraint requires none")
 	}
-	if h.ruleMatches(rule, []string{"echo"}, nil) {
+	if h.ruleMatches(rule, []string{"echo"}, nil, "") {
 		t.Fatal("expected no match -- option not present at all")
 	}
 }
@@ -126,10 +141,10 @@ func TestRuleMatches_OptionBlankPatternAcceptsAnyOrNoValue(t *testing.T) {
 		OptionConstraints:     []OptionConstraint{{Short: "v", Pattern: Pattern{}}},
 	}
 	anything := "anything"
-	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Short: "v", Value: nil}}) {
+	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Short: "v", Value: nil}}, "") {
 		t.Fatal("expected a match with no value")
 	}
-	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Short: "v", Value: &anything}}) {
+	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Short: "v", Value: &anything}}, "") {
 		t.Fatal("expected a match with any value")
 	}
 }
@@ -142,13 +157,13 @@ func TestRuleMatches_OptionValuePattern(t *testing.T) {
 	}
 	jsonValue := "json"
 	xmlValue := "xml"
-	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: &jsonValue}}) {
+	if !h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: &jsonValue}}, "") {
 		t.Fatal("expected a match -- value satisfies the pattern")
 	}
-	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: &xmlValue}}) {
+	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: &xmlValue}}, "") {
 		t.Fatal("expected no match -- value doesn't satisfy the pattern")
 	}
-	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: nil}}) {
+	if h.ruleMatches(rule, []string{"echo"}, []RequestOption{{Long: "format", Value: nil}}, "") {
 		t.Fatal("expected no match -- a missing value is matched as \"\", which doesn't satisfy \"^json$\" either")
 	}
 }
@@ -184,14 +199,14 @@ func TestMatchPolicy_FirstMatchWinsAcrossLayers(t *testing.T) {
 		{ID: 1, Rules: []Rule{{ID: 1, PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "ask"}}},
 		{ID: 2, Rules: []Rule{{ID: 2, PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}},
 	}
-	rule := h.matchPolicy(layers, []string{"echo"}, nil)
+	rule := h.matchPolicy(layers, []string{"echo"}, nil, "")
 	if rule == nil || rule.ID != 1 {
 		t.Fatalf("expected the first (more specific) rule, from layer 1, to win, got %+v", rule)
 	}
 	// A binary layer 1 doesn't recognize still matches, via layer 2's
 	// unconstrained rule -- proof both layers are actually composed, not
 	// just the first one checked.
-	rule = h.matchPolicy(layers, []string{"git"}, nil)
+	rule = h.matchPolicy(layers, []string{"git"}, nil, "")
 	if rule == nil || rule.ID != 2 {
 		t.Fatalf("expected layer 2's rule to win for a binary layer 1 doesn't match, got %+v", rule)
 	}
@@ -202,14 +217,14 @@ func TestMatchPolicy_TerminalDenyWhenNothingMatches(t *testing.T) {
 	layers := []PolicyLayer{
 		{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"}}},
 	}
-	if h.matchPolicy(layers, []string{"echo"}, nil) != nil {
+	if h.matchPolicy(layers, []string{"echo"}, nil, "") != nil {
 		t.Fatal("expected no match (terminal deny)")
 	}
 }
 
 func TestMatchPolicy_NoLayersMeansTerminalDeny(t *testing.T) {
 	h, _ := newTestHandler(t)
-	if h.matchPolicy(nil, []string{"echo"}, nil) != nil {
+	if h.matchPolicy(nil, []string{"echo"}, nil, "") != nil {
 		t.Fatal("expected no match -- zero layers attached composes to zero rules")
 	}
 }
@@ -237,7 +252,7 @@ func TestRunShellCommand_Succeeds(t *testing.T) {
 		ID: 1,
 		Rules: []Rule{{
 			ID:                    1,
-			PositionalConstraints: []Pattern{mustWhitelist("^echo$"), mustWhitelist("^hello$")},
+			PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo"), mustWhitelist("^hello$")},
 			Tier:                  "allow",
 		}},
 	}})
@@ -257,8 +272,8 @@ func TestRunShellCommand_ComposesEveryAttachedLayer(t *testing.T) {
 	// this also confirms the action genuinely doesn't need one.
 	h, _ := newTestHandler(t)
 	h.SetPolicyLayers([]PolicyLayer{
-		{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"}}},
-		{ID: 2, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "allow"}}},
+		{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "git")}, Tier: "allow"}}},
+		{ID: 2, Rules: []Rule{{PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo")}, Tier: "allow"}}},
 	})
 	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}})
 	if err != nil {
@@ -295,14 +310,14 @@ func TestRunShellCommand_RequiresAtLeastTheBinary(t *testing.T) {
 }
 
 func TestRunShellCommand_NoRootsMeansFail(t *testing.T) {
-	h := New(nil, nil)
+	h := New("")
 	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}}})
 	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Success {
-		t.Fatal("expected run_shell_command to fail with zero roots, same as every other confined action")
+		t.Fatal("expected run_shell_command to fail with no homeRoot configured, same as every other confined action")
 	}
 }
 
@@ -322,6 +337,143 @@ func TestRunShellCommand_PathRedirectsDirectoryUnconditionally(t *testing.T) {
 	}
 	if res.Cwd != subdir {
 		t.Fatalf("expected the command to run in %q, got %q", subdir, res.Cwd)
+	}
+}
+
+func TestRunShellCommand_BareBinaryNameNoLongerMatchesUnresolved(t *testing.T) {
+	// The security property Phase 1 adds: a rule constraining position 0
+	// must match the $PATH-RESOLVED absolute path, not the bare name --
+	// confirms a bare "^echo$" whitelist (yesterday's correct way to author
+	// this) now correctly fails to match, rather than silently matching
+	// against the pre-resolution raw string.
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{
+		{PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "allow"},
+	}}})
+	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}}); err == nil {
+		t.Fatal("expected an ActionError -- the bare name no longer matches the resolved absolute path")
+	}
+}
+
+func TestRunShellCommand_UnknownBinaryIsRejected(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}}})
+	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"definitely-not-a-real-binary-xyz"}}); err == nil {
+		t.Fatal("expected an ActionError -- the binary doesn't resolve on $PATH")
+	}
+}
+
+func TestRunShellCommand_CwdConstraint(t *testing.T) {
+	h, root := newTestHandler(t)
+	subdir := root + "/subdir"
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{
+		PositionalConstraints: []Pattern{unconstrained()},
+		Cwd:                   mustWhitelist("^" + regexp.QuoteMeta(subdir) + "$"),
+		Tier:                  "allow",
+	}}}})
+
+	// The rule requires cwd == subdir -- the default root doesn't satisfy
+	// it, so this is rejected even though the positional constraint (the
+	// only other constraint) is wide open.
+	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}}); err == nil {
+		t.Fatal("expected an ActionError -- cwd is the root, not subdir")
+	}
+	// Redirecting into subdir via Path satisfies the Cwd constraint.
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}, Path: subdir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success once cwd matches the Cwd constraint, got %+v", res)
+	}
+}
+
+func TestValueMatchesPatternResolved_DotResolvesSymlinks(t *testing.T) {
+	h, root := newTestHandler(t)
+	secret := root + "/secret"
+	if err := os.Mkdir(secret, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := root + "/safe-looking-link"
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	// A blacklist on the real (symlink-resolved) target, checked against
+	// the SYMLINK's own (safe-looking) name -- would pass under a raw
+	// string match, but PathResolutionDot resolves it to the real target
+	// first, so the blacklist correctly catches it.
+	rule := Rule{
+		PositionalConstraints: []Pattern{
+			unconstrained(),
+			{Blacklist: mustWhitelist("^" + regexp.QuoteMeta(secret)).Whitelist, PathResolution: PathResolutionDot},
+		},
+		Tier: "deny",
+	}
+	if h.ruleMatches(rule, []string{"cat", "safe-looking-link"}, nil, root) {
+		t.Fatal("expected no match -- the symlink resolves into the blacklisted target")
+	}
+}
+
+func TestValueMatchesPatternResolved_DotFailsClosedOnUnresolvable(t *testing.T) {
+	h, root := newTestHandler(t)
+	// A symlink cycle makes EvalSymlinks itself fail ("too many links") --
+	// realpath() otherwise happily resolves a not-yet-existing target, by
+	// design (see its own doc comment), so a merely nonexistent path isn't
+	// itself a resolution failure; a genuine cycle is one of the few ways
+	// to force a real error out of it.
+	a, b := root+"/a", root+"/b"
+	if err := os.Symlink(b, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(a, b); err != nil {
+		t.Fatal(err)
+	}
+	rule := Rule{
+		PositionalConstraints: []Pattern{
+			unconstrained(),
+			{Whitelist: mustWhitelist(".*").Whitelist, PathResolution: PathResolutionDot},
+		},
+		Tier: "allow",
+	}
+	if h.ruleMatches(rule, []string{"cat", "a"}, nil, root) {
+		t.Fatal("expected no match -- a symlink cycle must fail closed, not match anything")
+	}
+}
+
+func TestResolveForMatch_PathMode(t *testing.T) {
+	resolvedEcho, err := exec.LookPath("echo")
+	if err != nil {
+		t.Skip("echo not found on $PATH")
+	}
+	resolved, ok := resolveForMatch("echo", PathResolutionPATH, "")
+	if !ok || resolved != resolvedEcho {
+		t.Fatalf("expected %q, ok=true, got %q, ok=%v", resolvedEcho, resolved, ok)
+	}
+	if _, ok := resolveForMatch("definitely-not-a-real-binary-xyz", PathResolutionPATH, ""); ok {
+		t.Fatal("expected ok=false for a binary that isn't on $PATH")
+	}
+}
+
+func TestResolveForMatch_ManPathMode(t *testing.T) {
+	if _, err := exec.LookPath("man"); err != nil {
+		t.Skip("man not available")
+	}
+	resolved, ok := resolveForMatch("ls", PathResolutionManPath, "")
+	if !ok || resolved == "" {
+		t.Fatalf("expected ls's man page to resolve to a real path, got %q, ok=%v", resolved, ok)
+	}
+	if _, ok := resolveForMatch("definitely-not-a-real-manpage-xyz", PathResolutionManPath, ""); ok {
+		t.Fatal("expected ok=false for a name with no man page")
+	}
+}
+
+func TestResolveForMatch_NoneModeIsRawPassthrough(t *testing.T) {
+	resolved, ok := resolveForMatch("../../etc/passwd", PathResolutionNone, "/some/cwd")
+	if !ok || resolved != "../../etc/passwd" {
+		t.Fatalf("expected the raw value unchanged, got %q, ok=%v", resolved, ok)
 	}
 }
 

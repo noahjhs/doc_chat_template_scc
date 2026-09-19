@@ -1,6 +1,6 @@
-// Package config handles domain configuration, session persistence, and the
-// workspace-selection/decoupling logic -- a port of casper_tool.py's
-// load_app_domain()/load_auth_domain()/session/workspace handling.
+// Package config handles domain configuration and session persistence -- a
+// port of casper_tool.py's load_app_domain()/load_auth_domain()/session
+// handling.
 //
 // Unlike the Python version, there's no "frozen vs. running from source"
 // distinction here: a Go build is always a compiled artifact, there's no

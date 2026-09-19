@@ -123,17 +123,17 @@ def pair_host(domain: str, token: str, routing_key: str, hostname: str | None = 
     return _request(domain, "POST", "/hosts/pair", token=token, json=body)
 
 
-def report_host_presence(domain: str, device_token: str, local_agent_url: str, workspace: list[str] | None = None) -> dict:
+def report_host_presence(domain: str, device_token: str, local_agent_url: str, cwd: str = "") -> dict:
     """For a fake test host to make itself "connected" (see pair_host) --
     a real daemon does this on its own; the harness only needs it to
-    exercise policy eval/enforcement against a host with a live workspace,
-    with no real machine involved."""
+    exercise policy eval/enforcement against a host with a live cwd, with
+    no real machine involved."""
     return _request(
         domain,
         "POST",
         "/hosts/presence",
         token=device_token,
-        json={"local_agent_url": local_agent_url, "workspace": workspace or []},
+        json={"local_agent_url": local_agent_url, "cwd": cwd},
     )
 
 
@@ -270,15 +270,18 @@ def remove_policy_layer_from_host(domain: str, token: str, layer_id: int, host_i
 
 
 def create_policy_layer_rule(
-    domain: str, token: str, layer_id: int, positional_constraints: list[dict], option_constraints: list[dict], tier: str
+    domain: str,
+    token: str,
+    layer_id: int,
+    positional_constraints: list[dict],
+    option_constraints: list[dict],
+    tier: str,
+    cwd: dict | None = None,
 ) -> dict:
-    return _request(
-        domain,
-        "POST",
-        f"/policy-layers/{layer_id}/rules",
-        token=token,
-        json={"positional_constraints": positional_constraints, "option_constraints": option_constraints, "tier": tier},
-    )
+    body = {"positional_constraints": positional_constraints, "option_constraints": option_constraints, "tier": tier}
+    if cwd is not None:
+        body["cwd"] = cwd
+    return _request(domain, "POST", f"/policy-layers/{layer_id}/rules", token=token, json=body)
 
 
 def delete_policy_layer_rule(domain: str, token: str, layer_id: int, rule_id: int) -> dict:
@@ -286,12 +289,13 @@ def delete_policy_layer_rule(domain: str, token: str, layer_id: int, rule_id: in
 
 
 def _option_from_yaml(option: dict) -> dict:
-    """YAML's flat {short, long, whitelist, blacklist} -> the API's nested
-    {short, long, pattern: {whitelist, blacklist}} -- the one translation
-    the YAML authoring format needs, since a whitelist/blacklist key
-    genuinely belongs to a nested Pattern everywhere else in this schema
-    too (positional constraints are Pattern objects directly, no
-    flattening needed there)."""
+    """YAML's flat {short, long, whitelist, blacklist, path_resolution} ->
+    the API's nested {short, long, pattern: {whitelist, blacklist,
+    path_resolution}} -- the one translation the YAML authoring format
+    needs, since a whitelist/blacklist/path_resolution key genuinely
+    belongs to a nested Pattern everywhere else in this schema too
+    (positional constraints -- and cwd, see load_policy_layer_yaml -- are
+    Pattern objects directly, no flattening needed there)."""
     result = {}
     if "short" in option:
         result["short"] = option["short"]
@@ -302,6 +306,8 @@ def _option_from_yaml(option: dict) -> dict:
         pattern["whitelist"] = option["whitelist"]
     if "blacklist" in option:
         pattern["blacklist"] = option["blacklist"]
+    if "path_resolution" in option:
+        pattern["path_resolution"] = option["path_resolution"]
     result["pattern"] = pattern
     return result
 
@@ -309,11 +315,15 @@ def _option_from_yaml(option: dict) -> dict:
 def load_policy_layer_yaml(yaml_path: str) -> dict:
     """Parses a policy layer YAML file into {"name": ..., "rules": [...]}
     already shaped for create_policy_layer_rule -- a rule is
-    {tier, positional: [{whitelist?, blacklist?}, ...],
-    options: [{short?, long?, whitelist?, blacklist?}, ...]}. Blank
-    whitelist/blacklist keys are simply omitted -- the API already
-    defaults them ("" / BLACKLIST_MATCHES_NOTHING) server-side, so this
-    format never needs to duplicate that sentinel itself."""
+    {tier, positional: [{whitelist?, blacklist?, path_resolution?}, ...],
+    options: [{short?, long?, whitelist?, blacklist?, path_resolution?}, ...],
+    cwd?: {whitelist?, blacklist?}}. Blank whitelist/blacklist keys are
+    simply omitted -- the API already defaults them ("" /
+    BLACKLIST_MATCHES_NOTHING) server-side, so this format never needs to
+    duplicate that sentinel itself. path_resolution is never valid on cwd
+    (see Pattern's own docstring in auth_service/models.py for why) -- this
+    format doesn't accept one there, same as the API itself doesn't expect
+    one to matter."""
     import yaml
 
     with open(yaml_path) as f:
@@ -321,13 +331,14 @@ def load_policy_layer_yaml(yaml_path: str) -> dict:
     name = spec["name"]
     rules = []
     for rule_spec in spec.get("rules", []):
-        rules.append(
-            {
-                "positional_constraints": list(rule_spec.get("positional", [])),
-                "option_constraints": [_option_from_yaml(o) for o in rule_spec.get("options", [])],
-                "tier": rule_spec.get("tier", "ask"),
-            }
-        )
+        rule = {
+            "positional_constraints": list(rule_spec.get("positional", [])),
+            "option_constraints": [_option_from_yaml(o) for o in rule_spec.get("options", [])],
+            "tier": rule_spec.get("tier", "ask"),
+        }
+        if "cwd" in rule_spec:
+            rule["cwd"] = {k: v for k, v in rule_spec["cwd"].items() if k in ("whitelist", "blacklist")}
+        rules.append(rule)
     return {"name": name, "rules": rules}
 
 
@@ -349,7 +360,15 @@ def apply_policy_layer(domain: str, token: str, yaml_path: str) -> dict:
 
     layer_id = layer["id"]
     for rule in spec["rules"]:
-        create_policy_layer_rule(domain, token, layer_id, rule["positional_constraints"], rule["option_constraints"], rule["tier"])
+        create_policy_layer_rule(
+            domain,
+            token,
+            layer_id,
+            rule["positional_constraints"],
+            rule["option_constraints"],
+            rule["tier"],
+            cwd=rule.get("cwd"),
+        )
 
     refreshed = list_policy_layers(domain, token)["policy_layers"]
     return next(l for l in refreshed if l["id"] == layer_id)
@@ -362,8 +381,14 @@ def eval_policy(
     policy_layer_ids: list[int],
     positional_args: list[str] | None = None,
     options: list[dict] | None = None,
+    cwd: str = "",
 ) -> dict:
-    body = {"policy_layer_ids": policy_layer_ids, "positional_args": positional_args or [], "options": options or []}
+    body = {
+        "policy_layer_ids": policy_layer_ids,
+        "positional_args": positional_args or [],
+        "options": options or [],
+        "cwd": cwd,
+    }
     return _request(domain, "POST", "/policies/eval", token=token, json=body)
 
 

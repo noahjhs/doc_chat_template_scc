@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func newTestHandler(t *testing.T) (*Handler, string) {
@@ -19,8 +18,7 @@ func newTestHandler(t *testing.T) (*Handler, string) {
 	if err != nil {
 		t.Fatalf("realpath(root): %v", err)
 	}
-	h := New(nil, nil)
-	h.AddRoot(resolvedRoot)
+	h := New(resolvedRoot)
 	return h, resolvedRoot
 }
 
@@ -72,73 +70,6 @@ func TestResolvePath_AbsolutePathOutsideRootRejected(t *testing.T) {
 	_, err := h.resolvePath("/etc/passwd", false, false)
 	if err == nil {
 		t.Fatal("expected an absolute path outside root to be rejected")
-	}
-}
-
-func TestCdThenRelativeResolution(t *testing.T) {
-	h, root := newTestHandler(t)
-	sub := filepath.Join(root, "sub")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	res, err := h.Dispatch(&Request{Action: "cd", Path: "sub"})
-	if err != nil || !res.Success {
-		t.Fatalf("cd failed: res=%+v err=%v", res, err)
-	}
-	if res.Cwd != sub {
-		t.Fatalf("expected cwd %s, got %s", sub, res.Cwd)
-	}
-
-	// A subsequent relative resolution should now be relative to "sub", not root.
-	if err := os.WriteFile(filepath.Join(sub, "file.txt"), []byte("hi"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res, err = h.Dispatch(&Request{Action: "cat", Path: "file.txt"})
-	if err != nil || !res.Success {
-		t.Fatalf("cat failed: res=%+v err=%v", res, err)
-	}
-	if res.Stdout != "hi" {
-		t.Fatalf("expected stdout 'hi', got %q", res.Stdout)
-	}
-}
-
-func TestMkdirTouchLsRoundTrip(t *testing.T) {
-	h, _ := newTestHandler(t)
-	req := &Request{Action: "mkdir", Path: "newdir"}
-	req.ApplyDefaults()
-	if res, err := h.Dispatch(req); err != nil || !res.Success {
-		t.Fatalf("mkdir failed: res=%+v err=%v", res, err)
-	}
-
-	req = &Request{Action: "touch", Path: "newdir/f.txt"}
-	req.ApplyDefaults()
-	if res, err := h.Dispatch(req); err != nil || !res.Success {
-		t.Fatalf("touch failed: res=%+v err=%v", res, err)
-	}
-
-	req = &Request{Action: "ls", Path: "newdir"}
-	req.ApplyDefaults()
-	res, err := h.Dispatch(req)
-	if err != nil || !res.Success {
-		t.Fatalf("ls failed: res=%+v err=%v", res, err)
-	}
-	if res.Stdout == "" {
-		t.Fatal("expected ls to list f.txt, got empty output")
-	}
-}
-
-func TestRmRejectsDirectory(t *testing.T) {
-	h, root := newTestHandler(t)
-	sub := filepath.Join(root, "adir")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	res, err := h.Dispatch(&Request{Action: "rm", Path: "adir"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Success {
-		t.Fatal("expected rm on a directory to fail (use rmdir instead)")
 	}
 }
 
@@ -215,119 +146,29 @@ func TestWriteFileRejectsEscapingRoot(t *testing.T) {
 	}
 }
 
-func TestNoRootsMeansEveryCommandFails(t *testing.T) {
-	h := New(nil, nil)
-	res, err := h.Dispatch(&Request{Action: "pwd"})
+func TestNoHomeRootMeansEveryCommandFails(t *testing.T) {
+	h := New("")
+	if _, err := h.Dispatch(&Request{Action: "read_file", Path: "whatever.txt"}); err == nil {
+		t.Fatal("expected read_file to fail (as an ActionError from resolvePath) with no homeRoot configured")
+	}
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Success {
-		t.Fatal("expected pwd to fail with zero roots")
-	}
-	if _, err := h.Dispatch(&Request{Action: "ls", Path: "."}); err == nil {
-		t.Fatal("expected ls to fail (as an ActionError from resolvePath) with zero roots")
+		t.Fatal("expected run_shell_command to fail with no homeRoot configured")
 	}
 }
 
-func TestMultipleRootsAreEachConfinedAndIndependentlyAddressable(t *testing.T) {
-	h := New(nil, nil)
-	rootA, err := realpath(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+func TestHomeRootIsFixedAtConstruction(t *testing.T) {
+	h, root := newTestHandler(t)
+	if h.HomeRoot() != root {
+		t.Fatalf("expected HomeRoot() to report %q, got %q", root, h.HomeRoot())
 	}
-	rootB, err := realpath(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.AddRoot(rootA)
-	h.AddRoot(rootB)
-
-	if got := h.Roots(); len(got) != 2 || got[0] != rootA || got[1] != rootB {
-		t.Fatalf("expected [%s %s], got %v", rootA, rootB, got)
-	}
-
-	// AddRoot switches cwd to whatever was just added (rootB, most recently).
-	if res, err := h.Dispatch(&Request{Action: "pwd"}); err != nil || res.Stdout != rootB {
-		t.Fatalf("expected cwd to be rootB (%s), got %q (err=%v)", rootB, res.Stdout, err)
-	}
-
-	// A command can still reach rootA by absolute path even while cwd is in rootB.
-	if _, err := os.Create(filepath.Join(rootA, "a.txt")); err != nil {
-		t.Fatal(err)
-	}
-	if res, err := h.Dispatch(&Request{Action: "cat", Path: filepath.Join(rootA, "a.txt")}); err != nil || !res.Success {
-		t.Fatalf("expected cat of a file in rootA to succeed while cwd is in rootB: res=%+v err=%v", res, err)
-	}
-
-	// But a path outside both roots is still rejected.
-	if _, err := h.Dispatch(&Request{Action: "cd", Path: t.TempDir()}); err == nil {
-		t.Fatal("expected cd into an unrelated directory to be rejected")
-	}
-}
-
-func TestAddRootIsIdempotent(t *testing.T) {
-	h := New(nil, nil)
-	root, err := realpath(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.AddRoot(root)
-	h.AddRoot(root)
-	if got := h.Roots(); len(got) != 1 {
-		t.Fatalf("expected AddRoot to be idempotent, got %v", got)
-	}
-}
-
-func TestListDirectories(t *testing.T) {
-	h := New(nil, nil)
-	if res, err := h.Dispatch(&Request{Action: "list_directories"}); err != nil || res.Stdout != "No directories added yet." {
-		t.Fatalf("expected the empty-roots message, got %q (err=%v)", res.Stdout, err)
-	}
-	root, err := realpath(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.AddRoot(root)
-	res, err := h.Dispatch(&Request{Action: "list_directories"})
-	if err != nil || res.Stdout != root {
-		t.Fatalf("expected %q, got %q (err=%v)", root, res.Stdout, err)
-	}
-}
-
-func TestAddDirectoryWithoutPickerConfigured(t *testing.T) {
-	h := New(nil, nil)
-	_, err := h.Dispatch(&Request{Action: "add_directory"})
-	if err == nil {
-		t.Fatal("expected add_directory to fail cleanly when no picker was injected")
-	}
-	if _, ok := err.(*ActionError); !ok {
-		t.Fatalf("expected an ActionError, got: %v", err)
-	}
-}
-
-func TestAddDirectoryViaInjectedPicker(t *testing.T) {
-	root, err := realpath(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	added := make(chan string, 1)
-	h := New(
-		func() (string, error) { return root, nil },
-		func(dir string) { added <- dir },
-	)
-	res, err := h.Dispatch(&Request{Action: "add_directory"})
-	if err != nil || !res.Success {
-		t.Fatalf("expected add_directory to report success immediately: res=%+v err=%v", res, err)
-	}
-	select {
-	case got := <-added:
-		if got != root {
-			t.Fatalf("onRootAdded called with %q, want %q", got, root)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("onRootAdded was never called")
-	}
-	if got := h.Roots(); len(got) != 1 || got[0] != root {
-		t.Fatalf("expected the picked directory to be added, got %v", got)
+	// Confirms a path outside homeRoot is rejected -- the confinement
+	// boundary is real, not just a reported string.
+	if _, err := h.resolvePath(t.TempDir(), true, true); err == nil {
+		t.Fatal("expected resolving an unrelated directory to be rejected")
 	}
 }

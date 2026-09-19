@@ -76,12 +76,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Couldn't register the casper:// URL handler: %s\n", err)
 	}
 
-	// No workspace folder chosen (or even choosable) at startup any more --
-	// addressable directories are now added on demand, later, via the web
-	// app's "+" button (see internal/commands.Handler.AddRoot and its
-	// runAddDirectory), so the log file's default location moves to
-	// AppConfigDir() (already used for session.json etc.) instead of
-	// living inside whatever the workspace happened to be.
+	// The log file's default location is AppConfigDir() (already used for
+	// session.json etc.), independent of homeRoot below -- a log file
+	// living inside the confined directory itself would be a little odd.
 	logPath := os.Getenv("CONTROL_TOOL_LOG_FILE")
 	if logPath == "" {
 		cfgDir, err := config.AppConfigDir()
@@ -118,43 +115,30 @@ func main() {
 		fatal("Couldn't set up a relay routing key: %s", err)
 	}
 
-	// state is assigned below, after cmdHandler -- but onRootAdded (called
-	// from inside cmdHandler, possibly from its own background goroutine
-	// the moment a folder picker resolves) needs to reach it to push a
-	// fresh presence report. Declared first and closed over by reference
-	// rather than reordering the two: newDaemonState itself needs srv,
-	// which needs cmdHandler, which needs this callback -- a genuine
-	// three-way cycle with no dependency-free starting point.
-	var state *daemonState
-	cmdHandler := commands.New(config.AddWorkspaceDir, func(dir string) {
-		logf("Added workspace directory: %s", dir)
-		if state != nil {
-			state.reportPresenceNow()
+	// homeRoot is the single directory every path-taking action is confined
+	// to (see commands.Handler's own doc comment) -- the user's home
+	// directory by default, computed once here and never mutated
+	// afterward. CONTROL_TOOL_WORKSPACE overrides it entirely for a
+	// non-interactive run (dev/CI), same env-override posture this had
+	// back when it named a dynamic, user-managed workspace list instead of
+	// this one fixed directory.
+	homeRoot := os.Getenv("CONTROL_TOOL_WORKSPACE")
+	if homeRoot == "" {
+		dir, err := os.UserHomeDir()
+		if err != nil {
+			fatal("Couldn't resolve the home directory: %s", err)
 		}
-	})
-
-	// Directories persist across restarts (workspace.txt, via
-	// LoadWorkspaceDirs) -- unless CONTROL_TOOL_WORKSPACE is set, which
-	// takes over entirely for a non-interactive run (dev/CI), exactly
-	// like the old single-workspace version's env override did: skip the
-	// persisted list (and any native dialog) altogether.
-	if envDir := os.Getenv("CONTROL_TOOL_WORKSPACE"); envDir != "" {
-		if resolved, err := filepath.EvalSymlinks(envDir); err == nil {
-			envDir = resolved
-		}
-		cmdHandler.AddRoot(envDir)
-	} else if dirs, err := config.LoadWorkspaceDirs(); err != nil {
-		logf("Couldn't load saved workspace directories: %s", err)
-	} else {
-		for _, dir := range dirs {
-			cmdHandler.AddRoot(dir)
-		}
+		homeRoot = dir
 	}
+	if resolved, err := filepath.EvalSymlinks(homeRoot); err == nil {
+		homeRoot = resolved
+	}
+	cmdHandler := commands.New(homeRoot)
 
 	srv := server.New("", cmdHandler, logger)
 	srv.ClearSession = func() { config.ClearSession(logf) }
 
-	state = newDaemonState(srv, cmdHandler, relayDomain, authDomain, routingKey, port, logf)
+	state := newDaemonState(srv, cmdHandler, relayDomain, authDomain, routingKey, port, logf)
 	srv.OnSignOut = state.onSignOut
 	// Lets the web app's policy-authoring UI ask this daemon to re-fetch its
 	// own enabled policy layers on demand (see commands.Handler's

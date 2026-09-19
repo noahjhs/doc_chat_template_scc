@@ -124,9 +124,9 @@ def hosts_list():
         result = client.list_hosts(domain, token)
     except client.ApiError as e:
         _handle_api_error(e)
-    table = Table("id", "label", "connected", "workspace")
+    table = Table("id", "label", "connected", "cwd")
     for h in result["hosts"]:
-        table.add_row(str(h["host_id"]), h["label"], str(h["connected"]), ", ".join(h["workspace"]))
+        table.add_row(str(h["host_id"]), h["label"], str(h["connected"]), h["cwd"])
     console.print(table)
 
 
@@ -223,14 +223,14 @@ def pair(
 def report_presence(
     device_token: str,
     local_agent_url: str = typer.Option(..., "--url"),
-    workspace: list[str] = typer.Option([], "--root", help="An addressable directory -- may be repeated."),
+    cwd: str = typer.Option("", "--cwd", help="The host's own confined directory."),
 ):
     """Make a paired test host "connected" (see `pair`), with the given
-    workspace directories -- lets a test host show up as connected (and
-    its directories browsable/displayed) with no real machine involved."""
+    cwd -- lets a test host show up as connected (and its cwd
+    displayed) with no real machine involved."""
     domain, _token = _require_session()
     try:
-        result = client.report_host_presence(domain, device_token, local_agent_url, list(workspace))
+        result = client.report_host_presence(domain, device_token, local_agent_url, cwd)
     except client.ApiError as e:
         _handle_api_error(e)
     console.print(result)
@@ -540,6 +540,7 @@ def eval(
     option: list[str] = typer.Option(
         [], "--option", "-o", help="short=VALUE, long=VALUE, or a bare short/long with no value -- may be repeated."
     ),
+    cwd: str = typer.Option("", "--cwd", help="The hypothetical call's cwd -- checked against a rule's own cwd pattern."),
 ):
     """Evaluate a hypothetical call against a composed policy -- no
     execution, no daemon involved. The fastest, most deterministic rung of
@@ -548,7 +549,7 @@ def eval(
     try:
         layer_ids = [_resolve_layer_id(domain, token, name_or_id) for name_or_id in layer]
         options = [_parse_option(o) for o in option]
-        result = client.eval_policy(domain, token, layer_ids, positional_args=list(arg), options=options)
+        result = client.eval_policy(domain, token, layer_ids, positional_args=list(arg), options=options, cwd=cwd)
     except client.ApiError as e:
         _handle_api_error(e)
     console.print(result)
@@ -571,8 +572,6 @@ def _print_step_result(result: dict):
         console.print(f"[bold cyan]assistant:[/bold cyan] {result['message']}")
         for entry in result["turn"]["aggregate"].get("shell_command_calls", []):
             console.print(f"  [dim]$ {entry['args'].get('positional_args')} -> {entry['output']}[/dim]")
-        for entry in result["turn"]["aggregate"].get("local_agent_calls", []):
-            console.print(f"  [dim]$ {entry['action']} -> {entry['output']}[/dim]")
     else:
         pending = result["pending_approval"]
         console.print(

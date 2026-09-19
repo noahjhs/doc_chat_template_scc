@@ -25,16 +25,40 @@ import (
 // confines structurally via req.Path/resolvePath, independent of any
 // pattern) has no dedicated sentinel for that -- author a plain regex (e.g.
 // a blacklist on "^/" and "\\.\\." to reject absolute paths and traversal)
-// the same way every other constraint in this schema works. An earlier
-// version had a "{roots}" whitelist sentinel for exactly this; removed for
-// simplicity -- the daemon's own path confinement was always the real
-// security boundary regardless (a "{roots}" rule could never be tier
-// "allow" for that reason), so losing it is a narrower rule-authoring
-// convenience, not a security regression.
+// the same way every other constraint in this schema works, optionally with
+// PathResolution set to have that regex checked against the RESOLVED value
+// (see resolveForMatch) rather than the raw argument string -- closing the
+// symlink/lookup blind spot a raw-string regex alone can't see. An earlier
+// version had a "{roots}" whitelist sentinel for a related but narrower
+// purpose; removed for simplicity -- the daemon's own path confinement was
+// always the real security boundary regardless (a "{roots}" rule could
+// never be tier "allow" for that reason), so losing it was a narrower
+// rule-authoring convenience, not a security regression.
 type Pattern struct {
 	Whitelist *regexp.Regexp // nil if absent
 	Blacklist *regexp.Regexp // nil if absent
+	// PathResolution names how to resolve this value BEFORE matching it
+	// against Whitelist/Blacklist -- one of the PathResolution* constants
+	// below, or "" (PathResolutionNone) for today's raw-string behavior.
+	// Meaningless on Rule.Cwd (see its own doc comment) -- cwd is already a
+	// daemon-resolved absolute path, not a command argument, so no
+	// resolution mechanism applies to it; a Cwd pattern's PathResolution
+	// field (if ever set) is simply never consulted.
+	PathResolution string
 }
+
+// The PathResolution modes a positional/option constraint's Pattern can
+// request -- see resolveForMatch for what each one actually does.
+// Deliberately NOT including CDPATH: run_shell_command execs real binaries
+// directly (never through a shell), and cd/type/hash/command are
+// universally shell builtins, never real standalone executables -- so
+// CDPATH-style resolution has no reachable target under this architecture.
+const (
+	PathResolutionNone    = ""
+	PathResolutionDot     = "."
+	PathResolutionPATH    = "$PATH"
+	PathResolutionManPath = "MANPATH"
+)
 
 // OptionConstraint is one option (not "flag" -- options can carry values) a
 // rule constrains, identified by its short and/or long form. Including an
@@ -50,12 +74,21 @@ type OptionConstraint struct {
 
 // Rule is one entry in a PolicyLayer's ordered list -- see db.py's own
 // schema comment for the full shape. PositionalConstraints' slice index IS
-// the argv position (index 0 = the binary); a supplied value beyond this
-// slice's length is unconstrained.
+// the argv position (index 0 = the binary, always matched against its
+// $PATH-resolved absolute path -- see runRunShellCommand -- so a rule
+// constraining position 0 should match a real absolute path, not a bare
+// command name); a supplied value beyond this slice's length is
+// unconstrained. Cwd optionally constrains the directory the call runs in
+// (already a daemon-resolved absolute path by the time it's checked -- see
+// runRunShellCommand -- so it's matched raw, via valueMatchesPattern, never
+// valueMatchesPatternResolved); a blank Cwd (the zero Pattern) means "any
+// directory", same "unconstrained" convention every other blank Pattern in
+// this schema uses.
 type Rule struct {
 	ID                    int
 	PositionalConstraints []Pattern
 	OptionConstraints     []OptionConstraint
+	Cwd                   Pattern
 	Tier                  string
 }
 
@@ -90,20 +123,18 @@ func (h *Handler) PolicyLayers() []PolicyLayer {
 // SetRefreshPolicyLayersFunc injects the callback runRefreshPolicyLayers
 // invokes -- set once at startup by cmd/casper/main.go (after daemonState
 // exists, so the closure can reach its own getDeviceToken/authDomain; nil
-// until then, and always nil in tests, same nil-tolerant posture as
-// pickAndPersistDir). Kept as an injected callback rather than importing
-// agent/internal/config directly here, since this package has no business
-// knowing about auth domains/device tokens.
+// until then, and always nil in tests). Kept as an injected callback rather
+// than importing agent/internal/config directly here, since this package
+// has no business knowing about auth domains/device tokens.
 func (h *Handler) SetRefreshPolicyLayersFunc(fn func()) {
 	h.mu.Lock()
 	h.refreshPolicyLayersFn = fn
 	h.mu.Unlock()
 }
 
-// runRefreshPolicyLayers is not part of run_local_command's model-facing
-// action enum (see COMMAND_CATEGORIES in utils/sidebar.py) -- only the web
-// app's policy-authoring UI triggers it, same posture as runAddDirectory.
-// Runs the fetch in a goroutine rather than blocking the request/response;
+// runRefreshPolicyLayers is deliberately not model-visible -- only the web
+// app's policy-authoring UI triggers it. Runs the fetch in a goroutine
+// rather than blocking the request/response;
 // the caller is expected to poll (e.g. re-fetch GET /hosts) rather than
 // wait on this response for the refreshed set.
 func (h *Handler) runRefreshPolicyLayers(_ *Request) (Result, error) {
@@ -118,12 +149,11 @@ func (h *Handler) runRefreshPolicyLayers(_ *Request) (Result, error) {
 }
 
 // runListPolicyLayers reports the daemon's own currently-cached set --
-// model-visible, mirrors runListDirectories -- so the model can see what's
-// actually available right now rather than working off a stale schema. The
-// rich, per-rule prose description lives in the web app's tool schema
-// (built from the same data fetched via GET /hosts); this is a lighter
-// "what does the daemon think it has right now" summary, same modest role
-// runListDirectories plays for addressable directories.
+// model-visible -- so the model can see what's actually available right now
+// rather than working off a stale schema. The rich, per-rule prose
+// description lives in the web app's tool schema (built from the same data
+// fetched via GET /hosts); this is a lighter "what does the daemon think it
+// has right now" summary.
 func (h *Handler) runListPolicyLayers(_ *Request) (Result, error) {
 	layers := h.PolicyLayers()
 	if len(layers) == 0 {
@@ -141,7 +171,9 @@ func (h *Handler) runListPolicyLayers(_ *Request) (Result, error) {
 }
 
 // valueMatchesPattern reports whether value satisfies p -- a plain RE2
-// whitelist/blacklist check against the raw value.
+// whitelist/blacklist check against the raw value, no path resolution.
+// Used for Rule.Cwd (see its own doc comment for why resolution never
+// applies there).
 func (h *Handler) valueMatchesPattern(value string, p Pattern) bool {
 	if p.Whitelist != nil && !p.Whitelist.MatchString(value) {
 		return false
@@ -150,6 +182,70 @@ func (h *Handler) valueMatchesPattern(value string, p Pattern) bool {
 		return false
 	}
 	return true
+}
+
+// valueMatchesPatternResolved is valueMatchesPattern's counterpart for a
+// positional/option constraint, which may carry a PathResolution mode (see
+// Pattern's own doc comment): resolves value under that mode (relative to
+// cwd, for PathResolutionDot) before checking it against p's
+// whitelist/blacklist. Skips resolution entirely -- so a resolution failure
+// can never reject an otherwise-unconstrained rule -- when p has neither a
+// whitelist nor a blacklist (the "value not required" blank-pattern filler
+// used throughout this schema); PathResolutionNone likewise resolves to a
+// no-op (see resolveForMatch), preserving today's raw-string behavior for
+// every pre-existing rule with no PathResolution set at all.
+func (h *Handler) valueMatchesPatternResolved(value string, p Pattern, cwd string) bool {
+	if p.Whitelist == nil && p.Blacklist == nil {
+		return true
+	}
+	resolved, ok := resolveForMatch(value, p.PathResolution, cwd)
+	if !ok {
+		return false // fail closed: an unresolvable value never satisfies any pattern
+	}
+	if p.Whitelist != nil && !p.Whitelist.MatchString(resolved) {
+		return false
+	}
+	if p.Blacklist != nil && p.Blacklist.MatchString(resolved) {
+		return false
+	}
+	return true
+}
+
+// resolveForMatch applies mode to value -- PathResolutionDot joins it
+// against cwd and runs it through realpath() (real symlink resolution, via
+// the same machinery resolvePath itself uses -- see resolveJoinedPath),
+// PathResolutionPATH looks it up on $PATH, PathResolutionManPath shells out
+// to `man -w` (deferring to the system's own real MANPATH/section search
+// rather than reimplementing it), and PathResolutionNone (or any other,
+// unrecognized value) passes value through unchanged. Returns ok=false when
+// the value can't be resolved under the requested mode.
+func resolveForMatch(value, mode, cwd string) (string, bool) {
+	switch mode {
+	case PathResolutionDot:
+		resolved, err := resolveJoinedPath(cwd, value)
+		if err != nil {
+			return "", false
+		}
+		return resolved, true
+	case PathResolutionPATH:
+		resolved, err := exec.LookPath(value)
+		if err != nil {
+			return "", false
+		}
+		return resolved, true
+	case PathResolutionManPath:
+		out, err := exec.Command("man", "-w", value).Output()
+		if err != nil {
+			return "", false
+		}
+		resolved := strings.TrimSpace(string(out))
+		if resolved == "" {
+			return "", false
+		}
+		return resolved, true
+	default:
+		return value, true
+	}
 }
 
 func findOption(options []RequestOption, short, long string) (RequestOption, bool) {
@@ -162,22 +258,27 @@ func findOption(options []RequestOption, short, long string) (RequestOption, boo
 }
 
 // ruleMatches reports whether every constraint in r is satisfied by the
-// given structured call -- first-match-wins order is matchPolicy's job, not
-// this function's. Positions/options the model supplies but r doesn't
-// mention (i.e. beyond PositionalConstraints' length, or with no
-// OptionConstraint entry at all) are simply not checked (don't-care),
-// matching the same "unconstrained" philosophy applied throughout this
-// schema. A position within PositionalConstraints' length that the model
-// didn't actually supply is matched as "" -- same coercion the option loop
-// below already uses -- so a blank pattern there means "value not
-// required" without needing its own sentinel.
-func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []RequestOption) bool {
+// given structured call plus the effective directory it would run in --
+// first-match-wins order is matchPolicy's job, not this function's.
+// Positions/options the model supplies but r doesn't mention (i.e. beyond
+// PositionalConstraints' length, or with no OptionConstraint entry at all)
+// are simply not checked (don't-care), matching the same "unconstrained"
+// philosophy applied throughout this schema. A position within
+// PositionalConstraints' length that the model didn't actually supply is
+// matched as "" -- same coercion the option loop below already uses -- so
+// a blank pattern there means "value not required" without needing its own
+// sentinel. cwd is checked first (cheapest, and independent of the call's
+// own arguments) against r.Cwd, raw (see Rule.Cwd's own doc comment).
+func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []RequestOption, cwd string) bool {
+	if !h.valueMatchesPattern(cwd, r.Cwd) {
+		return false
+	}
 	for i, pc := range r.PositionalConstraints {
 		value := ""
 		if i < len(positionalArgs) {
 			value = positionalArgs[i]
 		}
-		if !h.valueMatchesPattern(value, pc) {
+		if !h.valueMatchesPatternResolved(value, pc, cwd) {
 			return false
 		}
 	}
@@ -193,7 +294,7 @@ func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []Request
 		if supplied.Value != nil {
 			value = *supplied.Value
 		}
-		if !h.valueMatchesPattern(value, oc.Pattern) {
+		if !h.valueMatchesPatternResolved(value, oc.Pattern, cwd) {
 			return false
 		}
 	}
@@ -220,11 +321,14 @@ func composePolicy(layers []PolicyLayer) []Rule {
 // matchPolicy composes layers into one Policy (see composePolicy) and walks
 // it in order, returning the first rule that matches -- nil means terminal
 // deny (every rule exhausted, none matched, including the case where layers
-// is empty or composes to zero rules).
-func (h *Handler) matchPolicy(layers []PolicyLayer, positionalArgs []string, options []RequestOption) *Rule {
+// is empty or composes to zero rules). cwd is the effective directory the
+// call would run in (see runRunShellCommand) -- checked against each rule's
+// own Cwd pattern, and used as the join base for any PathResolutionDot
+// constraint.
+func (h *Handler) matchPolicy(layers []PolicyLayer, positionalArgs []string, options []RequestOption, cwd string) *Rule {
 	rules := composePolicy(layers)
 	for i := range rules {
-		if h.ruleMatches(rules[i], positionalArgs, options) {
+		if h.ruleMatches(rules[i], positionalArgs, options, cwd) {
 			return &rules[i]
 		}
 	}
@@ -270,25 +374,25 @@ func buildArgv(extraPositionals []string, options []RequestOption) []string {
 // (reused from every path-taking action above) now ALWAYS picks which
 // confined directory to run in when given -- a deliberate change from the
 // old path_scoped boolean, matching how every other confined action in
-// this file already behaves; otherwise this just uses whatever directory
-// is currently tracked as cwd, itself always already inside h.roots.
+// this file already behaves; otherwise this just uses homeRoot, the fixed
+// directory every path-taking action is confined to.
+//
+// The effective directory is resolved FIRST, before matching -- so a rule's
+// Cwd pattern and any PathResolutionDot constraint see the real directory
+// the call would actually run in, never a raw/unresolved req.Path. The
+// binary (position 0) is likewise always resolved via $PATH before
+// matching (see Rule's own doc comment) -- what gets pattern-matched and
+// what actually execs are thereby guaranteed to be the exact same file, no
+// gap between the two.
 func (h *Handler) runRunShellCommand(req *Request) (Result, error) {
 	if len(req.PositionalArgs) == 0 {
 		return Result{}, &ActionError{Detail: "'positional_args' must include at least the binary."}
 	}
-	rule := h.matchPolicy(h.PolicyLayers(), req.PositionalArgs, req.Options)
-	if rule == nil {
-		return Result{}, &ActionError{Detail: "Denied: no matching rule for this call."}
-	}
-	// Tier is NOT enforced here -- same posture as before: the web app
-	// decides ask/allow/deny before ever calling this action; command_key
-	// possession remains the real security boundary.
 
-	if len(h.Roots()) == 0 {
-		return h.fail("No directories added yet -- add one first (the \"+\" button in the workspace browser)."), nil
+	dir := h.HomeRoot()
+	if dir == "" {
+		return h.fail("No directory configured on this installation."), nil
 	}
-
-	dir := h.getCwd()
 	if req.Path != "" {
 		target, err := h.resolvePath(req.Path, true, true)
 		if err != nil {
@@ -297,20 +401,36 @@ func (h *Handler) runRunShellCommand(req *Request) (Result, error) {
 		dir = target
 	}
 
-	binary := req.PositionalArgs[0]
+	resolvedBinary, err := exec.LookPath(req.PositionalArgs[0])
+	if err != nil {
+		return Result{}, &ActionError{Detail: fmt.Sprintf("Binary not found on $PATH: %s", req.PositionalArgs[0])}
+	}
+	matchArgs := append([]string{resolvedBinary}, req.PositionalArgs[1:]...)
+
+	rule := h.matchPolicy(h.PolicyLayers(), matchArgs, req.Options, dir)
+	if rule == nil {
+		return Result{}, &ActionError{Detail: "Denied: no matching rule for this call."}
+	}
+	// Tier is NOT enforced here -- same posture as before: the web app
+	// decides ask/allow/deny before ever calling this action; command_key
+	// possession remains the real security boundary.
+
 	argv := buildArgv(req.PositionalArgs[1:], req.Options)
 
 	// sandboxedCommand (seatbelt_darwin.go/seatbelt_other.go) wraps this in
-	// a macOS Seatbelt profile confined to h.Roots() when available --
+	// a macOS Seatbelt profile confined to homeRoot (the WHOLE confined
+	// tree, not just dir -- Seatbelt's own scope is deliberately as broad
+	// as the daemon's own confinement gets, regardless of which
+	// subdirectory a given call happens to run in) when available --
 	// defense-in-depth on top of the rule match just above, not a
 	// replacement for it.
-	cmd, cleanup := sandboxedCommand(binary, argv, h.Roots())
+	cmd, cleanup := sandboxedCommand(resolvedBinary, argv, []string{h.HomeRoot()})
 	defer cleanup()
 	cmd.Dir = dir
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		exitCode := 1
 		if exitErr, ok := err.(*exec.ExitError); ok {

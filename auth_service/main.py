@@ -40,6 +40,7 @@ from models import (
     HostRenameRequest,
     HostVerifyResponse,
     LoginRequest,
+    Pattern,
     PendingApprovalCreateRequest,
     PendingApprovalCreateResponse,
     PendingApprovalDecisionRequest,
@@ -247,7 +248,7 @@ def _resolve_user_id(db, authorization: str) -> int | None:
 
 # --- Host attachment (runtime state, deliberately not persisted) ---------
 # routing_key -> {user_id, host_id, device_token_hash, command_key,
-#                 local_agent_url, workspace}
+#                 local_agent_url, cwd}
 # Who is *currently* attached to a host, with what live credentials, and
 # where it's currently reachable -- kept here rather than in SQLite for the
 # same reason the rate limiter above is: fine at this service's scale, and
@@ -325,7 +326,7 @@ def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, request
             "device_token_hash": hash_token(device_token),
             "command_key": command_key,
             "local_agent_url": None,
-            "workspace": [],
+            "cwd": "",
         }
     return host_id, device_token, command_key, label, is_new
 
@@ -402,13 +403,14 @@ def _policy_layer_rule_info(row) -> PolicyLayerRuleInfo:
         position=row["position"],
         positional_constraints=json.loads(row["positional_constraints"]),
         option_constraints=json.loads(row["option_constraints"]),
+        cwd=json.loads(row["cwd"]),
         tier=row["tier"],
     )
 
 
 def _policy_layer_rules(db, policy_layer_id: int) -> list[PolicyLayerRuleInfo]:
     rows = db.execute(
-        "SELECT id, position, positional_constraints, option_constraints, tier "
+        "SELECT id, position, positional_constraints, option_constraints, cwd, tier "
         "FROM policy_layer_rules WHERE policy_layer_id = ? ORDER BY position",
         (policy_layer_id,),
     ).fetchall()
@@ -433,7 +435,11 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
     on why that matters). policy_layers is left
     un-composed (a list of (layer_id, rules) pairs) -- composition happens
     per-call via policy.compose_policy, same as everywhere else this
-    project composes a host's policy."""
+    project composes a host's policy. cwd is the host's own daemon-reported
+    confined directory (see report_host_presence) -- conversations.py's
+    _decide_tier uses it as the join base for a rule's best-effort "."
+    path_resolution preview when the model's own call doesn't explicitly
+    override it via `path`."""
     rows = db.execute(
         "SELECT h.id, h.routing_key, uh.label FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id WHERE uh.user_id = ?",
         (user_id,),
@@ -461,6 +467,7 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
             "url": att["local_agent_url"],
             "api_key": att["command_key"],
             "policy_layers": layers_by_host.get(r["id"], []),
+            "cwd": att.get("cwd", ""),
         }
     return configs
 
@@ -508,10 +515,10 @@ def report_host_presence(body: HostPresenceReport, authorization: str = Header(d
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with _attached_lock:
         _attached[attached["routing_key"]]["local_agent_url"] = body.local_agent_url
-        _attached[attached["routing_key"]]["workspace"] = body.workspace
+        _attached[attached["routing_key"]]["cwd"] = body.cwd
     return HostInfo(
         host_id=attached["host_id"], label="", connected=True,
-        local_agent_url=body.local_agent_url, workspace=body.workspace,
+        local_agent_url=body.local_agent_url, cwd=body.cwd,
     )
 
 
@@ -524,7 +531,7 @@ def clear_host_presence(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with _attached_lock:
         _attached[attached["routing_key"]]["local_agent_url"] = None
-        _attached[attached["routing_key"]]["workspace"] = []
+        _attached[attached["routing_key"]]["cwd"] = ""
     return HostInfo(host_id=attached["host_id"], label="", connected=False)
 
 
@@ -561,7 +568,7 @@ def list_hosts(authorization: str = Header(default="")):
         rule_rows = db.execute(
             """
             SELECT plr.policy_layer_id, plr.id, plr.position, plr.positional_constraints,
-                   plr.option_constraints, plr.tier
+                   plr.option_constraints, plr.cwd, plr.tier
             FROM policy_layer_rules plr JOIN policy_layers pl ON pl.id = plr.policy_layer_id
             WHERE pl.user_id = ? ORDER BY plr.position
             """,
@@ -574,8 +581,8 @@ def list_hosts(authorization: str = Header(default="")):
     for r in rule_rows:
         rules_by_layer.setdefault(r["policy_layer_id"], []).append(_policy_layer_rule_info(r))
     # Attached regardless of live connection state -- like environment_ids
-    # above (persisted config), not like workspace/local_agent_url below
-    # (live daemon-reported state) -- a disconnected host's attached
+    # above (persisted config), not like cwd/local_agent_url below (live
+    # daemon-reported state) -- a disconnected host's attached
     # policy layers are still meaningful to show (e.g. in a policy-authoring
     # UI's host-attachment grid).
     layers_by_host: dict[int, list[HostPolicyLayerInfo]] = {}
@@ -594,7 +601,7 @@ def list_hosts(authorization: str = Header(default="")):
             HostInfo(
                 host_id=r["id"], label=r["label"], hostname=r["hostname"], connected=connected,
                 local_agent_url=att["local_agent_url"] if connected else None,
-                workspace=att["workspace"] if connected else [],
+                cwd=att.get("cwd", "") if connected else "",
                 command_key=att["command_key"] if mine else None,
                 environment_ids=envs_by_host.get(r["id"], []),
                 policy_layers=layers_by_host.get(r["id"], []),
@@ -888,6 +895,10 @@ def _serialize_option_constraints(constraints) -> str:
     return json.dumps([{"short": c.short, "long": c.long, "pattern": c.pattern.model_dump()} for c in constraints])
 
 
+def _serialize_cwd(pattern: Pattern) -> str:
+    return json.dumps(pattern.model_dump())
+
+
 @app.post("/policy-layers/{policy_layer_id}/rules", response_model=PolicyLayerRuleInfo, status_code=201)
 def create_policy_layer_rule(
     policy_layer_id: int, body: PolicyLayerRuleCreateRequest, authorization: str = Header(default="")
@@ -904,17 +915,19 @@ def create_policy_layer_rule(
         ).fetchone()["next_position"]
         rule_id = db.execute(
             "INSERT INTO policy_layer_rules "
-            "(policy_layer_id, position, positional_constraints, option_constraints, tier) VALUES (?, ?, ?, ?, ?)",
+            "(policy_layer_id, position, positional_constraints, option_constraints, cwd, tier) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 policy_layer_id,
                 next_position,
                 _serialize_positional_constraints(body.positional_constraints),
                 _serialize_option_constraints(body.option_constraints),
+                _serialize_cwd(body.cwd),
                 body.tier,
             ),
         ).lastrowid
         row = db.execute(
-            "SELECT id, position, positional_constraints, option_constraints, tier "
+            "SELECT id, position, positional_constraints, option_constraints, cwd, tier "
             "FROM policy_layer_rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
@@ -938,11 +951,13 @@ def update_policy_layer_rule(
         if not _user_owns_policy_layer_rule(db, user_id, policy_layer_id, rule_id):
             raise HTTPException(status_code=404, detail="Rule not found.")
         current = db.execute(
-            "SELECT positional_constraints, option_constraints, tier FROM policy_layer_rules WHERE id = ?", (rule_id,)
+            "SELECT positional_constraints, option_constraints, cwd, tier FROM policy_layer_rules WHERE id = ?",
+            (rule_id,),
         ).fetchone()
         merged = {
             "positional_constraints": json.loads(current["positional_constraints"]),
             "option_constraints": json.loads(current["option_constraints"]),
+            "cwd": json.loads(current["cwd"]),
             "tier": current["tier"],
         }
         merged.update(body.model_dump(exclude_unset=True))
@@ -951,16 +966,17 @@ def update_policy_layer_rule(
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=_first_validation_message(e.errors())) from e
         db.execute(
-            "UPDATE policy_layer_rules SET positional_constraints = ?, option_constraints = ?, tier = ? WHERE id = ?",
+            "UPDATE policy_layer_rules SET positional_constraints = ?, option_constraints = ?, cwd = ?, tier = ? WHERE id = ?",
             (
                 _serialize_positional_constraints(validated.positional_constraints),
                 _serialize_option_constraints(validated.option_constraints),
+                _serialize_cwd(validated.cwd),
                 validated.tier,
                 rule_id,
             ),
         )
         row = db.execute(
-            "SELECT id, position, positional_constraints, option_constraints, tier "
+            "SELECT id, position, positional_constraints, option_constraints, cwd, tier "
             "FROM policy_layer_rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
@@ -1022,7 +1038,7 @@ def eval_policy(body: PolicyEvalRequest, authorization: str = Header(default="")
         layers = [(policy_layer_id, _policy_layer_rules(db, policy_layer_id)) for policy_layer_id in body.policy_layer_ids]
     composed = compose_policy(layers)
     options = [o.model_dump() for o in body.options]
-    matched_layer_id, matched_rule = match_policy(composed, body.positional_args, options)
+    matched_layer_id, matched_rule = match_policy(composed, body.positional_args, options, body.cwd)
     tier = matched_rule.tier if matched_rule else "deny"
     return PolicyEvalResponse(tier=tier, matched_layer_id=matched_layer_id, matched_rule=matched_rule)
 

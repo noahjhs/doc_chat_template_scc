@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import sqlite3
 
@@ -152,6 +153,14 @@ CREATE TABLE IF NOT EXISTS policy_layer_rules (
     -- allowed" -- the exact same {whitelist,blacklist} shape and "missing
     -- means empty string" convention positional_constraints uses above.
     option_constraints TEXT NOT NULL,
+    -- One JSON {"whitelist":.., "blacklist":.., "path_resolution":..}
+    -- object (a single Pattern, not a list -- there's only ever one cwd
+    -- per call) -- optionally constrains the directory the call runs in.
+    -- Added by _add_cwd_column_to_policy_layer_rules below; a NOT NULL
+    -- column with no schema-level default since every INSERT always
+    -- supplies one (see main.py's create_policy_layer_rule) -- the
+    -- migration itself backfills existing rows.
+    cwd TEXT NOT NULL,
     tier TEXT NOT NULL,                    -- 'allow' | 'ask' | 'deny' -- no default; every rule states its own
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -199,10 +208,33 @@ def _rename_legacy_rule_chain_tables(db):
     db.execute("DROP INDEX IF EXISTS idx_rule_chain_rules_chain_id")
 
 
+def _add_cwd_column_to_policy_layer_rules(db):
+    """One-time ALTER TABLE ADD COLUMN for policy_layer_rules.cwd (added
+    alongside path_resolution -- see Pattern's own docstring in models.py)
+    -- a real schema change, unlike _rename_legacy_rule_chain_tables's
+    straight rename, so this runs AFTER the CREATE TABLE IF NOT EXISTS
+    script below (a fresh database already gets the column from SCHEMA
+    directly; this only ever fires against an existing database that
+    predates it). Backfills every existing row with a blank ("any
+    directory") Pattern -- the literal JSON mirrors Pattern's own default
+    field values in models.py by hand (this module has no dependency on
+    that one). Idempotent: no-ops once the column already exists, and
+    never runs at all against a database that doesn't have the table yet."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "policy_layer_rules" not in existing:
+        return
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(policy_layer_rules)").fetchall()}
+    if "cwd" in columns:
+        return
+    blank_pattern = json.dumps({"whitelist": "", "blacklist": r"[^\s\S]", "path_resolution": ""}).replace("'", "''")
+    db.execute(f"ALTER TABLE policy_layer_rules ADD COLUMN cwd TEXT NOT NULL DEFAULT '{blank_pattern}'")
+
+
 def init_db():
     with get_db() as db:
         _rename_legacy_rule_chain_tables(db)
         db.executescript(SCHEMA)
+        _add_cwd_column_to_policy_layer_rules(db)
 
 
 @contextlib.contextmanager

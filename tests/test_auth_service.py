@@ -116,39 +116,36 @@ def test_pair_then_list(client):
     assert body["label"] == "Erin's Mac"
     assert body["device_token"] and body["command_key"]
 
-    # not yet reported reachable -- listed, but disconnected, no directories yet
+    # not yet reported reachable -- listed, but disconnected, no cwd yet
     hosts = client.get("/hosts", headers=headers).json()["hosts"]
     assert len(hosts) == 1
     assert hosts[0]["label"] == "Erin's Mac"
     assert hosts[0]["connected"] is False
-    assert hosts[0]["workspace"] == []
+    assert hosts[0]["cwd"] == ""
 
     device_headers = {"Authorization": f"Bearer {body['device_token']}"}
     assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": True}
 
     presence = client.post(
         "/hosts/presence",
-        json={
-            "local_agent_url": "https://relay.example/agent/erin",
-            "workspace": ["/Users/erin/project", "/Users/erin/other-project"],
-        },
+        json={"local_agent_url": "https://relay.example/agent/erin", "cwd": "/Users/erin"},
         headers=device_headers,
     )
     assert presence.status_code == 200
-    assert presence.json()["workspace"] == ["/Users/erin/project", "/Users/erin/other-project"]
+    assert presence.json()["cwd"] == "/Users/erin"
 
     hosts = client.get("/hosts", headers=headers).json()["hosts"]
     assert hosts[0]["connected"] is True
     assert hosts[0]["local_agent_url"] == "https://relay.example/agent/erin"
     assert hosts[0]["command_key"] == body["command_key"]
-    assert hosts[0]["workspace"] == ["/Users/erin/project", "/Users/erin/other-project"]
+    assert hosts[0]["cwd"] == "/Users/erin"
 
-    # toggling reachability off clears the directory list too, same as
-    # local_agent_url -- both reflect "nothing currently reachable/known",
-    # not "still remembered while disconnected"
+    # toggling reachability off clears cwd too, same as local_agent_url --
+    # both reflect "nothing currently reachable/known", not "still
+    # remembered while disconnected"
     cleared = client.delete("/hosts/presence", headers=device_headers)
-    assert cleared.json()["workspace"] == []
-    assert client.get("/hosts", headers=headers).json()["hosts"][0]["workspace"] == []
+    assert cleared.json()["cwd"] == ""
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["cwd"] == ""
 
 
 def test_pair_is_idempotent_for_the_same_user(client):
@@ -223,7 +220,7 @@ def test_signout_all_clears_attachment_not_history(client):
     device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
     client.post(
         "/hosts/presence",
-        json={"local_agent_url": "https://relay.example/agent/jack", "workspace": ["/tmp/ws"]},
+        json={"local_agent_url": "https://relay.example/agent/jack", "cwd": "/tmp/ws"},
         headers=device_headers,
     )
 
@@ -487,16 +484,15 @@ def _create_policy_layer(client, headers, name="npm scripts"):
     return client.post("/policy-layers", json={"name": name}, headers=headers)
 
 
-def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask"):
-    return client.post(
-        f"/policy-layers/{layer_id}/rules",
-        json={
-            "positional_constraints": positional_constraints,
-            "option_constraints": option_constraints or [],
-            "tier": tier,
-        },
-        headers=headers,
-    )
+def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask", cwd=None):
+    body = {
+        "positional_constraints": positional_constraints,
+        "option_constraints": option_constraints or [],
+        "tier": tier,
+    }
+    if cwd is not None:
+        body["cwd"] = cwd
+    return client.post(f"/policy-layers/{layer_id}/rules", json=body, headers=headers)
 
 
 def test_policy_layer_crud(client):
@@ -537,8 +533,8 @@ def test_policy_layer_rule_crud(client):
     rule = created.json()
     assert rule["position"] == 0
     assert rule["positional_constraints"] == [
-        {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
-        {"whitelist": "^run$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
+        {"whitelist": "^run$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     ]
     assert rule["tier"] == "allow"
 
@@ -553,6 +549,42 @@ def test_policy_layer_rule_crud(client):
     deleted = client.delete(f"/policy-layers/{layer['id']}/rules/{rule['id']}", headers=headers)
     assert deleted.status_code == 200
     assert client.get("/policy-layers", headers=headers).json()["policy_layers"][0]["rules"] == []
+
+
+def test_policy_layer_rule_cwd_and_path_resolution_round_trip(client):
+    signup = _signup(client, "dave2b")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    layer = _create_policy_layer(client, headers).json()
+
+    created = _add_rule(
+        client,
+        headers,
+        layer["id"],
+        [{}, {"whitelist": "^safe.*", "path_resolution": "."}],
+        tier="allow",
+        cwd={"whitelist": "^/home/.+"},
+    )
+    assert created.status_code == 201
+    rule = created.json()
+    assert rule["cwd"] == {"whitelist": "^/home/.+", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""}
+    assert rule["positional_constraints"][1]["path_resolution"] == "."
+
+    # A partial update that doesn't touch cwd leaves it untouched (the
+    # merge-then-revalidate path, same as every other field).
+    updated = client.patch(
+        f"/policy-layers/{layer['id']}/rules/{rule['id']}", json={"tier": "ask"}, headers=headers
+    )
+    assert updated.status_code == 200
+    assert updated.json()["cwd"] == rule["cwd"]
+
+    # An update that DOES touch cwd replaces it.
+    recwd = client.patch(
+        f"/policy-layers/{layer['id']}/rules/{rule['id']}",
+        json={"cwd": {"whitelist": "^/tmp/.+"}},
+        headers=headers,
+    )
+    assert recwd.status_code == 200
+    assert recwd.json()["cwd"]["whitelist"] == "^/tmp/.+"
 
 
 def test_policy_layer_rule_reorder(client):
@@ -614,9 +646,9 @@ def test_policy_layer_rule_accepts_blank_pattern_at_any_position(client):
     created = _add_rule(client, headers, layer["id"], [{}, {}, {"whitelist": "^build$"}])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == [
-        {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
-        {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
-        {"whitelist": "^build$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
+        {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
+        {"whitelist": "^build$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     ]
 
 
@@ -631,8 +663,8 @@ def test_policy_layer_rule_positional_value_not_allowed(client):
     created = _add_rule(client, headers, layer["id"], [{"whitelist": "^rm$"}, {"whitelist": "^$"}])
     assert created.status_code == 201
     assert created.json()["positional_constraints"] == [
-        {"whitelist": "^rm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
-        {"whitelist": "^$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^rm$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
+        {"whitelist": "^$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     ]
 
 
@@ -671,17 +703,17 @@ def test_policy_layer_rule_option_pattern_states_round_trip(client):
     assert options[0] == {
         "short": None,
         "long": "force",
-        "pattern": {"whitelist": "^$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        "pattern": {"whitelist": "^$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     }
     assert options[1] == {
         "short": "v",
         "long": None,
-        "pattern": {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        "pattern": {"whitelist": "", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     }
     assert options[2] == {
         "short": None,
         "long": "output",
-        "pattern": {"whitelist": ".+", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        "pattern": {"whitelist": ".+", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     }
 
 
@@ -740,8 +772,8 @@ def test_policy_layer_daemon_facing_fetch(client):
     fetched_rules = fetched_a["policy_layers"][0]["rules"]
     assert [r["id"] for r in fetched_rules] == [r1["id"], r2["id"]]  # rule order survives
     assert fetched_rules[0]["positional_constraints"] == [
-        {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING},
-        {"whitelist": "^run$", "blacklist": BLACKLIST_MATCHES_NOTHING},
+        {"whitelist": "^npm$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
+        {"whitelist": "^run$", "blacklist": BLACKLIST_MATCHES_NOTHING, "path_resolution": ""},
     ]
 
     # Not attached to host B -- device_token B sees nothing.

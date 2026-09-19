@@ -28,13 +28,11 @@ signin_url = f"{app_subdomain_url()}/signin"
 st.markdown(
     "**Getting started:**\n"
     f"1. Download {NAME} for your platform below.\n"
-    "2. Move it to wherever you'd like its workspace to live — the folder it opens in "
-    "becomes the confined directory it can work in (drag it into a project folder, "
-    "or `~/Applications` if you'd rather point it at a workspace later).\n"
-    f"3. Open it once. {NAME} appears as a small icon in your status bar (look for 👻) "
-    "and quietly waits there — consider adding it to your Login Items so it's always "
-    "ready.\n"
-    f'4. <a href="{signin_url}" target="_blank" rel="noopener">Sign in</a> from this '
+    f"2. Open it once — {NAME} appears as a small icon in your status bar (look for 👻) "
+    "and quietly waits there. It's confined to your home directory by default, so it "
+    "can never touch anything outside it — consider adding it to your Login Items so "
+    "it's always ready.\n"
+    f'3. <a href="{signin_url}" target="_blank" rel="noopener">Sign in</a> from this '
     "website — it connects automatically, no extra steps.",
     unsafe_allow_html=True,
 )
