@@ -1023,85 +1023,149 @@ def test_pending_approvals_are_scoped_per_user(client):
     )
 
 
-class _FakeTwilioMessages:
+class _FakeTelegramSend:
+    """Captures every requests.post the Telegram code makes -- swaps in
+    for the `requests` module reference inside main.py (module-boundary
+    injection, same posture as _get_openai_client's test override)."""
+
     def __init__(self):
         self.calls = []
 
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
+    def post(self, url, json=None, timeout=None, **kwargs):
+        self.calls.append({"url": url, "json": json})
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True}
+
+        return _Resp()
 
 
-class _FakeTwilioClient:
-    def __init__(self):
-        self.messages = _FakeTwilioMessages()
-
-
-def test_approval_sms_sent_only_when_enabled_and_number_set(client):
-    """_send_approval_sms (called from _create_pending_approval_record) is
-    opt-in on two independent conditions -- both must be true."""
+def test_approval_telegram_sent_only_when_enabled_and_linked(client):
+    """_send_approval_telegram (called from _create_pending_approval_record)
+    is opt-in on two independent conditions -- both must be true."""
     import main as auth_main
 
-    fake = _FakeTwilioClient()
-    auth_main._get_twilio_client = lambda: fake
-    os.environ["TWILIO_FROM_NUMBER"] = "+15005550006"
+    fake = _FakeTelegramSend()
+    auth_main.requests = fake
+    os.environ["TELEGRAM_BOT_TOKEN"] = "test-bot-token"
 
-    signup = _signup(client, "smsuser1")
+    signup = _signup(client, "tguser1")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     with auth_main.get_db() as db:
         user_id = auth_main._resolve_user_id(db, f"Bearer {signup['token']}")
 
-    # Neither set -- no SMS.
+    # Neither set -- nothing sent.
     auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False)
-    assert fake.messages.calls == []
+    assert fake.calls == []
 
-    # Enabled but no number saved -- still no SMS.
-    client.patch("/profile", json={"sms_notifications_enabled": True}, headers=headers)
+    # Enabled but never linked -- still nothing.
+    client.patch("/profile", json={"telegram_notifications_enabled": True}, headers=headers)
     auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False)
-    assert fake.messages.calls == []
+    assert fake.calls == []
 
-    # Both set -- sends, addressed to the normalized E.164 number.
-    client.patch("/profile", json={"sms_number": "555-234-5678"}, headers=headers)
-    auth_main._create_pending_approval_record(user_id, "run `rm x` on my-mac", {}, None, False)
-    assert len(fake.messages.calls) == 1
-    assert fake.messages.calls[0]["to"] == "+15552345678"
-    assert fake.messages.calls[0]["from_"] == "+15005550006"
-    assert "run `rm x` on my-mac" in fake.messages.calls[0]["body"]
+    # Linked directly (bypassing the /start deep-link flow, which is
+    # exercised separately below) -- now it sends, with inline
+    # Approve/Deny buttons keyed to the exact approval_id.
+    with auth_main.get_db() as db:
+        db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("12345", user_id))
+    approval_id = auth_main._create_pending_approval_record(user_id, "run `rm x` on my-mac", {}, None, False)
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/sendMessage")
+    body = fake.calls[0]["json"]
+    assert body["chat_id"] == "12345"
+    assert body["text"] == "run `rm x` on my-mac"
+    buttons = body["reply_markup"]["inline_keyboard"][0]
+    assert buttons[0]["callback_data"] == f"approve:{approval_id}"
+    assert buttons[1]["callback_data"] == f"deny:{approval_id}"
 
 
-def test_sms_inbound_requires_valid_signature(client):
-    # Not configured at all.
-    os.environ.pop("TWILIO_AUTH_TOKEN", None)
-    assert client.post("/sms/inbound", data={"From": "+15552345678", "Body": "yes"}).status_code == 403
+def test_telegram_webhook_requires_valid_secret(client):
+    os.environ.pop("TELEGRAM_WEBHOOK_SECRET", None)
+    assert client.post("/telegram/webhook", json={"message": {}}).status_code == 403
 
-    # Configured, but no/garbage signature.
-    os.environ["TWILIO_AUTH_TOKEN"] = "test-auth-token"
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = "test-webhook-secret"
     assert (
         client.post(
-            "/sms/inbound", data={"From": "+15552345678", "Body": "yes"}, headers={"X-Twilio-Signature": "bogus"}
+            "/telegram/webhook", json={"message": {}}, headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"}
         ).status_code
         == 403
     )
 
 
-def test_sms_inbound_handles_unmatched_number_and_no_pending_approval_gracefully(client):
-    from twilio.request_validator import RequestValidator
+def test_telegram_link_and_webhook_complete_linking(client):
+    """POST /telegram/link issues a token; a /start message carrying it
+    (as the webhook would relay it) links that chat to the account."""
+    import main as auth_main
 
-    os.environ["TWILIO_AUTH_TOKEN"] = "test-auth-token"
-    validator = RequestValidator("test-auth-token")
+    fake = _FakeTelegramSend()
+    auth_main.requests = fake
+    os.environ["TELEGRAM_BOT_USERNAME"] = "CasperApprovalsBot"
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = "test-webhook-secret"
 
-    def _post(url, params):
-        sig = validator.compute_signature(url, params)
-        return client.post("/sms/inbound", data=params, headers={"X-Twilio-Signature": sig})
-
-    # No user has this number at all.
-    r = _post("http://testserver/sms/inbound", {"From": "+19995550000", "Body": "yes"})
-    assert r.status_code == 200
-    assert "isn't set up" in r.text
-
-    # A real user, but nothing pending.
-    signup = _signup(client, "smsuser2")
+    signup = _signup(client, "tguser2")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    client.patch("/profile", json={"sms_notifications_enabled": True, "sms_number": "555-234-5678"}, headers=headers)
-    r = _post("http://testserver/sms/inbound", {"From": "+15552345678", "Body": "yes"})
+    link = client.post("/telegram/link", headers=headers)
+    assert link.status_code == 200
+    link_url = link.json()["link_url"]
+    assert link_url.startswith("https://t.me/CasperApprovalsBot?start=")
+    token = link_url.rsplit("=", 1)[1]
+
+    webhook_headers = {"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"}
+    r = client.post(
+        "/telegram/webhook",
+        json={"message": {"chat": {"id": 999}, "text": f"/start {token}"}},
+        headers=webhook_headers,
+    )
     assert r.status_code == 200
-    assert "No pending approval" in r.text
+
+    profile = client.get("/profile", headers=headers).json()
+    assert profile["telegram_chat_id"] == "999"
+
+    # The token is single-use -- a replay doesn't re-link (would silently
+    # succeed with a stale/reused token otherwise).
+    stale = client.post(
+        "/telegram/webhook",
+        json={"message": {"chat": {"id": 111}, "text": f"/start {token}"}},
+        headers=webhook_headers,
+    )
+    assert stale.status_code == 200
+    assert client.get("/profile", headers=headers).json()["telegram_chat_id"] == "999"
+
+
+def test_telegram_webhook_callback_rejects_wrong_owner(client):
+    import main as auth_main
+
+    fake = _FakeTelegramSend()
+    auth_main.requests = fake
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = "test-webhook-secret"
+
+    owner = _signup(client, "tguser3")
+    other = _signup(client, "tguser4")
+    with auth_main.get_db() as db:
+        owner_id = auth_main._resolve_user_id(db, f"Bearer {owner['token']}")
+        other_id = auth_main._resolve_user_id(db, f"Bearer {other['token']}")
+        auth_main._get_or_create_profile(db, owner_id)  # ensures the row exists before the UPDATEs below
+        auth_main._get_or_create_profile(db, other_id)
+        db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("111", owner_id))
+        db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("222", other_id))
+    approval_id = auth_main._create_pending_approval_record(owner_id, "run `rm x` on my-mac", {}, None, False)
+
+    webhook_headers = {"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"}
+    # The OTHER user's chat tries to decide the owner's approval.
+    r = client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "cb1",
+                "data": f"approve:{approval_id}",
+                "message": {"chat": {"id": 222}},
+            }
+        },
+        headers=webhook_headers,
+    )
+    assert r.status_code == 200
+    with auth_main.get_db() as db:
+        assert db.execute("SELECT 1 FROM pending_approvals WHERE id = ?", (approval_id,)).fetchone() is not None

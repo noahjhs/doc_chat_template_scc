@@ -109,7 +109,9 @@ CREATE TABLE IF NOT EXISTS user_profile (
     allow_configure_hosts INTEGER NOT NULL DEFAULT 0,
     allow_configure_environments INTEGER NOT NULL DEFAULT 0,
     allow_configure_local_agents INTEGER NOT NULL DEFAULT 0,
-    system_prompt TEXT NOT NULL DEFAULT ''
+    system_prompt TEXT NOT NULL DEFAULT '',
+    telegram_notifications_enabled INTEGER NOT NULL DEFAULT 0,
+    telegram_chat_id TEXT NOT NULL DEFAULT ''
 );
 
 -- SUPERSEDED by rule_chains/rule_chain_rules below -- kept only because
@@ -291,12 +293,28 @@ def _add_system_prompt_column_to_user_profile(db):
     db.execute("ALTER TABLE user_profile ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''")
 
 
+def _add_telegram_columns_to_user_profile(db):
+    """One-time ALTER TABLE ADD COLUMN for user_profile.telegram_chat_id/
+    telegram_notifications_enabled (see main.py's telegram_link/
+    telegram_webhook). Same posture as the other user_profile column
+    migrations above."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "user_profile" not in existing:
+        return
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(user_profile)").fetchall()}
+    if "telegram_chat_id" not in columns:
+        db.execute("ALTER TABLE user_profile ADD COLUMN telegram_chat_id TEXT NOT NULL DEFAULT ''")
+    if "telegram_notifications_enabled" not in columns:
+        db.execute("ALTER TABLE user_profile ADD COLUMN telegram_notifications_enabled INTEGER NOT NULL DEFAULT 0")
+
+
 def init_db():
     with get_db() as db:
         _rename_legacy_rule_chain_tables(db)
         db.executescript(SCHEMA)
         _add_cwd_column_to_policy_layer_rules(db)
         _add_system_prompt_column_to_user_profile(db)
+        _add_telegram_columns_to_user_profile(db)
 
 
 @contextlib.contextmanager

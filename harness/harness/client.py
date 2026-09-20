@@ -181,6 +181,14 @@ def update_profile(domain: str, token: str, **fields) -> dict:
     return _request(domain, "PATCH", "/profile", token=token, json=fields)
 
 
+def telegram_link(domain: str, token: str) -> dict:
+    """POST /telegram/link -- returns {"link_url": "https://t.me/..."};
+    opening it (or messaging the bot /start <token> directly) links the
+    caller's Telegram chat to their account, so pending approvals can be
+    sent/answered there (see /telegram/webhook)."""
+    return _request(domain, "POST", "/telegram/link", token=token)
+
+
 # --- Pending approvals (durable, per-user) --------------------------------
 # Host/device-agnostic -- resolvable from any interface holding the
 # account's own session token, not a designated "attended" machine (see

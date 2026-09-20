@@ -333,27 +333,46 @@ def test_conversation_pending_approval_visible_and_resolvable_via_decide_endpoin
     )
 
 
-def test_sms_inbound_resolves_pending_approval_and_resumes_conversation(app_env):
-    """The full text-message-approval lifecycle: a real ask-tier pause,
-    notified (mocked) via SMS, resolved by a real (signature-verified)
-    inbound Twilio webhook reply -- confirms it actually resumes the
-    conversation, not just records a decision."""
-    from twilio.request_validator import RequestValidator
+def test_telegram_callback_resolves_pending_approval_and_resumes_conversation(app_env):
+    """The full Telegram-approval lifecycle: a real ask-tier pause,
+    notified (mocked send) via Telegram, resolved by a real
+    (secret-verified) inbound webhook callback_query -- confirms it
+    actually resumes the conversation, not just records a decision."""
+
+    class _FakeTelegramSend:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, json=None, timeout=None, **kwargs):
+            self.calls.append({"url": url, "json": json})
+
+            class _Resp:
+                status_code = 200
+
+                def json(self):
+                    return {"ok": True}
+
+            return _Resp()
 
     main, client = app_env
-    os.environ["TWILIO_AUTH_TOKEN"] = "test-auth-token"
-    validator = RequestValidator("test-auth-token")
+    fake_telegram = _FakeTelegramSend()
+    main.requests = fake_telegram
+    os.environ["TELEGRAM_BOT_TOKEN"] = "test-bot-token"
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = "test-webhook-secret"
 
     signup = _signup(client, "juan")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    client.patch("/profile", json={"sms_notifications_enabled": True, "sms_number": "555-234-5678"}, headers=headers)
+    client.patch("/profile", json={"telegram_notifications_enabled": True}, headers=headers)
+    with main.get_db() as db:
+        user_id = main._resolve_user_id(db, f"Bearer {signup['token']}")
+        db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("555", user_id))
 
     pair = _pair_and_connect_host(client, headers, "rk-juan-1", "juans-mac")
     layer = _create_policy_layer(client, headers)
     _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="ask")
     client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
 
-    fake = FakeClient([FakeResponse(id="resp_sms", output_text="ok, ran it")])
+    fake = FakeClient([FakeResponse(id="resp_tg", output_text="ok, ran it")])
     main._get_openai_client = lambda: fake
 
     paused = _step(
@@ -361,13 +380,18 @@ def test_sms_inbound_resolves_pending_approval_and_resumes_conversation(app_env)
         tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}}, mock=True,
     ).json()
     assert paused["status"] == "pending_approval"
+    approval_id = paused["pending_approval"]["approval_id"]
 
-    params = {"From": "+15552345678", "Body": "yes please"}
-    url = "http://testserver/sms/inbound"
-    signature = validator.compute_signature(url, params)
-    reply = client.post("/sms/inbound", data=params, headers={"X-Twilio-Signature": signature})
+    # The notification Telegram message itself, with the right buttons.
+    sent = next(c for c in fake_telegram.calls if c["url"].endswith("/sendMessage"))
+    assert sent["json"]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"approve:{approval_id}"
+
+    reply = client.post(
+        "/telegram/webhook",
+        json={"callback_query": {"id": "cb1", "data": f"approve:{approval_id}", "message": {"chat": {"id": 555}}}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"},
+    )
     assert reply.status_code == 200
-    assert "Approved" in reply.text
 
     assert client.get("/conversations/pending-approvals", headers=headers).json()["pending_approvals"] == []
     assert len(fake.responses.calls) == 1  # only the follow-up hop after resuming -- the injected tool_call never needed a model call to pause

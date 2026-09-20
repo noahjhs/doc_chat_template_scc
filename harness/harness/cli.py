@@ -859,6 +859,20 @@ def profile_get():
     console.print(result)
 
 
+@profile_app.command("telegram-link")
+def profile_telegram_link():
+    """Get a one-time link to connect a Telegram chat for pending-approval
+    notifications -- open it (or message the bot /start <token> shown in
+    it directly), then `profile set --telegram-notifications` to turn
+    them on."""
+    domain, token = _require_session()
+    try:
+        result = client.telegram_link(domain, token)
+    except client.ApiError as e:
+        _handle_api_error(e)
+    console.print(f"Open this link in Telegram to connect: [bold]{result['link_url']}[/bold]")
+
+
 @profile_app.command("set")
 def profile_set(
     email: Optional[str] = typer.Option(None, "--email"),
@@ -875,6 +889,11 @@ def profile_set(
     ),
     system_prompt_file: Optional[Path] = typer.Option(
         None, "--system-prompt-file", help="Read the system prompt from a file instead of passing it inline."
+    ),
+    telegram_notifications: Optional[bool] = typer.Option(
+        None,
+        "--telegram-notifications/--no-telegram-notifications",
+        help="Send pending approvals to Telegram -- run `profile telegram-link` first to connect an account.",
     ),
 ):
     """Merge-update the caller's own profile -- only flags actually passed
@@ -896,6 +915,7 @@ def profile_set(
         "allow_configure_environments": allow_configure_environments,
         "allow_configure_local_agents": allow_configure_local_agents,
         "system_prompt": system_prompt,
+        "telegram_notifications_enabled": telegram_notifications,
     }
     fields = {k: v for k, v in fields.items() if v is not None}
     domain, token = _require_session()

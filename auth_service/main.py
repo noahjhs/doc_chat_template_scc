@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import bcrypt
 import requests
 from db import get_db, init_db
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -38,7 +38,6 @@ from models import (
     HostVerifyResponse,
     LoginRequest,
     Pattern,
-    normalize_phone_digits,
     PendingApprovalDecisionRequest,
     PendingApprovalInfo,
     PendingApprovalListResponse,
@@ -62,6 +61,7 @@ from models import (
     StorageFileInfo,
     StorageListResponse,
     StorageUploadRequest,
+    TelegramLinkResponse,
     VerifyResponse,
 )
 
@@ -85,26 +85,12 @@ def _get_openai_client():
     return _openai_client
 
 
-_twilio_client = None
-
-
-def _get_twilio_client():
-    """Lazily constructed, cached singleton -- mirrors _get_openai_client's
-    injection-point pattern (tests patch this function directly, same as
-    they do for the OpenAI client). Returns None if Twilio isn't
-    configured at all (no TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) -- a
-    perfectly normal state for a deployment that hasn't set up SMS
-    approvals, not an error."""
-    global _twilio_client
-    if _twilio_client is None:
-        account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-        auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-        if not account_sid or not auth_token:
-            return None
-        from twilio.rest import Client as TwilioClient
-
-        _twilio_client = TwilioClient(account_sid, auth_token)
-    return _twilio_client
+# Telegram approvals send/receive via plain requests.post -- no SDK
+# dependency needed (unlike Twilio), see _send_approval_telegram and the
+# /telegram/webhook handler below.
+_telegram_link_tokens: dict[str, tuple[int, float]] = {}  # token -> (user_id, created_ts)
+_telegram_link_lock = threading.Lock()
+_TELEGRAM_LINK_TTL_SECONDS = 10 * 60
 
 
 @app.exception_handler(RequestValidationError)
@@ -1321,11 +1307,11 @@ def _step_response(turn: dict, approval_decision: str | None, ctx: "conversation
 # A durable record of an "ask"-tier pause (see db.py's pending_approvals
 # table and conversations.py's DispatchContext.create_pending_approval),
 # resolvable from whichever interface the user actually checks in from --
-# harness (below), a text reply (see /sms/inbound), eventually a browser.
-# Deliberately host/device-agnostic: no routing_key/device_token appears
-# anywhere here, unlike the native-dialog "attended host" relay this
-# replaces (removed as a design mistake -- see git history -- since it
-# conflated "which host executes a command" with "which screen a human
+# harness (below), a Telegram reply (see /telegram/webhook), eventually a
+# browser. Deliberately host/device-agnostic: no routing_key/device_token
+# appears anywhere here, unlike the native-dialog "attended host" relay
+# this replaces (removed as a design mistake -- see git history -- since
+# it conflated "which host executes a command" with "which screen a human
 # happens to be watching").
 def _create_pending_approval_record(
     user_id: int, description: str, turn: dict, default_host: str | None, mock: bool
@@ -1344,41 +1330,56 @@ def _create_pending_approval_record(
             """,
             (approval_id, user_id, description, json.dumps(turn), default_host, int(mock)),
         )
-    _send_approval_sms(user_id, description)
+    _send_approval_telegram(user_id, description, approval_id)
     return approval_id
 
 
-def _send_approval_sms(user_id: int, description: str):
-    """Best-effort -- an SMS failure (Twilio not configured for this
-    deployment, an API error, an invalid number) must never break the
+def _send_approval_telegram(user_id: int, description: str, approval_id: str):
+    """Best-effort -- a Telegram failure (not configured for this
+    deployment, an API error, an unlinked chat) must never break the
     conversation step that triggered it. No-ops unless the user has BOTH
-    sms_notifications_enabled and a saved sms_number (see models.py's
-    ProfileInfo) -- this is an opt-in notification, not a requirement to
-    answer via text (the same session, or `harness approvals`, still
-    works regardless)."""
-    twilio_client = _get_twilio_client()
-    from_number = os.environ.get("TWILIO_FROM_NUMBER")
-    if twilio_client is None or not from_number:
-        return
+    telegram_notifications_enabled and a linked telegram_chat_id (see
+    models.py's ProfileInfo, and /telegram/link below for how linking
+    happens) -- this is an opt-in notification, not a requirement to
+    answer this way (the same session, or `harness approvals`, still
+    works regardless). Sends inline Approve/Deny buttons keyed to this
+    exact approval_id -- a tap posts straight back as a callback_query
+    with that id, so there's no "which pending approval does a bare yes
+    mean" ambiguity to resolve, unlike a plain text reply channel."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     with get_db() as db:
         profile = _get_or_create_profile(db, user_id)
-    if not profile.sms_notifications_enabled or not profile.sms_number:
+    if not bot_token or not profile.telegram_notifications_enabled or not profile.telegram_chat_id:
         return
-    to_number = f"+1{normalize_phone_digits(profile.sms_number)}"
     try:
-        twilio_client.messages.create(to=to_number, from_=from_number, body=f"{description}. Reply YES to approve, NO to deny.")
-    except Exception as e:  # noqa: BLE001 -- any Twilio/network failure here is best-effort, never fatal to the step
-        print(f"Couldn't send approval SMS to user {user_id}: {e}")
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={
+                "chat_id": profile.telegram_chat_id,
+                "text": description,
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [
+                            {"text": "✅ Approve", "callback_data": f"approve:{approval_id}"},
+                            {"text": "❌ Deny", "callback_data": f"deny:{approval_id}"},
+                        ]
+                    ]
+                },
+            },
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        print(f"Couldn't send approval Telegram message to user {user_id}: {e}")
 
 
 def _resume_pending_approval(row, decision: str) -> ConversationStepResponse:
     """Rebuilds a DispatchContext for an already-loaded pending_approvals
     row (scoped to the right user by the caller) and resumes it -- shared
-    by decide_pending_approval below and the SMS webhook (see /sms/inbound),
-    which differ only in how they find `row` and what they do with the
-    result. Deletes the row so the same approval can't be resolved twice;
-    a follow-up ask-tier pause, if any, creates its own fresh row through
-    the normal create_pending_approval path."""
+    by decide_pending_approval below and the Telegram webhook (see
+    /telegram/webhook), which differ only in how they find `row` and what
+    they do with the result. Deletes the row so the same approval can't be
+    resolved twice; a follow-up ask-tier pause, if any, creates its own
+    fresh row through the normal create_pending_approval path."""
     user_id = row["user_id"]
     with get_db() as db:
         configs = _connected_host_configs(db, user_id)
@@ -1432,73 +1433,133 @@ def decide_pending_approval(
     return _resume_pending_approval(row, body.decision)
 
 
-def _twiml_message(message: str) -> Response:
-    escaped = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return Response(content=f"<Response><Message>{escaped}</Message></Response>", media_type="application/xml")
+def _telegram_send_text(chat_id: str, text: str):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10
+        )
+    except requests.RequestException as e:
+        print(f"Couldn't send Telegram message to chat {chat_id}: {e}")
 
 
-@app.post("/sms/inbound")
-async def sms_inbound(request: Request):
-    """Twilio's webhook for a reply to an approval text (see
-    _send_approval_sms) -- the only entry point besides a logged-in
-    session that can ever resolve a pending approval, so verifying
-    X-Twilio-Signature (proving the request really came from Twilio, not
-    someone who found this URL) is the actual security boundary here, not
-    session auth. TWILIO_WEBHOOK_URL overrides the URL validated against
-    (defaults to the request's own url) -- needed if this deployment sits
-    behind a reverse proxy/tunnel that changes what FastAPI sees vs. the
-    public URL Twilio actually signed against.
-    Matches an inbound reply to a user by phone number, then resolves
-    that user's most-recently-created pending approval -- deliberately no
-    per-approval code to reply with; the outbound text is fully
-    descriptive of what it's approving so a bare "yes"/"no" reading the
-    thread is enough."""
-    auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-    if not auth_token:
-        raise HTTPException(status_code=403, detail="SMS approvals aren't configured on this deployment.")
+def _telegram_answer_callback(callback_query_id: str, text: str):
+    """Acknowledges a button tap -- shows `text` as a brief toast in the
+    Telegram client. Required within a few seconds or the client shows a
+    perpetual loading spinner on the tapped button."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id, "text": text},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        print(f"Couldn't answer Telegram callback query: {e}")
 
-    form = await request.form()
-    params = dict(form)
-    signature = request.headers.get("X-Twilio-Signature", "")
-    webhook_url = os.environ.get("TWILIO_WEBHOOK_URL", str(request.url))
 
-    from twilio.request_validator import RequestValidator
+def _prune_telegram_link_tokens_locked():
+    """Caller must hold _telegram_link_lock. An unused link token going
+    stale just means the user requests a fresh one -- low-stakes, short-
+    lived, no reason to persist these to SQLite the way pending_approvals
+    itself needs to be."""
+    cutoff = time.time() - _TELEGRAM_LINK_TTL_SECONDS
+    stale = [t for t, (_, created_ts) in _telegram_link_tokens.items() if created_ts < cutoff]
+    for t in stale:
+        del _telegram_link_tokens[t]
 
-    if not RequestValidator(auth_token).validate(webhook_url, params, signature):
-        raise HTTPException(status_code=403, detail="Invalid signature.")
 
-    from_number = normalize_phone_digits(str(params.get("From", "")))
-    body_text = str(params.get("Body", "")).strip().lower()
-
+@app.post("/telegram/link", response_model=TelegramLinkResponse)
+def telegram_link(authorization: str = Header(default="")):
+    """Generates a one-time deep-link token -- opening the returned URL
+    (or messaging the bot `/start <token>` directly) links the caller's
+    Telegram chat to their Casper account, so approval notifications know
+    where to go (see _send_approval_telegram) and /telegram/webhook knows
+    whose approval a button tap belongs to."""
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME")
+    if not bot_username:
+        raise HTTPException(status_code=503, detail="Telegram isn't configured on this deployment.")
     with get_db() as db:
-        candidates = db.execute(
-            "SELECT user_id, sms_number FROM user_profile WHERE sms_notifications_enabled = 1"
-        ).fetchall()
-    user_id = next(
-        (r["user_id"] for r in candidates if r["sms_number"] and normalize_phone_digits(r["sms_number"]) == from_number),
-        None,
-    )
-    if user_id is None:
-        return _twiml_message("This number isn't set up for Casper approvals.")
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    token = secrets.token_urlsafe(16)
+    with _telegram_link_lock:
+        _prune_telegram_link_tokens_locked()
+        _telegram_link_tokens[token] = (user_id, time.time())
+    return TelegramLinkResponse(link_url=f"https://t.me/{bot_username}?start={token}")
 
-    with get_db() as db:
-        row = db.execute(
-            "SELECT * FROM pending_approvals WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
-        ).fetchone()
-    if row is None:
-        return _twiml_message("No pending approval to answer.")
 
-    first_word = body_text.split()[0] if body_text.split() else ""
-    if first_word in ("yes", "y", "approve", "allow"):
-        decision = "allow"
-    elif first_word in ("no", "n", "deny", "reject"):
-        decision = "deny"
-    else:
-        return _twiml_message(f"Sorry, I didn't understand that. Reply YES or NO to: {row['description']}")
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Telegram's webhook -- covers two things a user does from their
+    chat with the bot: completing account linking (`/start <token>`, see
+    /telegram/link above) and answering an approval (tapping an inline
+    Approve/Deny button, see _send_approval_telegram -- arrives as a
+    callback_query, never as plain text, so there's no "which pending
+    approval" ambiguity: the button's own callback_data names the exact
+    approval_id). X-Telegram-Bot-Api-Secret-Token (set once via Telegram's
+    own setWebhook call, matched against TELEGRAM_WEBHOOK_SECRET here) is
+    the actual security boundary -- this endpoint has no session auth."""
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=403, detail="Telegram approvals aren't configured on this deployment.")
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+        raise HTTPException(status_code=403, detail="Invalid secret token.")
 
-    _resume_pending_approval(row, decision)
-    verb = "Approved" if decision == "allow" else "Denied"
-    return _twiml_message(f"{verb}: {row['description']}.")
+    update = await request.json()
+
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
+        callback_id = callback.get("id", "")
+        action, _, approval_id = str(callback.get("data", "")).partition(":")
+        if action not in ("approve", "deny") or not approval_id:
+            _telegram_answer_callback(callback_id, "Unrecognized action.")
+            return {"ok": True}
+        with get_db() as db:
+            row = db.execute("SELECT * FROM pending_approvals WHERE id = ?", (approval_id,)).fetchone()
+            owner = db.execute(
+                "SELECT user_id FROM user_profile WHERE telegram_chat_id = ?", (chat_id,)
+            ).fetchone()
+        if row is None:
+            _telegram_answer_callback(callback_id, "That approval is no longer pending.")
+            return {"ok": True}
+        if owner is None or owner["user_id"] != row["user_id"]:
+            _telegram_answer_callback(callback_id, "This isn't your approval to decide.")
+            return {"ok": True}
+        decision = "allow" if action == "approve" else "deny"
+        _resume_pending_approval(row, decision)
+        verb = "Approved" if decision == "allow" else "Denied"
+        _telegram_answer_callback(callback_id, verb)
+        _telegram_send_text(chat_id, f"{verb}: {row['description']}.")
+        return {"ok": True}
+
+    if "message" in update:
+        message = update["message"]
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        text = str(message.get("text", "")).strip()
+        if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            token = parts[1] if len(parts) > 1 else ""
+            with _telegram_link_lock:
+                _prune_telegram_link_tokens_locked()
+                entry = _telegram_link_tokens.pop(token, None)
+            if entry is None:
+                _telegram_send_text(chat_id, "This link has expired -- request a new one from `harness profile telegram-link`.")
+                return {"ok": True}
+            user_id, _created_ts = entry
+            with get_db() as db:
+                _get_or_create_profile(db, user_id)  # ensures the row exists before the UPDATE below
+                db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", (chat_id, user_id))
+            _telegram_send_text(chat_id, "Linked! Casper approval requests will show up here.")
+        return {"ok": True}
+
+    return {"ok": True}
 
 
 # --- Profile ---------------------------------------------------------------
@@ -1528,6 +1589,8 @@ def _get_or_create_profile(db, user_id: int) -> ProfileInfo:
         allow_configure_environments=bool(row["allow_configure_environments"]),
         allow_configure_local_agents=bool(row["allow_configure_local_agents"]),
         system_prompt=row["system_prompt"],
+        telegram_notifications_enabled=bool(row["telegram_notifications_enabled"]),
+        telegram_chat_id=row["telegram_chat_id"],
     )
 
 

@@ -432,28 +432,16 @@ def _validate_email_value(value: str) -> str:
     return value
 
 
-def normalize_phone_digits(value: str) -> str:
-    """Strips everything but digits and drops a leading US country-code
-    "1" if present -- the single source of truth for comparing/storing a
-    phone number as digits only. Shared by _validate_sms_number_value
-    below (storage) and auth_service/main.py's SMS-inbound matching
-    (looking up which user a Twilio webhook's "From" number belongs to),
-    so a stored "(555) 234-5678" and an inbound "+15552345678" compare
-    equal."""
-    digits = re.sub(r"\D", "", value)
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    return digits
-
-
 def _validate_sms_number_value(value: str) -> str:
     """Normalizes to a canonical "(XXX) XXX-XXXX" US phone number -- the
     masking half of "input masking and data validation" happens here
     (single source of truth, rather than duplicating this in every
-    caller): requires exactly 10 digits once normalize_phone_digits
-    strips everything else. The client just displays whatever comes back
-    in the response."""
-    digits = normalize_phone_digits(value)
+    caller): strips everything but digits, drops a leading "1" country
+    code if present, then requires exactly 10 digits left. The client
+    just displays whatever comes back in the response."""
+    digits = re.sub(r"\D", "", value)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
     if len(digits) != 10:
         raise ValueError("Enter a 10-digit phone number.")
     return f"({digits[0:3]}) {digits[3:6]}-{digits[6:10]}"
@@ -478,6 +466,12 @@ class ProfileInfo(BaseModel):
     # (see auth_service/conversations.py's run_turn) -- blank means no
     # custom instructions, the model's own default behavior.
     system_prompt: str = ""
+    # telegram_chat_id is set only via the /telegram/link deep-link flow
+    # (main.py's telegram_webhook), never directly through this model's own
+    # update path below -- there's no "type in your chat id" equivalent of
+    # sms_number, since Telegram never shows the user their own chat id.
+    telegram_notifications_enabled: bool = False
+    telegram_chat_id: str = ""
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -497,6 +491,7 @@ class ProfileUpdateRequest(BaseModel):
     allow_configure_environments: bool | None = None
     allow_configure_local_agents: bool | None = None
     system_prompt: str | None = Field(default=None, max_length=20000)
+    telegram_notifications_enabled: bool | None = None
 
     @field_validator("email")
     @classmethod
@@ -511,3 +506,11 @@ class ProfileUpdateRequest(BaseModel):
         if not value:
             return value
         return _validate_sms_number_value(value)
+
+
+class TelegramLinkResponse(BaseModel):
+    """POST /telegram/link's response -- link_url is a t.me deep link;
+    opening it (or messaging the bot `/start <token>` directly) completes
+    linking. See main.py's telegram_link/telegram_webhook."""
+
+    link_url: str
