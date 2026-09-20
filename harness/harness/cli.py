@@ -622,8 +622,12 @@ def pair_daemon(
     while time.monotonic() < deadline:
         # The daemon's own record of what just happened is definitive --
         # check it before (or instead of) waiting out the full timeout on
-        # a conflict/error a native dialog would otherwise be the only
-        # place to see (see agent/cmd/casper/daemon.go's handlePairURL).
+        # a pairing-exchange error (e.g. an unreachable auth service) a
+        # native dialog would otherwise be the only place to see (see
+        # agent/cmd/casper/daemon.go's handlePairURL). A daemon can be
+        # paired to more than one Casper account at once now, so pairing a
+        # machine that's already paired to a different account is no
+        # longer an error case here.
         status = _read_pairing_status(domain)
         if status and status.get("result") != "ok":
             try:
