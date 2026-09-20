@@ -41,29 +41,38 @@ CREATE TABLE IF NOT EXISTS user_hosts (
 );
 CREATE INDEX IF NOT EXISTS idx_user_hosts_host_id ON user_hosts(host_id);
 
--- Which user currently OWNS a routing_key, and the live credentials that
--- prove it -- one row per currently-paired physical host, replaced
--- wholesale on every (re-)pairing (see main.py's _pair_host). Unlike the
--- old in-memory-only _attached dict this replaced, this survives an
--- auth_service restart -- the actual fix for daemons needing to be
--- manually re-paired after every routine redeploy: device_token_hash
--- stays valid, so a daemon's own existing resumeSession()-on-startup
--- logic (agent/cmd/casper/main.go) just works again on its own, no
--- `casper://pair` round trip needed unless this row is genuinely gone
--- (a real first-time pairing, or an explicit unpair/forget/sign-out).
+-- Which user(s) currently OWN a routing_key, and the live credentials that
+-- prove each of their pairings -- one row per (routing_key, user_id), so
+-- the SAME physical daemon can be paired to several different accounts at
+-- once (each fully independent: its own device_token/command_key, its own
+-- policy_layers via policy_layer_hosts keyed off host_id+that user's own
+-- user_id -- see main.py's _connected_host_configs/list_hosts). Re-pairing
+-- the same (routing_key, user_id) is idempotent -- replaces that one row's
+-- credentials in place (see main.py's _pair_host), never disturbs any
+-- other user's row for the same routing_key. Unlike the old in-memory-only
+-- _attached dict this replaced, this survives an auth_service restart --
+-- the actual fix for daemons needing to be manually re-paired after every
+-- routine redeploy: device_token_hash stays valid, so a daemon's own
+-- existing resumeSession()-on-startup logic (agent/cmd/casper/main.go)
+-- just works again on its own, no `casper://pair` round trip needed unless
+-- this row is genuinely gone (a real first-time pairing, or an explicit
+-- unpair/forget/sign-out of that specific account).
 -- Deliberately does NOT include local_agent_url/cwd -- those are live
 -- reachability facts a restart should legitimately forget (a daemon
 -- reports them fresh on its next presence beat regardless), not identity
--- -- see main.py's _live in-memory dict for those.
+-- -- see main.py's _live in-memory dict for those (genuinely machine-level,
+-- shared across every account paired to a routing_key, not per-pairing).
 CREATE TABLE IF NOT EXISTS host_pairings (
-    routing_key TEXT PRIMARY KEY REFERENCES hosts(routing_key),
+    routing_key TEXT NOT NULL REFERENCES hosts(routing_key),
     user_id INTEGER NOT NULL REFERENCES users(id),
     host_id INTEGER NOT NULL REFERENCES hosts(id),
     device_token_hash TEXT NOT NULL UNIQUE,
     command_key TEXT NOT NULL,
-    paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (routing_key, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_host_pairings_device_token_hash ON host_pairings(device_token_hash);
+CREATE INDEX IF NOT EXISTS idx_host_pairings_routing_key ON host_pairings(routing_key);
 
 -- User-defined named groupings of their known hosts -- which hosts are
 -- "in play" for the assistant during a given chat session.

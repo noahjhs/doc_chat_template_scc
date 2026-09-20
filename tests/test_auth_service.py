@@ -200,23 +200,31 @@ def test_pairing_survives_an_auth_service_restart(client):
     assert hosts[0]["cwd"] == "/Users/gina2"
 
 
-def test_pairing_to_an_already_paired_host_is_rejected_even_when_not_live(client):
-    """HostAlreadyAttachedError must trigger from the PERSISTED pairing,
-    not just a live in-memory one -- otherwise a routing_key that's
-    genuinely still owned by user A, but not currently connected in this
-    process's lifetime, could be silently stolen by user B. This was a
-    real gap the old in-memory-only design had (the check only ever saw
-    "currently live," not "ever paired")."""
+def test_pairing_the_same_host_to_a_second_account_succeeds_even_when_not_live(client):
+    """One physical daemon (routing_key) can be paired to several accounts
+    at once -- confirmed here from the PERSISTED pairing state, not just a
+    live in-memory one, since that's the actual mechanism (host_pairings
+    survives a restart; see test_pairing_survives_an_auth_service_restart).
+    Both pairings must coexist as independent rows, each with its own
+    device_token, neither disturbing the other."""
     a = _signup(client, "howard")
     b = _signup(client, "iris2")
     headers_a = {"Authorization": f"Bearer {a['token']}"}
     headers_b = {"Authorization": f"Bearer {b['token']}"}
 
-    paired = client.post("/hosts/pair", json={"routing_key": "rk-shared-1"}, headers=headers_a)
-    assert paired.status_code == 201
+    paired_a = client.post("/hosts/pair", json={"routing_key": "rk-shared-1"}, headers=headers_a)
+    assert paired_a.status_code == 201
 
-    stolen = client.post("/hosts/pair", json={"routing_key": "rk-shared-1"}, headers=headers_b)
-    assert stolen.status_code == 409
+    paired_b = client.post("/hosts/pair", json={"routing_key": "rk-shared-1"}, headers=headers_b)
+    assert paired_b.status_code == 201
+    assert paired_b.json()["device_token"] != paired_a.json()["device_token"]
+
+    # Both device_tokens remain independently valid -- pairing B never
+    # revoked or overwrote A's row.
+    device_headers_a = {"Authorization": f"Bearer {paired_a.json()['device_token']}"}
+    device_headers_b = {"Authorization": f"Bearer {paired_b.json()['device_token']}"}
+    assert client.post("/hosts/verify", headers=device_headers_a).json() == {"valid": True}
+    assert client.post("/hosts/verify", headers=device_headers_b).json() == {"valid": True}
 
 
 def test_pair_is_idempotent_for_the_same_user(client):
@@ -239,24 +247,96 @@ def test_pair_is_idempotent_for_the_same_user(client):
     assert len(hosts) == 1  # no duplicate row
 
 
-def test_second_user_pairing_a_taken_host_gets_409(client):
+def test_second_user_pairing_a_taken_host_succeeds_independently(client):
     a = _signup(client, "gina")
     b = _signup(client, "hank")
+    headers_a = {"Authorization": f"Bearer {a['token']}"}
+    headers_b = {"Authorization": f"Bearer {b['token']}"}
 
     pair_a = client.post(
-        "/hosts/pair", json={"routing_key": "rk-shared", "hostname": "shared-box"},
-        headers={"Authorization": f"Bearer {a['token']}"},
+        "/hosts/pair", json={"routing_key": "rk-shared", "hostname": "shared-box"}, headers=headers_a
     ).json()
-
-    conflict = client.post(
-        "/hosts/pair", json={"routing_key": "rk-shared", "hostname": "shared-box"},
-        headers={"Authorization": f"Bearer {b['token']}"},
+    pair_b = client.post(
+        "/hosts/pair", json={"routing_key": "rk-shared", "hostname": "shared-box"}, headers=headers_b
     )
-    assert conflict.status_code == 409
+    assert pair_b.status_code == 201
+    pair_b = pair_b.json()
 
-    # a's session is undisturbed
-    device_headers = {"Authorization": f"Bearer {pair_a['device_token']}"}
-    assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": True}
+    # a's session is undisturbed by b's pairing to the same routing_key
+    device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
+    device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
+    assert client.post("/hosts/verify", headers=device_headers_a).json() == {"valid": True}
+    assert client.post("/hosts/verify", headers=device_headers_b).json() == {"valid": True}
+
+    # Each account sees only its own pairing row -- never the other's
+    # device_token/command_key or pairing existence.
+    hosts_a = client.get("/hosts", headers=headers_a).json()["hosts"]
+    hosts_b = client.get("/hosts", headers=headers_b).json()["hosts"]
+    assert len(hosts_a) == 1 and len(hosts_b) == 1
+    assert hosts_a[0]["command_key"] != hosts_b[0]["command_key"]
+
+    # Unpairing one account's device_token never disturbs the other's.
+    client.post("/hosts/unpair", headers=device_headers_a)
+    assert client.post("/hosts/verify", headers=device_headers_a).json() == {"valid": False}
+    assert client.post("/hosts/verify", headers=device_headers_b).json() == {"valid": True}
+    assert client.get("/hosts", headers=headers_b).json()["hosts"][0]["connected"] is False
+
+
+def test_pairing_to_a_shared_host_keeps_policy_layers_fully_isolated(client):
+    """The whole point of supporting multiple accounts on one daemon: each
+    account's own policy layers must never leak to another account paired
+    to the exact same physical host_id."""
+    a = _signup(client, "juniper")
+    b = _signup(client, "kelvin")
+    headers_a = {"Authorization": f"Bearer {a['token']}"}
+    headers_b = {"Authorization": f"Bearer {b['token']}"}
+
+    pair_a = client.post(
+        "/hosts/pair", json={"routing_key": "rk-shared-2", "hostname": "shared-box-2"}, headers=headers_a
+    ).json()
+    pair_b = client.post(
+        "/hosts/pair", json={"routing_key": "rk-shared-2", "hostname": "shared-box-2"}, headers=headers_b
+    ).json()
+    assert pair_a["host_id"] == pair_b["host_id"]  # same physical machine
+
+    layer = _create_policy_layer(client, headers_a, name="juniper-only").json()
+    _add_rule(client, headers_a, layer["id"], [{"whitelist": "^npm$"}])
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair_a['host_id']}", headers=headers_a)
+
+    device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
+    device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
+    assert len(client.get("/hosts/policy-layers", headers=device_headers_a).json()["policy_layers"]) == 1
+    assert client.get("/hosts/policy-layers", headers=device_headers_b).json()["policy_layers"] == []
+
+    host_a = client.get("/hosts", headers=headers_a).json()["hosts"][0]
+    host_b = client.get("/hosts", headers=headers_b).json()["hosts"][0]
+    assert len(host_a["policy_layers"]) == 1
+    assert host_b["policy_layers"] == []
+
+
+def test_presence_on_a_shared_host_is_visible_to_every_paired_account(client):
+    """_live is genuinely machine-level -- a presence report from the one
+    real daemon process should be visible under every account paired to
+    it, not just whichever one happened to report it."""
+    a = _signup(client, "liam")
+    b = _signup(client, "mira")
+    headers_a = {"Authorization": f"Bearer {a['token']}"}
+    headers_b = {"Authorization": f"Bearer {b['token']}"}
+
+    pair_a = client.post(
+        "/hosts/pair", json={"routing_key": "rk-shared-3"}, headers=headers_a
+    ).json()
+    client.post("/hosts/pair", json={"routing_key": "rk-shared-3"}, headers=headers_b)
+
+    device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
+    client.post(
+        "/hosts/presence",
+        json={"local_agent_url": "https://relay.example/agent/shared-3", "cwd": "/Users/shared"},
+        headers=device_headers_a,
+    )
+
+    assert client.get("/hosts", headers=headers_a).json()["hosts"][0]["connected"] is True
+    assert client.get("/hosts", headers=headers_b).json()["hosts"][0]["connected"] is True
 
 
 def test_unpair_preserves_user_hosts(client):

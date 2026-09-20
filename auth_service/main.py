@@ -263,13 +263,6 @@ _live: dict[str, dict] = {}
 _live_lock = threading.Lock()
 
 
-class HostAlreadyAttachedError(Exception):
-    """Raised by _pair_host when routing_key is currently PAIRED (per
-    host_pairings, regardless of live connection state) to a different
-    user -- reject, never preempt (a host belonging to someone else should
-    never be silently disrupted by another account's pairing attempt)."""
-
-
 def _pairing_by_device_token(db, token: str):
     return db.execute("SELECT * FROM host_pairings WHERE device_token_hash = ?", (hash_token(token),)).fetchone()
 
@@ -302,17 +295,13 @@ def _resolve_attached(db, authorization: str) -> dict | None:
 def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, requested_label: str | None):
     """Idempotent for the *same* user re-pairing the *same* routing_key
     (e.g. reconnecting after a restart) -- rotates credentials in place
-    (a fresh UPSERT into host_pairings), no duplicate rows, existing label
-    untouched. Raises HostAlreadyAttachedError if routing_key is currently
-    PAIRED (persisted, not just live-connected -- see host_pairings) to a
-    different user. Returns (host_id, device_token, command_key, label,
+    (a fresh UPSERT into host_pairings keyed on (routing_key, user_id)),
+    no duplicate rows, existing label untouched. A *different* user pairing
+    the same routing_key is fully supported -- one physical daemon can be
+    paired to several accounts at once, each getting its own independent
+    row/credentials/policy layers (see host_pairings' own doc comment).
+    Returns (host_id, device_token, command_key, label,
     is_new_to_this_user)."""
-    existing_pairing = db.execute(
-        "SELECT user_id FROM host_pairings WHERE routing_key = ?", (routing_key,)
-    ).fetchone()
-    if existing_pairing and existing_pairing["user_id"] != user_id:
-        raise HostAlreadyAttachedError()
-
     row = db.execute("SELECT id FROM hosts WHERE routing_key = ?", (routing_key,)).fetchone()
     if row is None:
         host_id = db.execute(
@@ -339,8 +328,7 @@ def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, request
         """
         INSERT INTO host_pairings (routing_key, user_id, host_id, device_token_hash, command_key)
         VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(routing_key) DO UPDATE SET
-            user_id = excluded.user_id,
+        ON CONFLICT(routing_key, user_id) DO UPDATE SET
             host_id = excluded.host_id,
             device_token_hash = excluded.device_token_hash,
             command_key = excluded.command_key,
@@ -476,14 +464,17 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
     for r in layer_host_rows:
         layers_by_host.setdefault(r["host_id"], []).append((r["id"], _policy_layer_rules(db, r["id"])))
     pairings_by_routing_key = {
-        r["routing_key"]: r for r in db.execute("SELECT routing_key, user_id, command_key FROM host_pairings").fetchall()
+        r["routing_key"]: r
+        for r in db.execute(
+            "SELECT routing_key, command_key FROM host_pairings WHERE user_id = ?", (user_id,)
+        ).fetchall()
     }
     with _live_lock:
         live_snapshot = {k: dict(v) for k, v in _live.items()}
     configs = {}
     for r in rows:
         pairing = pairings_by_routing_key.get(r["routing_key"])
-        if pairing is None or pairing["user_id"] != user_id:
+        if pairing is None:
             continue
         live = live_snapshot.get(r["routing_key"])
         if live is None or live.get("local_agent_url") is None:
@@ -505,12 +496,9 @@ def pair_host(body: HostPairRequest, authorization: str = Header(default="")):
         user_id = _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        try:
-            host_id, device_token, command_key, label, is_new = _pair_host(
-                db, user_id, body.routing_key, body.hostname, body.label
-            )
-        except HostAlreadyAttachedError:
-            raise HTTPException(status_code=409, detail="This host is currently paired to another account.")
+        host_id, device_token, command_key, label, is_new = _pair_host(
+            db, user_id, body.routing_key, body.hostname, body.label
+        )
         if is_new:
             _assign_default_environment(db, user_id, host_id)
         return HostPairResponse(host_id=host_id, device_token=device_token, command_key=command_key, label=label)
@@ -525,16 +513,21 @@ def verify_host(authorization: str = Header(default="")):
 @app.post("/hosts/unpair", response_model=RevokeResponse)
 def unpair_host(authorization: str = Header(default="")):
     """Self-service: a daemon deregisters itself (tray "Sign out"). Deletes
-    the persisted pairing (host_pairings) -- user_hosts/environment_hosts
-    are untouched, so the host stays remembered and re-pairing it later
-    won't re-prompt for a label."""
+    only THIS account's persisted pairing (host_pairings) -- a routing_key
+    can be paired to several accounts at once, so this is scoped by
+    user_id too, never touching another account's pairing to the same
+    physical host. user_hosts/environment_hosts are untouched, so the host
+    stays remembered and re-pairing it later won't re-prompt for a label.
+    Deliberately doesn't touch _live -- that's genuinely machine-level
+    reachability, still meaningful to any other account still paired to
+    this routing_key; it self-heals independently via presence reports."""
     with get_db() as db:
         attached = _resolve_attached(db, authorization)
         if attached is not None:
-            db.execute("DELETE FROM host_pairings WHERE routing_key = ?", (attached["routing_key"],))
-    if attached is not None:
-        with _live_lock:
-            _live.pop(attached["routing_key"], None)
+            db.execute(
+                "DELETE FROM host_pairings WHERE routing_key = ? AND user_id = ?",
+                (attached["routing_key"], attached["user_id"]),
+            )
     return RevokeResponse(revoked=True)
 
 
@@ -604,7 +597,9 @@ def list_hosts(authorization: str = Header(default="")):
             """,
             (user_id,),
         ).fetchall()
-        pairing_rows = db.execute("SELECT routing_key, user_id, command_key FROM host_pairings").fetchall()
+        pairing_rows = db.execute(
+            "SELECT routing_key, command_key FROM host_pairings WHERE user_id = ?", (user_id,)
+        ).fetchall()
     envs_by_host: dict[int, list[int]] = {}
     for r in env_rows:
         envs_by_host.setdefault(r["host_id"], []).append(r["environment_id"])
@@ -627,7 +622,7 @@ def list_hosts(authorization: str = Header(default="")):
     hosts_out = []
     for r in rows:
         pairing = pairings_by_routing_key.get(r["routing_key"])
-        mine = pairing is not None and pairing["user_id"] == user_id
+        mine = pairing is not None
         live = live_snapshot.get(r["routing_key"], {})
         connected = mine and live.get("local_agent_url") is not None
         hosts_out.append(
