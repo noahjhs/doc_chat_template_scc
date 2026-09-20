@@ -979,147 +979,45 @@ def test_policy_layer_ownership_enforced(client):
     assert client.delete(f"/policy-layers/{layer['id']}/rules/{rule['id']}", headers=headers_b).status_code == 404
 
 
-def _pending_approval_body(**overrides):
-    body = {"template_name": "npm scripts", "binary": "npm", "args": "run build", "host_label": "Erin's Mac"}
-    body.update(overrides)
-    return body
+def test_pending_approvals_require_auth(client):
+    assert client.get("/conversations/pending-approvals").status_code == 401
+    assert client.post("/conversations/pending-approvals/does-not-exist/decide", json={"decision": "allow"}).status_code == 401
 
 
-def test_attended_host_set_and_get(client):
-    signup = _signup(client, "kim1")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-
-    assert client.get("/users/me/attended-host", headers=headers).json() == {"host_id": None, "label": None}
-
-    unowned = client.put("/users/me/attended-host", json={"host_id": 999}, headers=headers)
-    assert unowned.status_code == 404
-
-    pair = client.post("/hosts/pair", json={"routing_key": "rk-kim1-1", "hostname": "kims-mac"}, headers=headers).json()
-    set_result = client.put("/users/me/attended-host", json={"host_id": pair["host_id"]}, headers=headers)
-    assert set_result.status_code == 200
-    assert set_result.json() == {"host_id": pair["host_id"], "label": pair["label"]}
-    assert client.get("/users/me/attended-host", headers=headers).json()["host_id"] == pair["host_id"]
-
-    cleared = client.delete("/users/me/attended-host", headers=headers)
-    assert cleared.status_code == 200
-    assert client.get("/users/me/attended-host", headers=headers).json() == {"host_id": None, "label": None}
-
-
-def test_attended_host_cleared_on_forget_host(client):
-    signup = _signup(client, "kim2")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = client.post("/hosts/pair", json={"routing_key": "rk-kim2-1", "hostname": "kims-pc"}, headers=headers).json()
-    client.put("/users/me/attended-host", json={"host_id": pair["host_id"]}, headers=headers)
-
-    client.delete(f"/hosts/{pair['host_id']}", headers=headers)
-
-    assert client.get("/users/me/attended-host", headers=headers).json() == {"host_id": None, "label": None}
-
-
-def test_pending_approval_end_to_end(client):
-    signup = _signup(client, "liam1")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair_a = client.post("/hosts/pair", json={"routing_key": "rk-liam1-a", "hostname": "a"}, headers=headers).json()
-    pair_b = client.post("/hosts/pair", json={"routing_key": "rk-liam1-b", "hostname": "b"}, headers=headers).json()
-    client.put("/users/me/attended-host", json={"host_id": pair_a["host_id"]}, headers=headers)
-
-    submitted = client.post("/hosts/pending-approvals", json=_pending_approval_body(), headers=headers)
-    assert submitted.status_code == 201
-    approval_id = submitted.json()["approval_id"]
-
-    device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
-    device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
-
-    # B isn't the attended host -- its long-poll sees nothing (already
-    # present, so this resolves on the first check, no real wait).
-    seen_by_b = client.get("/hosts/pending-approvals", headers=device_headers_b).json()
-    assert seen_by_b["pending_approvals"] == []
-
-    seen_by_a = client.get("/hosts/pending-approvals", headers=device_headers_a).json()
-    assert len(seen_by_a["pending_approvals"]) == 1
-    record = seen_by_a["pending_approvals"][0]
-    assert record["id"] == approval_id
-    assert record["binary"] == "npm"
-    assert record["args"] == "run build"
-    assert record["decision"] is None
-
-    decided = client.post(
-        f"/hosts/pending-approvals/{approval_id}/decision", json={"decision": "allow"}, headers=device_headers_a
-    )
-    assert decided.status_code == 200
-    assert decided.json()["decision"] == "allow"
-
-    resolved = client.get(f"/hosts/pending-approvals/{approval_id}", headers=headers)
-    assert resolved.status_code == 200
-    assert resolved.json()["decision"] == "allow"
-
-    # A second decision is a no-op read of the already-settled state, not
-    # an error -- "whichever answers first wins".
-    redundant = client.post(
-        f"/hosts/pending-approvals/{approval_id}/decision", json={"decision": "deny"}, headers=device_headers_a
-    )
-    assert redundant.json()["decision"] == "allow"
-
-
-def test_pending_approval_times_out_with_no_attended_host(client):
+def test_pending_approvals_are_scoped_per_user(client):
+    """A pending approval (seeded directly via _create_pending_approval_record,
+    the same helper conversations.py's ask-tier pause calls -- avoids
+    needing a real OpenAI-backed resume just to test ownership scoping;
+    see tests/test_conversations.py for the full create-via-real-pause,
+    resolve-and-resume lifecycle) is never visible to, or resolvable by,
+    a different user."""
     import main as auth_main
-
-    auth_main._LONG_POLL_SECONDS = 0.2  # keep the test fast; fresh module per test, nothing to restore
-
-    signup = _signup(client, "liam2")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = client.post("/hosts/pair", json={"routing_key": "rk-liam2-a", "hostname": "a"}, headers=headers).json()
-    client.post("/hosts/pending-approvals", json=_pending_approval_body(), headers=headers)
-
-    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
-    result = client.get("/hosts/pending-approvals", headers=device_headers)
-    assert result.json()["pending_approvals"] == []
-
-
-def test_pending_approval_decision_requires_currently_attended(client):
-    signup = _signup(client, "liam3")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair_a = client.post("/hosts/pair", json={"routing_key": "rk-liam3-a", "hostname": "a"}, headers=headers).json()
-    pair_b = client.post("/hosts/pair", json={"routing_key": "rk-liam3-b", "hostname": "b"}, headers=headers).json()
-    client.put("/users/me/attended-host", json={"host_id": pair_a["host_id"]}, headers=headers)
-
-    approval_id = client.post(
-        "/hosts/pending-approvals", json=_pending_approval_body(), headers=headers
-    ).json()["approval_id"]
-
-    # Switch attended host to B before A gets a chance to decide.
-    client.put("/users/me/attended-host", json={"host_id": pair_b["host_id"]}, headers=headers)
-
-    device_headers_a = {"Authorization": f"Bearer {pair_a['device_token']}"}
-    rejected = client.post(
-        f"/hosts/pending-approvals/{approval_id}/decision", json={"decision": "allow"}, headers=device_headers_a
-    )
-    assert rejected.status_code == 403
-
-    device_headers_b = {"Authorization": f"Bearer {pair_b['device_token']}"}
-    accepted = client.post(
-        f"/hosts/pending-approvals/{approval_id}/decision", json={"decision": "allow"}, headers=device_headers_b
-    )
-    assert accepted.status_code == 200
-
-
-def test_pending_approval_requires_auth(client):
-    assert client.post("/hosts/pending-approvals", json=_pending_approval_body()).status_code == 401
-    assert client.get("/hosts/pending-approvals").status_code == 401
-    assert client.get("/hosts/pending-approvals/does-not-exist").status_code == 401
-
-
-def test_pending_approval_not_readable_by_another_user(client):
-    import main as auth_main
-
-    auth_main._LONG_POLL_SECONDS = 0.2
 
     a = _signup(client, "liam4")
     b = _signup(client, "liam5")
     headers_a = {"Authorization": f"Bearer {a['token']}"}
     headers_b = {"Authorization": f"Bearer {b['token']}"}
-    approval_id = client.post(
-        "/hosts/pending-approvals", json=_pending_approval_body(), headers=headers_a
-    ).json()["approval_id"]
 
-    assert client.get(f"/hosts/pending-approvals/{approval_id}", headers=headers_b).status_code == 404
+    with auth_main.get_db() as db:
+        user_id_a = auth_main._resolve_user_id(db, f"Bearer {a['token']}")
+    approval_id = auth_main._create_pending_approval_record(
+        user_id_a, "run `npm run build` on Erin's Mac", {"awaiting_approval": {}}, None, False
+    )
+
+    mine = client.get("/conversations/pending-approvals", headers=headers_a).json()["pending_approvals"]
+    assert [x["id"] for x in mine] == [approval_id]
+    assert mine[0]["description"] == "run `npm run build` on Erin's Mac"
+
+    assert client.get("/conversations/pending-approvals", headers=headers_b).json()["pending_approvals"] == []
+    assert (
+        client.post(
+            f"/conversations/pending-approvals/{approval_id}/decide", json={"decision": "allow"}, headers=headers_b
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/conversations/pending-approvals/does-not-exist/decide", json={"decision": "allow"}, headers=headers_a
+        ).status_code
+        == 404
+    )

@@ -378,47 +378,18 @@ class SignOutAllResponse(BaseModel):
     signed_out_hosts: int
 
 
-class AttendedHostUpdateRequest(BaseModel):
-    host_id: int
-
-
-class AttendedHostInfo(BaseModel):
-    host_id: int | None = None
-    label: str | None = None
-
-
-class PendingApprovalCreateRequest(BaseModel):
-    """POST /hosts/pending-approvals's body -- mirrors exactly what a
-    caller resolving the pending_approval from POST /conversations/step
-    already has, so the two channels (a native dialog on the attended
-    host vs. resolving approval_decision directly) show the human the
-    same thing."""
-
-    template_name: str = Field(min_length=1, max_length=64)
-    binary: str = Field(min_length=1, max_length=200)
-    args: str = Field(default="", max_length=2000)
-    host_label: str = Field(min_length=1, max_length=64)
-
-
-class PendingApprovalCreateResponse(BaseModel):
-    approval_id: str
-
-
 class PendingApprovalInfo(BaseModel):
+    """One entry in a user's own durable pending-approval queue (see
+    db.py's pending_approvals table) -- description is the same
+    human-readable text shown in the CLI and sent over SMS (see
+    conversations.py's _describe_call_args-based formatting)."""
+
     id: str
-    template_name: str
-    binary: str
-    args: str
-    host_label: str
-    decision: Literal["allow", "deny"] | None = None
+    description: str
     created_at: str
 
 
 class PendingApprovalListResponse(BaseModel):
-    """GET /hosts/pending-approvals' response -- at most one entry in
-    practice (a daemon only ever has one user attending it at a time), but
-    a list keeps the shape open-ended rather than assuming that."""
-
     pending_approvals: list[PendingApprovalInfo]
 
 

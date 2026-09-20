@@ -124,32 +124,6 @@ func escapeForJavaScriptString(s string) string {
 // forward otherwise), different mechanism (an in-process NSApplication
 // call, since this alert is being driven directly rather than through
 // another application).
-// Confirm shows a plain native Allow/Deny modal and returns whether Allow
-// was chosen -- deliberately not ConfirmWithDontAskAgain: that dialog's
-// "Don't ask again" checkbox would let a native prompt silently create a
-// standing bypass outside the actual tier/policy model, which the
-// pending-approval relay this backs should never be able to do. Uses plain
-// AppleScript `display dialog` (no checkbox needed, so no JXA/Cocoa bridge
-// required, unlike ConfirmWithDontAskAgain). Blocks until dismissed; a
-// failure to even show the dialog (e.g. osascript itself errors) is treated
-// as a decline, never a silent allow.
-func Confirm(message string) bool {
-	script := fmt.Sprintf(
-		`tell application "System Events" to activate
-display dialog "%s" with title "Casper" buttons {"Deny", "Allow"} default button "Allow" cancel button "Deny"`,
-		escapeForAppleScript(message),
-	)
-	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
-	if err != nil {
-		// A clean "Deny" click surfaces as a nonzero exit (AppleScript's
-		// cancel-button convention) -- indistinguishable here from a real
-		// failure to show the dialog at all, and both should resolve to
-		// "not allowed" rather than silently proceeding.
-		return false
-	}
-	return strings.Contains(string(out), "button returned:Allow")
-}
-
 func ConfirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAskAgain bool) {
 	script := fmt.Sprintf(`
 ObjC.import('Cocoa');

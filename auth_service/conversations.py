@@ -56,14 +56,18 @@ class DispatchContext:
     _make_storage_io) -- kept as callbacks rather than passing a raw path
     so this module never needs to know auth_service's storage layout or
     STORAGE_CAP_BYTES itself. create_pending_approval likewise closes over
-    the calling user_id (see main.py's _create_pending_approval_record)."""
+    the calling user_id (see main.py's _create_pending_approval_record) --
+    called with (description, turn_snapshot), returns an approval_id; the
+    turn snapshot is what makes the pending approval durable/resumable
+    from any interface, not just the one that paused it (see db.py's
+    pending_approvals table)."""
 
     configs: dict[str, dict]
     default_host: str | None
     mock: bool
     read_server_storage: Callable[[str], str | None]
     write_server_storage: Callable[[str, str], tuple[str | None, int]]
-    create_pending_approval: Callable[[str, str, str, str], str]
+    create_pending_approval: Callable[[str, dict], str]
     # The calling user's own custom instructions (see models.py's
     # ProfileInfo.system_prompt) -- passed as the Responses API's own
     # `instructions` on every hop of run_turn. Blank means none: the
@@ -395,9 +399,9 @@ def _call_transfer_file(configs, source, source_path, destination, destination_p
 
 
 def _describe_call_args(positional_args: list[str], options: list[dict]) -> str:
-    """Human-readable rendering of a proposed call's arguments -- used for
-    the pending-approval prompt (both channels: in-chat and native-dialog
-    relay)."""
+    """Human-readable rendering of a proposed call's arguments -- used to
+    build a pending approval's description (see db.py's pending_approvals
+    table), shown identically wherever a user checks in to answer it."""
     parts = list((positional_args or [])[1:])
     for opt in options or []:
         name = f"--{opt['long']}" if opt.get("long") else f"-{opt.get('short')}"
@@ -470,18 +474,22 @@ def _drain_pending_calls(turn: dict, ctx: DispatchContext) -> bool:
                 continue
             if tier == "ask":
                 positional_args = args.get("positional_args") or []
-                approval_id = ctx.create_pending_approval(
-                    "Shell command",
-                    positional_args[0] if positional_args else "",
-                    _describe_call_args(positional_args, args.get("options") or []),
-                    resolved_host or "",
-                )
+                binary = positional_args[0] if positional_args else ""
+                command_desc = f"{binary} {_describe_call_args(positional_args, args.get('options') or [])}".strip()
+                description = f"run `{command_desc}` on {resolved_host}" if resolved_host else f"run `{command_desc}`"
+                # awaiting_approval is set BEFORE create_pending_approval is
+                # called, so the snapshot it persists (see db.py's
+                # pending_approvals table) is already directly resumable via
+                # run_turn -- approval_id itself is filled in after, since it
+                # can only be known once the record exists; run_turn's own
+                # resume branch never reads it back, only external callers
+                # (harness, SMS) use it as a lookup handle.
                 turn["awaiting_approval"] = {
                     "call_id": call["call_id"],
                     "host": resolved_host,
                     "args": args,
-                    "approval_id": approval_id,
                 }
+                turn["awaiting_approval"]["approval_id"] = ctx.create_pending_approval(description, turn)
                 return True
             # tier == "allow" -- fall through to dispatch below.
         output = _dispatch_tool_call(call, ctx, turn["aggregate"])

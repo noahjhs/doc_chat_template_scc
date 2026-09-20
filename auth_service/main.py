@@ -7,7 +7,6 @@ import os
 import secrets
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
 
 import bcrypt
@@ -20,8 +19,6 @@ from pydantic import ValidationError
 from policy import compose_policy, match_policy
 import conversations
 from models import (
-    AttendedHostInfo,
-    AttendedHostUpdateRequest,
     AuthResponse,
     ConversationPendingApproval,
     ConversationStepRequest,
@@ -41,8 +38,6 @@ from models import (
     HostVerifyResponse,
     LoginRequest,
     Pattern,
-    PendingApprovalCreateRequest,
-    PendingApprovalCreateResponse,
     PendingApprovalDecisionRequest,
     PendingApprovalInfo,
     PendingApprovalListResponse,
@@ -673,73 +668,13 @@ def forget_host(host_id: int, authorization: str = Header(default="")):
             (host_id, user_id),
         )
         db.execute("DELETE FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, host_id))
-        db.execute(
-            "DELETE FROM user_attended_host WHERE user_id = ? AND host_id = ?", (user_id, host_id)
-        )
         if row is not None:
             db.execute(
                 "DELETE FROM host_pairings WHERE routing_key = ? AND user_id = ?", (row["routing_key"], user_id)
             )
-    if row is not None:
-        with _live_lock:
-            _live.pop(row["routing_key"], None)
-    return RevokeResponse(revoked=True)
-
-
-# --- Attended host (browser-facing) ---------------------------------------
-# Which one of the user's own known hosts they're currently physically at
-# -- used only to route a pending approval's native-dialog prompt to the
-# right daemon (see the pending-approvals section below). Deliberately
-# separate from host *selection* in chat (which host the assistant acts
-# on) -- a user can direct the assistant at one machine while sitting at
-# another.
-@app.put("/users/me/attended-host", response_model=AttendedHostInfo)
-def set_attended_host(body: AttendedHostUpdateRequest, authorization: str = Header(default="")):
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        row = db.execute(
-            "SELECT label FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, body.host_id)
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Host not found.")
-        db.execute(
-            """
-            INSERT INTO user_attended_host (user_id, host_id) VALUES (?, ?)
-            ON CONFLICT (user_id) DO UPDATE SET host_id = excluded.host_id, set_at = CURRENT_TIMESTAMP
-            """,
-            (user_id, body.host_id),
-        )
-        return AttendedHostInfo(host_id=body.host_id, label=row["label"])
-
-
-@app.get("/users/me/attended-host", response_model=AttendedHostInfo)
-def get_attended_host(authorization: str = Header(default="")):
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        row = db.execute(
-            """
-            SELECT uah.host_id AS host_id, uh.label AS label FROM user_attended_host uah
-            JOIN user_hosts uh ON uh.user_id = uah.user_id AND uh.host_id = uah.host_id
-            WHERE uah.user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-        if row is None:
-            return AttendedHostInfo()
-        return AttendedHostInfo(host_id=row["host_id"], label=row["label"])
-
-
-@app.delete("/users/me/attended-host", response_model=RevokeResponse)
-def clear_attended_host(authorization: str = Header(default="")):
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing token.")
-        db.execute("DELETE FROM user_attended_host WHERE user_id = ?", (user_id,))
+    # Deliberately doesn't touch _live -- see unpair_host's identical
+    # reasoning: it's genuinely machine-level reachability, still
+    # meaningful to any other account still paired to this routing_key.
     return RevokeResponse(revoked=True)
 
 
@@ -1102,199 +1037,6 @@ def list_host_policy_layers(authorization: str = Header(default="")):
     return HostPolicyLayerListResponse(policy_layers=policy_layers)
 
 
-# --- Pending approvals (native-dialog relay) ------------------------------
-# An "ask"-tier command-template call awaiting a human decision, answerable
-# from either the browser's in-chat Approve/Deny UI or a native OS dialog
-# on whichever host the user has designated as their attended host (see
-# above) -- both channels write the same decision here, and whichever
-# answers first wins. Kept in-memory rather than in SQLite -- unlike host
-# pairing identity (see host_pairings/_resolve_attached), a lost
-# in-flight approval on a restart is a much narrower, shorter-lived
-# blast radius (a 15-minute TTL at most) not worth the same persistence
-# treatment. A single Condition guards the whole store
-# and serves both directions this needs to long-poll: the attended daemon
-# waiting for a new approval targeting it, and the submitter waiting for a
-# decision on the one it created.
-_PENDING_APPROVAL_TTL_SECONDS = 15 * 60
-_LONG_POLL_SECONDS = 25.0
-
-_pending_approvals: dict[str, dict] = {}
-_pending_cond = threading.Condition()
-
-
-def _prune_pending_approvals_locked():
-    """Caller must hold _pending_cond. Drops anything older than the TTL,
-    decided or not -- an undecided one that's aged out is exactly as
-    unreachable as one that was decided and already consumed."""
-    cutoff = time.time() - _PENDING_APPROVAL_TTL_SECONDS
-    stale = [aid for aid, rec in _pending_approvals.items() if rec["created_ts"] < cutoff]
-    for aid in stale:
-        del _pending_approvals[aid]
-
-
-def _pending_approval_info(record: dict) -> PendingApprovalInfo:
-    return PendingApprovalInfo(
-        id=record["id"],
-        template_name=record["template_name"],
-        binary=record["binary"],
-        args=record["args"],
-        host_label=record["host_label"],
-        decision=record["decision"],
-        created_at=record["created_at"],
-    )
-
-
-def _resolve_submitter(authorization: str) -> int | None:
-    """Session token OR device token -> user_id. Only the web app submits
-    today, but this is written so a daemon can submit its own mid-chain
-    asks later (once "hard" action chains exist) without this shape
-    changing."""
-    with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
-        if user_id is not None:
-            return user_id
-        attached = _resolve_attached(db, authorization)
-    return attached["user_id"] if attached else None
-
-
-def _create_pending_approval_record(user_id: int, template_name: str, binary: str, args: str, host_label: str) -> str:
-    """Factored out of the create_pending_approval endpoint below so
-    /conversations/step's run_shell_command "ask" path can create one
-    in-process (direct function call, not a self-HTTP round trip) --
-    same store, same long-poll wakeup, just a different caller."""
-    approval_id = uuid.uuid4().hex
-    with _pending_cond:
-        _prune_pending_approvals_locked()
-        _pending_approvals[approval_id] = {
-            "id": approval_id,
-            "user_id": user_id,
-            "template_name": template_name,
-            "binary": binary,
-            "args": args,
-            "host_label": host_label,
-            "decision": None,
-            "created_ts": time.time(),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _pending_cond.notify_all()
-    return approval_id
-
-
-@app.post("/hosts/pending-approvals", response_model=PendingApprovalCreateResponse, status_code=201)
-def create_pending_approval(body: PendingApprovalCreateRequest, authorization: str = Header(default="")):
-    user_id = _resolve_submitter(authorization)
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing token.")
-    approval_id = _create_pending_approval_record(user_id, body.template_name, body.binary, body.args, body.host_label)
-    return PendingApprovalCreateResponse(approval_id=approval_id)
-
-
-@app.get("/hosts/pending-approvals/{approval_id}", response_model=PendingApprovalInfo)
-def get_pending_approval(approval_id: str, wait_seconds: float = _LONG_POLL_SECONDS, authorization: str = Header(default="")):
-    """The submitter's long-poll -- waits up to wait_seconds (default
-    _LONG_POLL_SECONDS, clamped to that as a ceiling) for a decision to
-    land, so the caller can immediately re-request rather than fast-polling
-    on a fixed timer. A caller driven by its own event loop/UI thread (a
-    browser script, a CLI) can pass a shorter wait so it isn't stalled for
-    the full ~25s -- the daemon's own long-poll (a Go goroutine, not
-    constrained the same way) keeps using the default. Note that
-    POST /conversations/step's own approval_decision field is the more
-    direct way for the same caller that created the approval to resolve
-    it -- this endpoint matters for a *different* channel answering the
-    same approval (the native-dialog relay to an attended host)."""
-    user_id = _resolve_submitter(authorization)
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing token.")
-
-    wait_seconds = max(0.0, min(wait_seconds, _LONG_POLL_SECONDS))
-    deadline = time.monotonic() + wait_seconds
-    with _pending_cond:
-        while True:
-            _prune_pending_approvals_locked()
-            record = _pending_approvals.get(approval_id)
-            if record is None or record["user_id"] != user_id:
-                raise HTTPException(status_code=404, detail="Unknown or expired approval.")
-            if record["decision"] is not None:
-                return _pending_approval_info(record)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return _pending_approval_info(record)
-            _pending_cond.wait(remaining)
-
-
-@app.get("/hosts/pending-approvals", response_model=PendingApprovalListResponse)
-def list_pending_approvals_for_attended_host(authorization: str = Header(default="")):
-    """The attended daemon's long-poll -- waits up to _LONG_POLL_SECONDS
-    for any undecided approval belonging to a user whose current attended
-    host is this caller's own resolved host_id. Every daemon runs this
-    loop unconditionally; it's this query, not any local state on the
-    daemon, that decides whether it ever receives anything."""
-    with get_db() as db:
-        attached = _resolve_attached(db, authorization)
-    if attached is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
-    host_id = attached["host_id"]
-
-    def _matching_records() -> list[dict]:
-        with get_db() as db:
-            attended_user_ids = {
-                r["user_id"]
-                for r in db.execute(
-                    "SELECT user_id FROM user_attended_host WHERE host_id = ?", (host_id,)
-                ).fetchall()
-            }
-        return [
-            rec
-            for rec in _pending_approvals.values()
-            if rec["decision"] is None and rec["user_id"] in attended_user_ids
-        ]
-
-    deadline = time.monotonic() + _LONG_POLL_SECONDS
-    with _pending_cond:
-        while True:
-            _prune_pending_approvals_locked()
-            matches = _matching_records()
-            if matches:
-                return PendingApprovalListResponse(pending_approvals=[_pending_approval_info(r) for r in matches])
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return PendingApprovalListResponse(pending_approvals=[])
-            _pending_cond.wait(remaining)
-
-
-@app.post("/hosts/pending-approvals/{approval_id}/decision", response_model=PendingApprovalInfo)
-def decide_pending_approval(
-    approval_id: str, body: PendingApprovalDecisionRequest, authorization: str = Header(default="")
-):
-    """Only from a daemon that IS currently the attended host for that
-    approval's user -- a daemon that's since been un-designated can't
-    decide someone else's pending approval just because it still holds a
-    valid device token."""
-    with get_db() as db:
-        attached = _resolve_attached(db, authorization)
-    if attached is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
-
-    with _pending_cond:
-        _prune_pending_approvals_locked()
-        record = _pending_approvals.get(approval_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Unknown or expired approval.")
-        with get_db() as db:
-            still_attended = db.execute(
-                "SELECT 1 FROM user_attended_host WHERE user_id = ? AND host_id = ?",
-                (record["user_id"], attached["host_id"]),
-            ).fetchone()
-        if still_attended is None:
-            raise HTTPException(
-                status_code=403, detail="This host is no longer the attended host for that approval."
-            )
-        if record["decision"] is None:
-            record["decision"] = body.decision
-            _pending_cond.notify_all()
-        return _pending_approval_info(record)
-
-
 def _shutdown_hosts_best_effort(targets: list[tuple[str, str]]):
     def _one(url: str, command_key: str):
         try:
@@ -1528,12 +1270,19 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
         system_prompt=system_prompt,
         read_server_storage=read_storage,
         write_server_storage=write_storage,
-        create_pending_approval=lambda template_name, binary, args, host_label: _create_pending_approval_record(
-            user_id, template_name, binary, args, host_label
+        create_pending_approval=lambda description, turn_snapshot: _create_pending_approval_record(
+            user_id, description, turn_snapshot, body.default_host, body.mock
         ),
     )
-    status, message = conversations.run_turn(turn, body.approval_decision, ctx, _get_openai_client())
+    return _step_response(turn, body.approval_decision, ctx)
 
+
+def _step_response(turn: dict, approval_decision: str | None, ctx: "conversations.DispatchContext") -> ConversationStepResponse:
+    """Runs run_turn and shapes the result into a ConversationStepResponse
+    -- shared by /conversations/step above and the pending-approval
+    resolution paths below (POST .../decide, and the SMS webhook), so all
+    three ways of advancing a turn behave identically."""
+    status, message = conversations.run_turn(turn, approval_decision, ctx, _get_openai_client())
     pending_approval = None
     if status == "pending_approval":
         pending = turn["awaiting_approval"]
@@ -1543,6 +1292,97 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
     return ConversationStepResponse(
         turn=turn, status=status, message=message if status == "done" else None, pending_approval=pending_approval
     )
+
+
+# --- Pending approvals (durable, per-user) ---------------------------------
+# A durable record of an "ask"-tier pause (see db.py's pending_approvals
+# table and conversations.py's DispatchContext.create_pending_approval),
+# resolvable from whichever interface the user actually checks in from --
+# harness (below), a text reply (see /sms/inbound), eventually a browser.
+# Deliberately host/device-agnostic: no routing_key/device_token appears
+# anywhere here, unlike the native-dialog "attended host" relay this
+# replaces (removed as a design mistake -- see git history -- since it
+# conflated "which host executes a command" with "which screen a human
+# happens to be watching").
+def _create_pending_approval_record(
+    user_id: int, description: str, turn: dict, default_host: str | None, mock: bool
+) -> str:
+    """Self-contained (opens its own db connection) since every caller --
+    a fresh /conversations/step call, or a resume in _resume_pending_approval
+    below -- invokes this via DispatchContext.create_pending_approval from
+    OUTSIDE any db connection it's itself holding open (matching
+    step_conversation's own db-work-then-network-call ordering)."""
+    approval_id = secrets.token_urlsafe(12)
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO pending_approvals (id, user_id, description, turn, default_host, mock)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (approval_id, user_id, description, json.dumps(turn), default_host, int(mock)),
+        )
+    return approval_id
+
+
+def _resume_pending_approval(row, decision: str) -> ConversationStepResponse:
+    """Rebuilds a DispatchContext for an already-loaded pending_approvals
+    row (scoped to the right user by the caller) and resumes it -- shared
+    by decide_pending_approval below and the SMS webhook (see /sms/inbound),
+    which differ only in how they find `row` and what they do with the
+    result. Deletes the row so the same approval can't be resolved twice;
+    a follow-up ask-tier pause, if any, creates its own fresh row through
+    the normal create_pending_approval path."""
+    user_id = row["user_id"]
+    with get_db() as db:
+        configs = _connected_host_configs(db, user_id)
+        system_prompt = _get_or_create_profile(db, user_id).system_prompt
+        db.execute("DELETE FROM pending_approvals WHERE id = ?", (row["id"],))
+    turn = json.loads(row["turn"])
+    read_storage, write_storage = _make_storage_io(user_id)
+    ctx = conversations.DispatchContext(
+        configs=configs,
+        default_host=row["default_host"],
+        mock=bool(row["mock"]),
+        system_prompt=system_prompt,
+        read_server_storage=read_storage,
+        write_server_storage=write_storage,
+        create_pending_approval=lambda description, turn_snapshot: _create_pending_approval_record(
+            user_id, description, turn_snapshot, row["default_host"], bool(row["mock"])
+        ),
+    )
+    return _step_response(turn, decision, ctx)
+
+
+@app.get("/conversations/pending-approvals", response_model=PendingApprovalListResponse)
+def list_pending_approvals(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        rows = db.execute(
+            "SELECT * FROM pending_approvals WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
+        ).fetchall()
+    return PendingApprovalListResponse(
+        pending_approvals=[
+            PendingApprovalInfo(id=r["id"], description=r["description"], created_at=r["created_at"]) for r in rows
+        ]
+    )
+
+
+@app.post("/conversations/pending-approvals/{approval_id}/decide", response_model=ConversationStepResponse)
+def decide_pending_approval(
+    approval_id: str, body: PendingApprovalDecisionRequest, authorization: str = Header(default="")
+):
+    with get_db() as db:
+        user_id = _resolve_user_id(db, authorization)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+        row = db.execute(
+            "SELECT * FROM pending_approvals WHERE id = ? AND user_id = ?", (approval_id, user_id)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown pending approval.")
+    return _resume_pending_approval(row, body.decision)
 
 
 # --- Profile ---------------------------------------------------------------

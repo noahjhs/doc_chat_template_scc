@@ -181,50 +181,21 @@ def update_profile(domain: str, token: str, **fields) -> dict:
     return _request(domain, "PATCH", "/profile", token=token, json=fields)
 
 
-# --- Attended host / native-dialog-approval simulation ------------------------
-def set_attended_host(domain: str, token: str, host_id: int) -> dict:
-    return _request(domain, "PUT", "/users/me/attended-host", token=token, json={"host_id": host_id})
+# --- Pending approvals (durable, per-user) --------------------------------
+# Host/device-agnostic -- resolvable from any interface holding the
+# account's own session token, not a designated "attended" machine (see
+# auth_service/db.py's pending_approvals table for why).
+def list_pending_approvals(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/conversations/pending-approvals", token=token)
 
 
-def get_attended_host(domain: str, token: str) -> dict:
-    return _request(domain, "GET", "/users/me/attended-host", token=token)
-
-
-def clear_attended_host(domain: str, token: str) -> dict:
-    return _request(domain, "DELETE", "/users/me/attended-host", token=token)
-
-
-def list_pending_approvals(domain: str, device_token: str, wait_seconds: float | None = None) -> dict:
-    """GET /hosts/pending-approvals -- the attended daemon's own long-poll,
-    device_token-gated. Stands in for the real native-dialog relay: any
-    device_token that's currently the attended host for its user's account
-    can call this (and decide_pending_approval below) exactly as a real
-    daemon would -- see auth_service/main.py's list_pending_approvals_for_
-    attended_host, which has no binding to which daemon actually dispatches
-    a given call."""
-    params = {"wait_seconds": wait_seconds} if wait_seconds is not None else None
-    return _request(domain, "GET", "/hosts/pending-approvals", token=device_token, params=params)
-
-
-def decide_pending_approval(domain: str, device_token: str, approval_id: str, decision: str) -> dict:
+def decide_pending_approval(domain: str, token: str, approval_id: str, decision: str) -> dict:
+    """Resumes the paused conversation turn and returns the same shape
+    conversation_step does (turn/status/message/pending_approval) -- not
+    just a bare decision record."""
     return _request(
-        domain,
-        "POST",
-        f"/hosts/pending-approvals/{approval_id}/decision",
-        token=device_token,
-        json={"decision": decision},
+        domain, "POST", f"/conversations/pending-approvals/{approval_id}/decide", token=token, json={"decision": decision}
     )
-
-
-def get_pending_approval(domain: str, token: str, approval_id: str, wait_seconds: float | None = None) -> dict:
-    """GET /hosts/pending-approvals/{id} -- the SUBMITTER's own long-poll
-    (session token, not device_token), for learning a decision that landed
-    via the *other* channel (a real native dialog, or a harness
-    `respond-approvals` session acting as the attended host) -- the
-    counterpart to list_pending_approvals/decide_pending_approval above,
-    which are the attended-device side of the same exchange."""
-    params = {"wait_seconds": wait_seconds} if wait_seconds is not None else None
-    return _request(domain, "GET", f"/hosts/pending-approvals/{approval_id}", token=token, params=params)
 
 
 # --- Real-daemon pairing (manual verification only, not CI-automatable) ------

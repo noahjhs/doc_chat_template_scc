@@ -4,8 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func testAuthDomain(server *httptest.Server) string {
+	return strings.TrimPrefix(server.URL, "http://")
+}
 
 func TestFetchPolicyLayersDecodesPositionalAndOptionShapes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

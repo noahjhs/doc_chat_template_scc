@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"math/rand"
 	"net/url"
 	"sync"
 	"time"
@@ -11,7 +9,6 @@ import (
 	"casper-agent/internal/activate"
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
-	"casper-agent/internal/dialog"
 	"casper-agent/internal/server"
 	"casper-agent/internal/tunnel"
 
@@ -19,19 +16,16 @@ import (
 )
 
 // pairedIdentity is one currently-paired Casper account's own independent
-// state -- its own credentials, its own commands.Handler (so its own
+// state -- its own credentials and its own commands.Handler (so its own
 // cached policy layers, fully isolated from every other identity even
 // though homeRoot is the same underlying directory for all of them -- see
 // server.go's identity type, the HTTP-layer counterpart that only needs
-// the handler/callbacks, not username/deviceToken), and its own
-// approval-relay loop (its own account's pending "ask"-tier approvals are
-// independent of any other account paired to this same machine).
+// the handler/callbacks, not username/deviceToken).
 type pairedIdentity struct {
-	username            string
-	deviceToken         string
-	commandKey          string
-	handler             *commands.Handler
-	cancelApprovalRelay context.CancelFunc
+	username    string
+	deviceToken string
+	commandKey  string
+	handler     *commands.Handler
 }
 
 // daemonState holds everything that changes as the daemon moves between its
@@ -49,11 +43,6 @@ type daemonState struct {
 	authDomain  string
 	routingKey  string
 	port        int
-	// Parent of every identity's own approval-relay context -- cancelling
-	// this (process shutdown, see main.go) cancels all of them at once;
-	// signing out one identity only cancels its own child (see
-	// finishSignOut).
-	approvalCtx context.Context
 	logf        func(format string, args ...any)
 
 	mu         sync.Mutex
@@ -71,7 +60,7 @@ type daemonState struct {
 
 func newDaemonState(
 	srv *server.Server, homeRoot, relayDomain, authDomain, routingKey string, port int,
-	approvalCtx context.Context, logf func(format string, args ...any),
+	logf func(format string, args ...any),
 ) *daemonState {
 	return &daemonState{
 		srv:         srv,
@@ -80,7 +69,6 @@ func newDaemonState(
 		authDomain:  authDomain,
 		routingKey:  routingKey,
 		port:        port,
-		approvalCtx: approvalCtx,
 		logf:        logf,
 		enabled:     config.LoadEnabled(),
 		identities:  make(map[string]*pairedIdentity),
@@ -149,19 +137,17 @@ func (d *daemonState) identityCount() int {
 // its existing Handler so its already-cached policy layers don't
 // momentarily disappear while a fresh fetch is in flight. Persists the
 // full updated session list and (re)starts this identity's own
-// approval-relay loop and policy-layer fetch.
+// policy-layer fetch.
 func (d *daemonState) addOrReplaceIdentity(username, deviceToken, commandKey string) {
 	d.mu.Lock()
 	old := d.identities[username]
 	var handler *commands.Handler
 	if old != nil {
 		handler = old.handler
-		old.cancelApprovalRelay()
 	} else {
 		handler = commands.New(d.homeRoot)
 	}
-	ctx, cancel := context.WithCancel(d.approvalCtx)
-	pi := &pairedIdentity{username: username, deviceToken: deviceToken, commandKey: commandKey, handler: handler, cancelApprovalRelay: cancel}
+	pi := &pairedIdentity{username: username, deviceToken: deviceToken, commandKey: commandKey, handler: handler}
 	d.identities[username] = pi
 	snapshot := d.sessionSnapshotLocked()
 	d.mu.Unlock()
@@ -177,14 +163,13 @@ func (d *daemonState) addOrReplaceIdentity(username, deviceToken, commandKey str
 	}
 	d.srv.AddIdentity(commandKey, handler,
 		func() { d.removeSessionFromDisk(username) },
-		func() { d.finishSignOut(username, commandKey, deviceToken, cancel) },
+		func() { d.finishSignOut(username, commandKey, deviceToken) },
 	)
 
 	if err := config.SaveSessions(snapshot); err != nil {
 		d.logf("casper:// pair: couldn't save session: %s", err)
 	}
 	go d.refreshPolicyLayers(deviceToken, handler)
-	go d.runApprovalRelayLoop(ctx, deviceToken)
 }
 
 // removeSessionFromDisk is the synchronous half of signing out one identity
@@ -207,12 +192,11 @@ func (d *daemonState) removeSessionFromDisk(username string) {
 // finishSignOut is the async half -- run after the /api/shutdown response
 // is already on the wire (or directly by removeIdentity for a path with no
 // HTTP response to sequence against, e.g. reportPresence's self-heal).
-// Cancels this identity's approval-relay loop, deregisters it from the
-// server, stops the relay tunnel only if it was the LAST paired identity
-// (the tunnel is machine-level, shared by every other identity still
-// paired here), and clears this identity's own presence.
-func (d *daemonState) finishSignOut(username, commandKey, deviceToken string, cancel context.CancelFunc) {
-	cancel()
+// Deregisters this identity from the server, stops the relay tunnel only
+// if it was the LAST paired identity (the tunnel is machine-level, shared
+// by every other identity still paired here), and clears this identity's
+// own presence.
+func (d *daemonState) finishSignOut(username, commandKey, deviceToken string) {
 	d.srv.RemoveIdentity(commandKey)
 	if d.identityCount() == 0 {
 		d.stopTunnel()
@@ -242,7 +226,7 @@ func (d *daemonState) removeIdentity(username string) {
 	if err := config.SaveSessions(snapshot); err != nil {
 		d.logf("sign-out: couldn't update session file: %s", err)
 	}
-	d.finishSignOut(pi.username, pi.commandKey, pi.deviceToken, pi.cancelApprovalRelay)
+	d.finishSignOut(pi.username, pi.commandKey, pi.deviceToken)
 }
 
 // dropUnresumedSession removes username from the persisted session list
@@ -378,72 +362,6 @@ func (d *daemonState) refreshPolicyLayers(deviceToken string, handler *commands.
 		return
 	}
 	handler.SetPolicyLayers(layers)
-}
-
-// runApprovalRelayLoop long-polls auth_service's GET
-// /hosts/pending-approvals for ONE specific paired identity, for as long as
-// ctx is alive (a child of daemonState.approvalCtx -- cancelled when that
-// identity signs out, or all at once when the whole daemon shuts down) --
-// showing a native dialog.Confirm and posting the decision back whenever
-// one shows up. The alternative, additive channel for answering an
-// "ask"-tier command-template call, alongside pages/chat.py's existing
-// in-chat Approve/Deny UI. One of these runs per currently-paired identity
-// (started from addOrReplaceIdentity) -- each account's own pending
-// approvals are entirely independent of any other account paired to this
-// same machine, matching the policy-layer isolation everywhere else here.
-func (d *daemonState) runApprovalRelayLoop(ctx context.Context, deviceToken string) {
-	const (
-		baseDelay   = 1 * time.Second
-		maxDelay    = 30 * time.Second
-		stableAfter = 10 * time.Second
-	)
-	delay := baseDelay
-	for ctx.Err() == nil {
-		start := time.Now()
-		approval, err := config.LongPollPendingApproval(ctx, d.authDomain, deviceToken)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			d.logf("Approval relay: long-poll error: %s", err)
-			if time.Since(start) > stableAfter {
-				delay = baseDelay
-			} else {
-				delay *= 2
-				if delay > maxDelay {
-					delay = maxDelay
-				}
-			}
-			select {
-			case <-time.After(approvalRelayJitter(delay)):
-			case <-ctx.Done():
-			}
-			continue
-		}
-		delay = baseDelay
-		if approval == nil {
-			continue // clean timeout, nothing pending -- re-poll immediately
-		}
-
-		message := fmt.Sprintf(
-			"The assistant wants to run %s (%s) on %s. Allow it?", approval.TemplateName, approval.Args, approval.HostLabel,
-		)
-		allow := dialog.Confirm(message)
-		if err := config.PostPendingApprovalDecision(d.authDomain, deviceToken, approval.ID, allow); err != nil {
-			d.logf("Approval relay: couldn't post decision: %s", err)
-		}
-	}
-}
-
-// approvalRelayJitter mirrors internal/tunnel's own unexported jitter
-// helper -- duplicated rather than exported/shared, matching this
-// codebase's existing posture on small per-package helpers like this one
-// (see tunnel.go's Frame docstring for the same reasoning applied
-// elsewhere).
-func approvalRelayJitter(d time.Duration) time.Duration {
-	delta := float64(d) * 0.2
-	offset := (rand.Float64()*2 - 1) * delta
-	return time.Duration(float64(d) + offset)
 }
 
 // reportPresence self-heals on a 401: the auth service no longer

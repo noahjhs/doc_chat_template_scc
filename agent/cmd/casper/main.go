@@ -9,7 +9,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -135,16 +134,7 @@ func main() {
 
 	srv := server.New(logger)
 
-	// Long-polls for each paired identity's own pending approvals to answer
-	// with a native dialog, for the daemon's whole lifetime -- see
-	// runApprovalRelayLoop's own doc comment for why this is a parent
-	// context rather than one loop: each identity gets its own child,
-	// started/stopped as it's paired/signed out; cancelling this parent (in
-	// onExit, mirroring how state.stopTunnel() already tears down
-	// tunnel.go's own background loop there) cancels all of them at once.
-	approvalRelayCtx, approvalRelayCancel := context.WithCancel(context.Background())
-
-	state := newDaemonState(srv, homeRoot, relayDomain, authDomain, routingKey, port, approvalRelayCtx, logf)
+	state := newDaemonState(srv, homeRoot, relayDomain, authDomain, routingKey, port, logf)
 
 	go func() {
 		if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
@@ -205,8 +195,8 @@ func main() {
 		systray.Quit()
 	}()
 
-	restart := func() { restartApp(state, srv, approvalRelayCancel, logf) }
-	systray.Run(func() { onReady(state, restart, logf) }, func() { onExit(state, srv, approvalRelayCancel, logf) })
+	restart := func() { restartApp(state, srv, logf) }
+	systray.Run(func() { onReady(state, restart, logf) }, func() { onExit(state, srv, logf) })
 }
 
 func onReady(state *daemonState, restart func(), logf func(format string, args ...any)) {
@@ -311,14 +301,13 @@ func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, 
 // shutdownDaemon is the actual teardown work -- factored out of onExit so
 // restartApp can run the exact same steps synchronously itself (see its own
 // doc comment for why it can't just go through systray.Quit()/onExit).
-func shutdownDaemon(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc) {
-	cancelApprovalRelay()
+func shutdownDaemon(state *daemonState, srv *server.Server) {
 	state.stopTunnel()
 	srv.Shutdown()
 }
 
-func onExit(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc, logf func(format string, args ...any)) {
-	shutdownDaemon(state, srv, cancelApprovalRelay)
+func onExit(state *daemonState, srv *server.Server, logf func(format string, args ...any)) {
+	shutdownDaemon(state, srv)
 	logf("casper-agent exiting")
 }
 
@@ -329,7 +318,7 @@ func onExit(state *daemonState, srv *server.Server, cancelApprovalRelay context.
 // and exit. The new instance picks its session back up from the same
 // cached session.json a normal quit-and-reopen would, so nothing else
 // needs to be handed to it explicitly.
-func restartApp(state *daemonState, srv *server.Server, cancelApprovalRelay context.CancelFunc, logf func(format string, args ...any)) {
+func restartApp(state *daemonState, srv *server.Server, logf func(format string, args ...any)) {
 	exePath, err := os.Executable()
 	if err != nil {
 		logf("Restart: couldn't resolve the running executable's path: %s", err)
@@ -337,7 +326,7 @@ func restartApp(state *daemonState, srv *server.Server, cancelApprovalRelay cont
 		return
 	}
 	logf("Restart requested from the status bar")
-	shutdownDaemon(state, srv, cancelApprovalRelay)
+	shutdownDaemon(state, srv)
 	if err := exec.Command(exePath).Start(); err != nil {
 		logf("Restart: couldn't relaunch %s: %s", exePath, err)
 		dialog.ShowError("Couldn't restart Casper -- try quitting and reopening it manually.")

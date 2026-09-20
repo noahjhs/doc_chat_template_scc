@@ -58,9 +58,11 @@ app = typer.Typer(help="Casper backend test harness -- drives auth_service direc
 # takes once a real UI exists. DEV_PANEL is everything that tests the
 # backend's own rule engine directly (eval -> call-tool -> chat's own
 # "escalating ladder of what's actually exercised", policy authoring) or
-# simulates a daemon/native-dialog that isn't really there (pair,
-# pair-daemon, report-presence, attend, respond-approvals) -- things a
-# real end user never does; only someone testing this project does.
+# simulates a daemon that isn't really there (pair, pair-daemon,
+# report-presence) -- things a real end user never does; only someone
+# testing this project does. `approvals` belongs in USER_PANEL, not
+# here -- checking and answering a pending "ask"-tier approval is a
+# real end-user action.
 USER_PANEL = "User-facing (mocks the eventual front end)"
 DEV_PANEL = "Developer-facing (tests the backend directly)"
 
@@ -72,6 +74,8 @@ environment_app = typer.Typer(help="Manage Environments.")
 app.add_typer(environment_app, name="environment", rich_help_panel=USER_PANEL)
 profile_app = typer.Typer(help="Manage account profile/notification/permission preferences.")
 app.add_typer(profile_app, name="profile", rich_help_panel=USER_PANEL)
+approvals_app = typer.Typer(help="Check and answer pending 'ask'-tier approvals from any session.")
+app.add_typer(approvals_app, name="approvals", rich_help_panel=USER_PANEL)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -721,77 +725,46 @@ def report_presence(
     console.print(result)
 
 
-@app.command(rich_help_panel=DEV_PANEL, short_help="Set which host receives native-dialog approval prompts.")
-def attend(
-    host: Optional[str] = typer.Argument(None, help="A host label or id -- omit with --clear to unset."),
-    clear: bool = typer.Option(False, "--clear", help="Clear the attended host instead of setting one."),
-):
-    """Set (or clear) which of the caller's own hosts is "attended" --
-    where an "ask"-tier approval's native-dialog prompt would go. Works
-    the same whether `host` is a real daemon or a `pair`-faked one; see
-    `respond-approvals` for standing in for the dialog itself."""
+@approvals_app.command("list")
+def approvals_list():
+    """List the caller's own pending "ask"-tier approvals -- durable
+    across sessions (see db.py's pending_approvals table), so this shows
+    everything waiting on a decision regardless of which chat/call-tool
+    invocation created it."""
     domain, token = _require_session()
     try:
-        if clear:
-            client.clear_attended_host(domain, token)
-            console.print("[green]Cleared.[/green]")
-            return
-        if host is None:
-            result = client.get_attended_host(domain, token)
-            console.print(result)
-            return
-        host_id = _resolve_host_id(domain, token, host)
-        result = client.set_attended_host(domain, token, host_id)
+        result = client.list_pending_approvals(domain, token)
     except client.ApiError as e:
         _handle_api_error(e)
-    console.print(result)
+    pending = result.get("pending_approvals", [])
+    if not pending:
+        console.print("No pending approvals.")
+        return
+    table = Table("id", "description", "created_at")
+    for p in pending:
+        table.add_row(p["id"], p["description"], p["created_at"])
+    console.print(table)
 
 
-@app.command("respond-approvals", rich_help_panel=DEV_PANEL, short_help="Stand in for the native-dialog approval relay.", no_args_is_help=True)
-def respond_approvals(
-    device_token: str,
-    approve: bool = typer.Option(False, "--approve", help="Auto-approve every pending approval."),
-    deny: bool = typer.Option(False, "--deny", help="Auto-deny every pending approval."),
-    once: bool = typer.Option(False, "--once", help="Answer at most one approval, then exit."),
+@approvals_app.command("respond", no_args_is_help=True)
+def approvals_respond(
+    approval_id: str,
+    approve: bool = typer.Option(False, "--approve", help="Approve without an interactive prompt."),
+    deny: bool = typer.Option(False, "--deny", help="Deny without an interactive prompt."),
 ):
-    """Stands in for the native-dialog relay entirely -- polls
-    GET /hosts/pending-approvals with device_token (the same long-poll a
-    real daemon's own dialog.go loop runs) and answers each one, either
-    automatically (--approve/--deny) or by prompting interactively (the
-    default). device_token belongs to whichever host `attend` designated
-    -- real or `pair`-faked; see auth_service/main.py's own
-    list_pending_approvals_for_attended_host for why there's no
-    requirement that this be the daemon actually dispatching the call.
-    Runs until interrupted (Ctrl-C) unless --once."""
+    """Answer one pending approval by id (see `approvals list`) --
+    resumes the underlying conversation and shows the result, same as
+    answering it inline from `chat`/`call-tool` would."""
     if approve and deny:
         err_console.print("[red]Specify at most one of --approve/--deny.[/red]")
         raise typer.Exit(code=1)
-    domain, _token = _require_session()
-    console.print("Waiting for pending approvals (Ctrl-C to stop)...")
+    domain, token = _require_session()
+    decision = "allow" if approve else ("deny" if deny else typer.prompt("Approve? [allow/deny]", default="allow"))
     try:
-        while True:
-            result = client.list_pending_approvals(domain, device_token)
-            for pending in result.get("pending_approvals", []):
-                if pending.get("decision") is not None:
-                    continue
-                console.print(
-                    f"[yellow]Approval requested[/yellow] on {pending['host_label']}: "
-                    f"{pending['binary']} {pending['args']}".strip()
-                )
-                if approve:
-                    decision = "allow"
-                elif deny:
-                    decision = "deny"
-                else:
-                    decision = typer.prompt("Approve? [allow/deny]", default="allow")
-                client.decide_pending_approval(domain, device_token, pending["id"], decision)
-                console.print(f"[green]{decision}.[/green]")
-                if once:
-                    return
+        result = client.decide_pending_approval(domain, token, approval_id, decision)
     except client.ApiError as e:
         _handle_api_error(e)
-    except KeyboardInterrupt:
-        console.print("\nStopped.")
+    _print_step_result(result)
 
 
 @environment_app.command("list")
@@ -1078,23 +1051,35 @@ def _print_step_result(result: dict):
         )
 
 
-def _resolve_pending_approval(turn: dict, domain: str, token: str, mock: bool, default_host: Optional[str], auto: Optional[str]):
-    """Interactively (or via --approve/--deny) resolves a paused turn,
-    looping until it's fully done -- shared by call-tool and chat."""
+def _resolve_pending_approval(result: dict, domain: str, token: str, auto: Optional[str]):
+    """Interactively (or via --approve/--deny) resolves a pending approval
+    by id, looping until it's fully done -- shared by call-tool and chat.
+    Resolving by id (rather than resubmitting the raw turn) means this
+    works identically whether the SAME session answers it immediately or
+    a later `harness approvals respond` (from any session) does. If
+    neither an auto decision nor an interactive prompt is possible (a
+    non-interactive invocation with no --approve/--deny), the approval is
+    simply left in the durable per-user queue (see db.py's
+    pending_approvals table) -- reported here, not hung on or crashed."""
     while True:
+        pending = result["pending_approval"]
+        approval_id = pending["approval_id"]
         decision = auto
         if decision is None:
+            if not sys.stdin.isatty():
+                console.print(
+                    f"[yellow]Approval needed[/yellow] (id={approval_id}) -- "
+                    f"run `harness approvals respond {approval_id}` from another session to decide."
+                )
+                return result
             decision = typer.prompt("Approve this call? [allow/deny]", default="allow")
         try:
-            result = client.conversation_step(
-                domain, token, turn=turn, approval_decision=decision, default_host=default_host, mock=mock
-            )
+            result = client.decide_pending_approval(domain, token, approval_id, decision)
         except client.ApiError as e:
             _handle_api_error(e)
         _print_step_result(result)
         if result["status"] == "done":
             return result
-        turn = result["turn"]
 
 
 @app.command("call-tool", rich_help_panel=DEV_PANEL, short_help="Inject one tool call directly, as if the model proposed it.", no_args_is_help=True)
@@ -1125,7 +1110,7 @@ def call_tool_cmd(
     _print_step_result(result)
     if result["status"] == "pending_approval":
         auto = "allow" if approve else ("deny" if deny else None)
-        _resolve_pending_approval(result["turn"], domain, token, mock, host, auto)
+        _resolve_pending_approval(result, domain, token, auto)
 
 
 @app.command(rich_help_panel=DEV_PANEL, short_help="Have a real conversational turn -- the model decides what to call.")
@@ -1178,7 +1163,7 @@ def chat(
             _handle_api_error(e)
         _print_step_result(result)
         if result["status"] == "pending_approval":
-            result = _resolve_pending_approval(result["turn"], domain, token, mock, host, None)
+            result = _resolve_pending_approval(result, domain, token, None)
         turn = result["turn"]
         _save_chat_state(domain, username, host, mock, turn)
 

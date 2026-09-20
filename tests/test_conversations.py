@@ -276,6 +276,63 @@ def test_conversation_shell_command_ask_tier_pauses_then_resumes(app_env):
     assert len(fake.responses.calls) == 1  # the follow-up hop, after resuming
 
 
+def test_conversation_pending_approval_visible_and_resolvable_via_decide_endpoint(app_env):
+    """The new, durable per-user path: a pending approval is listed via
+    GET /conversations/pending-approvals and resolved via POST
+    .../decide -- usable from ANY interface holding the user's own session
+    token (not just the one that paused it), and never visible to, or
+    resolvable by, another user."""
+    main, client = app_env
+    signup = _signup(client, "hank3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    other = _signup(client, "ivy3")
+    other_headers = {"Authorization": f"Bearer {other['token']}"}
+
+    pair = _pair_and_connect_host(client, headers, "rk-hank3-1", "hanks-mac")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="ask")
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+
+    fake = FakeClient([FakeResponse(id="resp_2", output_text="ok, ran it")])
+    main._get_openai_client = lambda: fake
+
+    paused = _step(
+        client, headers,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}}, mock=True,
+    ).json()
+    approval_id = paused["pending_approval"]["approval_id"]
+
+    mine = client.get("/conversations/pending-approvals", headers=headers).json()["pending_approvals"]
+    assert [a["id"] for a in mine] == [approval_id]
+    assert client.get("/conversations/pending-approvals", headers=other_headers).json()["pending_approvals"] == []
+
+    assert (
+        client.post(
+            f"/conversations/pending-approvals/{approval_id}/decide", json={"decision": "allow"}, headers=other_headers
+        ).status_code
+        == 404
+    )
+
+    resolved = client.post(
+        f"/conversations/pending-approvals/{approval_id}/decide", json={"decision": "allow"}, headers=headers
+    )
+    assert resolved.status_code == 200
+    body = resolved.json()
+    assert body["status"] == "done"
+    calls = body["turn"]["aggregate"]["shell_command_calls"]
+    assert len(calls) == 1
+    assert json.loads(calls[0]["output"])["positional_args"] == ["npm", "run"]
+
+    # Resolved -- gone from the queue, can't be resolved twice.
+    assert client.get("/conversations/pending-approvals", headers=headers).json()["pending_approvals"] == []
+    assert (
+        client.post(
+            f"/conversations/pending-approvals/{approval_id}/decide", json={"decision": "allow"}, headers=headers
+        ).status_code
+        == 404
+    )
+
+
 def test_conversation_shell_command_cwd_scoped_tier_decision(app_env):
     """_decide_tier threads args["path"] through as cwd -- a rule scoped to
     one directory allows a call whose path matches it and denies (never

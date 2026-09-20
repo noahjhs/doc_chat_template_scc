@@ -198,19 +198,29 @@ CREATE TABLE IF NOT EXISTS policy_layer_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_policy_layer_rules_policy_layer_id ON policy_layer_rules(policy_layer_id, position);
 
--- Which one of a user's known hosts they're currently physically at --
--- used to route a pending approval's native-dialog prompt to the right
--- daemon (see main.py's pending-approvals endpoints). One row per user
--- (upserted), not a column on users, same "new tables only" reasoning as
--- everything else here. Must reference a row already in user_hosts
--- (enforced in main.py, not by a foreign key -- PRAGMA foreign_keys is
--- never turned on in this file, so none of this schema's REFERENCES
--- clauses are DB-enforced).
-CREATE TABLE IF NOT EXISTS user_attended_host (
-    user_id INTEGER PRIMARY KEY REFERENCES users(id),
-    host_id INTEGER NOT NULL REFERENCES hosts(id),
-    set_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- A durable, per-user queue of "ask"-tier pauses waiting on a decision --
+-- deliberately host-agnostic (no host_id/device_token anywhere here): who
+-- answers is whichever interface the user checks in from (harness, a text
+-- reply -- see main.py's /sms/inbound -- eventually a browser), never a
+-- designated machine. turn is the JSON-serialized paused conversation
+-- turn, snapshotted right after run_turn sets turn["awaiting_approval"],
+-- so resolving a row later is just calling run_turn(turn, decision, ...)
+-- again -- see main.py's pending-approval endpoints. Replaces an earlier,
+-- in-memory-only design that routed through a designated "attended host"
+-- daemon's own native dialog -- removed as a real design mistake (a
+-- native dialog fires wherever a host happens to be designated, not
+-- necessarily wherever a human is actually watching; see git history for
+-- the removed user_attended_host table this replaces).
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    description TEXT NOT NULL,
+    turn TEXT NOT NULL,
+    default_host TEXT,
+    mock INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_user_id ON pending_approvals(user_id);
 """
 
 

@@ -32,9 +32,9 @@ the `harness` package's `policy apply` for authoring these, including
 optional `cwd` and per-argument `path_resolution` constraints); an
 unattached-by-default host runs nothing at all. Each rule's tier decides
 what happens next: `allow` runs immediately, `ask` pauses for your
-explicit approval (in the client driving the conversation, or as a native
-dialog here if this machine is your currently "attended" host), `deny`
-always rejects it.
+explicit approval (from the client driving the conversation, or from any
+other session checking your account's pending approvals -- see `harness
+approvals`), `deny` always rejects it.
 
 **File transfer** — moving a file to/from another connected machine, or
 to/from your own private server storage (capped at 1GB, independent of any
