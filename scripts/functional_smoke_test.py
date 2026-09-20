@@ -2,14 +2,21 @@
 """A deeper post-deploy check than smoke_test.sh's own curl-based liveness
 checks (which only confirm a service is up and its auth gate is actually
 enforcing -- see that script's own docstring). This one drives a real
-signup -> pair -> policy-authoring -> eval -> mock tool call round trip
-against a LIVE deployment via harness/client.py (plain functions, real
-network, no CliRunner/no mocking of anything except the daemon dispatch
-itself via call_tool's own mock=True) -- confirming the API isn't just
-"up," but functionally correct end to end. This is exactly the kind of
-check that was previously only ever done by hand (see this session's own
-manual multi-account-pairing verification after a deploy) -- codifying it
-here means every deploy gets it for free.
+signup -> pair -> policy-authoring -> mock tool call round trip against a
+LIVE deployment via harness/client.py (plain functions, real network, no
+CliRunner/no mocking of anything except the daemon dispatch itself via
+call_tool's own mock=True) -- confirming the API isn't just "up," but
+functionally correct end to end. This is exactly the kind of check that
+was previously only ever done by hand (see this session's own manual
+multi-account-pairing verification after a deploy) -- codifying it here
+means every deploy gets it for free.
+
+Deliberately does NOT exercise /policies/eval: eval now always routes to
+a real, connected daemon (see docs/testing-strategy.md's Layer 3/4) --
+this smoke test's whole point is a cheap, daemon-free liveness check, and
+a "fake host" paired here never reports presence, so it structurally
+can't reach eval anymore. Real eval verification lives in
+docs/user-flows/daemon-authoritative-dispatch.md, against a real daemon.
 
 Creates one throwaway account per run -- no cleanup by design, matching
 this project's existing posture of throwaway signup accounts for manual
@@ -69,11 +76,6 @@ def main() -> int:
         )
         client.add_policy_layer_to_host(domain, token, layer["id"], host_id)
         print("  OK   policy layer authoring + host attachment")
-
-        evaluated = client.eval_policy(domain, token, [layer["id"]], positional_args=["echo", "hi"])
-        if evaluated["tier"] != "allow":
-            raise AssertionError(f"expected tier=allow from eval, got {evaluated}")
-        print("  OK   policy eval matches the rule just authored")
 
         result = client.call_tool(
             domain, token, "run_shell_command", {"positional_args": ["echo", "hi"]}, mock=True, default_host="smoke-test-host"

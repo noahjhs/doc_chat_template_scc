@@ -63,7 +63,7 @@ code=$("$CURL" -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${AUTH_D
 check "GET /hosts" "401" "$code"
 
 echo
-echo "Functional check (signup -> pair -> policy -> eval -> mock tool call, see functional_smoke_test.py):"
+echo "Functional check (signup -> pair -> policy -> mock tool call, see functional_smoke_test.py):"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if python3 -c "import harness.client" >/dev/null 2>&1; then
   if AUTH_DOMAIN="$AUTH_DOMAIN" python3 "$SCRIPT_DIR/functional_smoke_test.py" "$ENVIRONMENT"; then
