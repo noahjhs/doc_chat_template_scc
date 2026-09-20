@@ -92,6 +92,14 @@ SESSION_PATH = Path(os.environ.get("CASPER_HARNESS_SESSION", str(Path.home() / "
 # this username belong to", so it's a username -> domain map, not the other
 # way around.
 KNOWN_DOMAINS_PATH = SESSION_PATH.parent / "known_domains.json"
+# Remembers the in-progress `harness chat` conversation (the `turn` state
+# conversations.py's stateless POST /conversations/step hands back and
+# expects back on the next call -- see its own module docstring) across
+# separate `harness` launches, same "don't make me retype/re-establish
+# things" spirit as everything else here. Scoped to the (domain, username)
+# it was saved under, checked on load -- switching accounts should never
+# resume a stranger's conversation.
+CHAT_STATE_PATH = SESSION_PATH.parent / "chat_state.json"
 # Interactive-mode command history (see _run_interactive) -- persisted
 # across separate `harness` launches, same "don't make me retype things"
 # spirit as everything else here, not just scrollable within one session.
@@ -235,6 +243,30 @@ def _remember_domain(username: str, domain: str) -> None:
     known[username] = domain
     KNOWN_DOMAINS_PATH.parent.mkdir(parents=True, exist_ok=True)
     KNOWN_DOMAINS_PATH.write_text(json.dumps(known))
+
+
+def _load_chat_state(domain: str, username: str) -> Optional[dict]:
+    """Returns the saved `turn`/`host`/`mock` for THIS (domain, username)
+    only -- None for a missing file, a different account's saved state, or
+    a corrupt file (treated the same as "nothing saved yet")."""
+    if not CHAT_STATE_PATH.exists():
+        return None
+    try:
+        saved = json.loads(CHAT_STATE_PATH.read_text())
+    except ValueError:
+        return None
+    if saved.get("domain") != domain or saved.get("username") != username:
+        return None
+    return saved
+
+
+def _save_chat_state(domain: str, username: str, host: Optional[str], mock: bool, turn: dict) -> None:
+    CHAT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CHAT_STATE_PATH.write_text(json.dumps({"domain": domain, "username": username, "host": host, "mock": mock, "turn": turn}))
+
+
+def _clear_chat_state() -> None:
+    CHAT_STATE_PATH.unlink(missing_ok=True)
 
 
 def _resolve_domain(username: str, domain: Optional[str], dev: bool, prod: bool) -> str:
@@ -1087,23 +1119,46 @@ def call_tool_cmd(
 def chat(
     host: Optional[str] = typer.Option(None, "--host"),
     mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
+    new: bool = typer.Option(False, "--new", help="Start a fresh conversation instead of resuming the last one."),
 ):
     """A real conversational turn -- the model decides what (if anything)
     to call. Ctrl-C, or typing 'exit'/'quit', to leave -- an empty line is
     ignored (just re-prompts) rather than ending the conversation, so a
-    stray Enter press doesn't lose your place mid-chat."""
+    stray Enter press doesn't lose your place mid-chat. Remembers the
+    conversation across separate `harness` launches for the same logged-in
+    account -- running `harness chat` again picks up where you left off,
+    unless --new is given or you type 'new'/'reset' during the
+    conversation."""
     domain, token = _require_session()
+    username = _load_session()["username"]
     turn = None
-    console.print("Casper harness chat. Type 'exit' or 'quit' (or Ctrl-C) to leave.")
+    resumed = False
+    if not new:
+        saved = _load_chat_state(domain, username)
+        if saved is not None:
+            turn = saved.get("turn")
+            if host is None:
+                host = saved.get("host")
+            mock = mock or bool(saved.get("mock", False))
+            resumed = turn is not None
+    console.print("Casper harness chat. Type 'exit' or 'quit' (or Ctrl-C) to leave, 'new' to start over.")
+    if resumed:
+        console.print("[dim]Resuming your previous conversation.[/dim]")
     while True:
         try:
             message = typer.prompt("you")
         except (typer.Abort, KeyboardInterrupt):
             break
-        if not message.strip():
+        stripped = message.strip().lower()
+        if not stripped:
             continue
-        if message.strip().lower() in ("exit", "quit"):
+        if stripped in ("exit", "quit"):
             break
+        if stripped in ("new", "reset"):
+            turn = None
+            _clear_chat_state()
+            console.print("[dim]Started a new conversation.[/dim]")
+            continue
         try:
             result = client.chat_step(domain, token, message=message, turn=turn, default_host=host, mock=mock)
         except client.ApiError as e:
@@ -1112,6 +1167,7 @@ def chat(
         if result["status"] == "pending_approval":
             result = _resolve_pending_approval(result["turn"], domain, token, mock, host, None)
         turn = result["turn"]
+        _save_chat_state(domain, username, host, mock, turn)
 
 
 if __name__ == "__main__":
