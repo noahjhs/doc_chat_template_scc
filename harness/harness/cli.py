@@ -1089,16 +1089,20 @@ def chat(
     mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
 ):
     """A real conversational turn -- the model decides what (if anything)
-    to call. Ctrl-C or an empty line to exit."""
+    to call. Ctrl-C, or typing 'exit'/'quit', to leave -- an empty line is
+    ignored (just re-prompts) rather than ending the conversation, so a
+    stray Enter press doesn't lose your place mid-chat."""
     domain, token = _require_session()
     turn = None
-    console.print("Casper harness chat. Empty line or Ctrl-C to exit.")
+    console.print("Casper harness chat. Type 'exit' or 'quit' (or Ctrl-C) to leave.")
     while True:
         try:
             message = typer.prompt("you")
         except (typer.Abort, KeyboardInterrupt):
             break
         if not message.strip():
+            continue
+        if message.strip().lower() in ("exit", "quit"):
             break
         try:
             result = client.chat_step(domain, token, message=message, turn=turn, default_host=host, mock=mock)
