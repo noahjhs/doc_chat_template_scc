@@ -333,6 +333,46 @@ def test_conversation_pending_approval_visible_and_resolvable_via_decide_endpoin
     )
 
 
+def test_sms_inbound_resolves_pending_approval_and_resumes_conversation(app_env):
+    """The full text-message-approval lifecycle: a real ask-tier pause,
+    notified (mocked) via SMS, resolved by a real (signature-verified)
+    inbound Twilio webhook reply -- confirms it actually resumes the
+    conversation, not just records a decision."""
+    from twilio.request_validator import RequestValidator
+
+    main, client = app_env
+    os.environ["TWILIO_AUTH_TOKEN"] = "test-auth-token"
+    validator = RequestValidator("test-auth-token")
+
+    signup = _signup(client, "juan")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    client.patch("/profile", json={"sms_notifications_enabled": True, "sms_number": "555-234-5678"}, headers=headers)
+
+    pair = _pair_and_connect_host(client, headers, "rk-juan-1", "juans-mac")
+    layer = _create_policy_layer(client, headers)
+    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="ask")
+    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+
+    fake = FakeClient([FakeResponse(id="resp_sms", output_text="ok, ran it")])
+    main._get_openai_client = lambda: fake
+
+    paused = _step(
+        client, headers,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}}, mock=True,
+    ).json()
+    assert paused["status"] == "pending_approval"
+
+    params = {"From": "+15552345678", "Body": "yes please"}
+    url = "http://testserver/sms/inbound"
+    signature = validator.compute_signature(url, params)
+    reply = client.post("/sms/inbound", data=params, headers={"X-Twilio-Signature": signature})
+    assert reply.status_code == 200
+    assert "Approved" in reply.text
+
+    assert client.get("/conversations/pending-approvals", headers=headers).json()["pending_approvals"] == []
+    assert len(fake.responses.calls) == 1  # only the follow-up hop after resuming -- the injected tool_call never needed a model call to pause
+
+
 def test_conversation_shell_command_cwd_scoped_tier_decision(app_env):
     """_decide_tier threads args["path"] through as cwd -- a rule scoped to
     one directory allows a call whose path matches it and denies (never

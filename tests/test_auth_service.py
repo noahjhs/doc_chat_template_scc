@@ -1021,3 +1021,87 @@ def test_pending_approvals_are_scoped_per_user(client):
         ).status_code
         == 404
     )
+
+
+class _FakeTwilioMessages:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+class _FakeTwilioClient:
+    def __init__(self):
+        self.messages = _FakeTwilioMessages()
+
+
+def test_approval_sms_sent_only_when_enabled_and_number_set(client):
+    """_send_approval_sms (called from _create_pending_approval_record) is
+    opt-in on two independent conditions -- both must be true."""
+    import main as auth_main
+
+    fake = _FakeTwilioClient()
+    auth_main._get_twilio_client = lambda: fake
+    os.environ["TWILIO_FROM_NUMBER"] = "+15005550006"
+
+    signup = _signup(client, "smsuser1")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    with auth_main.get_db() as db:
+        user_id = auth_main._resolve_user_id(db, f"Bearer {signup['token']}")
+
+    # Neither set -- no SMS.
+    auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False)
+    assert fake.messages.calls == []
+
+    # Enabled but no number saved -- still no SMS.
+    client.patch("/profile", json={"sms_notifications_enabled": True}, headers=headers)
+    auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False)
+    assert fake.messages.calls == []
+
+    # Both set -- sends, addressed to the normalized E.164 number.
+    client.patch("/profile", json={"sms_number": "555-234-5678"}, headers=headers)
+    auth_main._create_pending_approval_record(user_id, "run `rm x` on my-mac", {}, None, False)
+    assert len(fake.messages.calls) == 1
+    assert fake.messages.calls[0]["to"] == "+15552345678"
+    assert fake.messages.calls[0]["from_"] == "+15005550006"
+    assert "run `rm x` on my-mac" in fake.messages.calls[0]["body"]
+
+
+def test_sms_inbound_requires_valid_signature(client):
+    # Not configured at all.
+    os.environ.pop("TWILIO_AUTH_TOKEN", None)
+    assert client.post("/sms/inbound", data={"From": "+15552345678", "Body": "yes"}).status_code == 403
+
+    # Configured, but no/garbage signature.
+    os.environ["TWILIO_AUTH_TOKEN"] = "test-auth-token"
+    assert (
+        client.post(
+            "/sms/inbound", data={"From": "+15552345678", "Body": "yes"}, headers={"X-Twilio-Signature": "bogus"}
+        ).status_code
+        == 403
+    )
+
+
+def test_sms_inbound_handles_unmatched_number_and_no_pending_approval_gracefully(client):
+    from twilio.request_validator import RequestValidator
+
+    os.environ["TWILIO_AUTH_TOKEN"] = "test-auth-token"
+    validator = RequestValidator("test-auth-token")
+
+    def _post(url, params):
+        sig = validator.compute_signature(url, params)
+        return client.post("/sms/inbound", data=params, headers={"X-Twilio-Signature": sig})
+
+    # No user has this number at all.
+    r = _post("http://testserver/sms/inbound", {"From": "+19995550000", "Body": "yes"})
+    assert r.status_code == 200
+    assert "isn't set up" in r.text
+
+    # A real user, but nothing pending.
+    signup = _signup(client, "smsuser2")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    client.patch("/profile", json={"sms_notifications_enabled": True, "sms_number": "555-234-5678"}, headers=headers)
+    r = _post("http://testserver/sms/inbound", {"From": "+15552345678", "Body": "yes"})
+    assert r.status_code == 200
+    assert "No pending approval" in r.text

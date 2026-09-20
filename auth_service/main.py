@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import bcrypt
 import requests
 from db import get_db, init_db
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -38,6 +38,7 @@ from models import (
     HostVerifyResponse,
     LoginRequest,
     Pattern,
+    normalize_phone_digits,
     PendingApprovalDecisionRequest,
     PendingApprovalInfo,
     PendingApprovalListResponse,
@@ -82,6 +83,28 @@ def _get_openai_client():
 
         _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     return _openai_client
+
+
+_twilio_client = None
+
+
+def _get_twilio_client():
+    """Lazily constructed, cached singleton -- mirrors _get_openai_client's
+    injection-point pattern (tests patch this function directly, same as
+    they do for the OpenAI client). Returns None if Twilio isn't
+    configured at all (no TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) -- a
+    perfectly normal state for a deployment that hasn't set up SMS
+    approvals, not an error."""
+    global _twilio_client
+    if _twilio_client is None:
+        account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+        auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+        if not account_sid or not auth_token:
+            return None
+        from twilio.rest import Client as TwilioClient
+
+        _twilio_client = TwilioClient(account_sid, auth_token)
+    return _twilio_client
 
 
 @app.exception_handler(RequestValidationError)
@@ -1321,7 +1344,31 @@ def _create_pending_approval_record(
             """,
             (approval_id, user_id, description, json.dumps(turn), default_host, int(mock)),
         )
+    _send_approval_sms(user_id, description)
     return approval_id
+
+
+def _send_approval_sms(user_id: int, description: str):
+    """Best-effort -- an SMS failure (Twilio not configured for this
+    deployment, an API error, an invalid number) must never break the
+    conversation step that triggered it. No-ops unless the user has BOTH
+    sms_notifications_enabled and a saved sms_number (see models.py's
+    ProfileInfo) -- this is an opt-in notification, not a requirement to
+    answer via text (the same session, or `harness approvals`, still
+    works regardless)."""
+    twilio_client = _get_twilio_client()
+    from_number = os.environ.get("TWILIO_FROM_NUMBER")
+    if twilio_client is None or not from_number:
+        return
+    with get_db() as db:
+        profile = _get_or_create_profile(db, user_id)
+    if not profile.sms_notifications_enabled or not profile.sms_number:
+        return
+    to_number = f"+1{normalize_phone_digits(profile.sms_number)}"
+    try:
+        twilio_client.messages.create(to=to_number, from_=from_number, body=f"{description}. Reply YES to approve, NO to deny.")
+    except Exception as e:  # noqa: BLE001 -- any Twilio/network failure here is best-effort, never fatal to the step
+        print(f"Couldn't send approval SMS to user {user_id}: {e}")
 
 
 def _resume_pending_approval(row, decision: str) -> ConversationStepResponse:
@@ -1383,6 +1430,75 @@ def decide_pending_approval(
     if row is None:
         raise HTTPException(status_code=404, detail="Unknown pending approval.")
     return _resume_pending_approval(row, body.decision)
+
+
+def _twiml_message(message: str) -> Response:
+    escaped = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return Response(content=f"<Response><Message>{escaped}</Message></Response>", media_type="application/xml")
+
+
+@app.post("/sms/inbound")
+async def sms_inbound(request: Request):
+    """Twilio's webhook for a reply to an approval text (see
+    _send_approval_sms) -- the only entry point besides a logged-in
+    session that can ever resolve a pending approval, so verifying
+    X-Twilio-Signature (proving the request really came from Twilio, not
+    someone who found this URL) is the actual security boundary here, not
+    session auth. TWILIO_WEBHOOK_URL overrides the URL validated against
+    (defaults to the request's own url) -- needed if this deployment sits
+    behind a reverse proxy/tunnel that changes what FastAPI sees vs. the
+    public URL Twilio actually signed against.
+    Matches an inbound reply to a user by phone number, then resolves
+    that user's most-recently-created pending approval -- deliberately no
+    per-approval code to reply with; the outbound text is fully
+    descriptive of what it's approving so a bare "yes"/"no" reading the
+    thread is enough."""
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+    if not auth_token:
+        raise HTTPException(status_code=403, detail="SMS approvals aren't configured on this deployment.")
+
+    form = await request.form()
+    params = dict(form)
+    signature = request.headers.get("X-Twilio-Signature", "")
+    webhook_url = os.environ.get("TWILIO_WEBHOOK_URL", str(request.url))
+
+    from twilio.request_validator import RequestValidator
+
+    if not RequestValidator(auth_token).validate(webhook_url, params, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature.")
+
+    from_number = normalize_phone_digits(str(params.get("From", "")))
+    body_text = str(params.get("Body", "")).strip().lower()
+
+    with get_db() as db:
+        candidates = db.execute(
+            "SELECT user_id, sms_number FROM user_profile WHERE sms_notifications_enabled = 1"
+        ).fetchall()
+    user_id = next(
+        (r["user_id"] for r in candidates if r["sms_number"] and normalize_phone_digits(r["sms_number"]) == from_number),
+        None,
+    )
+    if user_id is None:
+        return _twiml_message("This number isn't set up for Casper approvals.")
+
+    with get_db() as db:
+        row = db.execute(
+            "SELECT * FROM pending_approvals WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)
+        ).fetchone()
+    if row is None:
+        return _twiml_message("No pending approval to answer.")
+
+    first_word = body_text.split()[0] if body_text.split() else ""
+    if first_word in ("yes", "y", "approve", "allow"):
+        decision = "allow"
+    elif first_word in ("no", "n", "deny", "reject"):
+        decision = "deny"
+    else:
+        return _twiml_message(f"Sorry, I didn't understand that. Reply YES or NO to: {row['description']}")
+
+    _resume_pending_approval(row, decision)
+    verb = "Approved" if decision == "allow" else "Denied"
+    return _twiml_message(f"{verb}: {row['description']}.")
 
 
 # --- Profile ---------------------------------------------------------------

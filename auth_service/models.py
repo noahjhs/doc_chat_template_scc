@@ -432,16 +432,28 @@ def _validate_email_value(value: str) -> str:
     return value
 
 
+def normalize_phone_digits(value: str) -> str:
+    """Strips everything but digits and drops a leading US country-code
+    "1" if present -- the single source of truth for comparing/storing a
+    phone number as digits only. Shared by _validate_sms_number_value
+    below (storage) and auth_service/main.py's SMS-inbound matching
+    (looking up which user a Twilio webhook's "From" number belongs to),
+    so a stored "(555) 234-5678" and an inbound "+15552345678" compare
+    equal."""
+    digits = re.sub(r"\D", "", value)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits
+
+
 def _validate_sms_number_value(value: str) -> str:
     """Normalizes to a canonical "(XXX) XXX-XXXX" US phone number -- the
     masking half of "input masking and data validation" happens here
     (single source of truth, rather than duplicating this in every
-    caller): strips everything but digits, drops a leading "1" country
-    code if present, then requires exactly 10 digits left. The client
-    just displays whatever comes back in the response."""
-    digits = re.sub(r"\D", "", value)
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
+    caller): requires exactly 10 digits once normalize_phone_digits
+    strips everything else. The client just displays whatever comes back
+    in the response."""
+    digits = normalize_phone_digits(value)
     if len(digits) != 10:
         raise ValueError("Enter a 10-digit phone number.")
     return f"({digits[0:3]}) {digits[3:6]}-{digits[6:10]}"
