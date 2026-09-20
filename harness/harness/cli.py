@@ -12,6 +12,7 @@ retired throughout."""
 import json
 import os
 import shlex
+import sys
 import threading
 import time
 from pathlib import Path
@@ -115,6 +116,30 @@ def _require_session() -> tuple[str, str]:
 def _handle_api_error(e: client.ApiError):
     err_console.print(f"[red]Error {e.status_code}:[/red] {e.detail}")
     raise typer.Exit(code=1)
+
+
+def _require_password_flag_when_noninteractive() -> None:
+    """Guards signup/login's own interactive password prompt (and login's
+    Touch ID gate before it -- see _authenticate_device_owner) against an
+    automated/scripted caller that omitted --password: without this, a
+    non-interactive run wouldn't just fail cleanly, it would either hang
+    forever on typer.prompt (no human to type anything) or -- worse, for
+    login specifically -- hang forever on a REAL system Touch ID/password
+    dialog nobody is present to answer, on any machine that happens to
+    have an active GUI session (the mini, notably, which runs unattended).
+    sys.stdin.isatty() is the standard, simple way to tell "a human is
+    plausibly at a real terminal" apart from "piped/redirected/scripted" --
+    not foolproof (a script could itself run inside a real pty), but
+    exactly right for this: the one thing that actually matters is whether
+    there's a reasonable expectation of headless/automated use, and
+    --password is always the correct, hang-free way to drive that
+    regardless of this heuristic either way."""
+    if not sys.stdin.isatty():
+        err_console.print(
+            "[red]Not running interactively -- pass --password explicitly[/red] "
+            "(required for scripted/automated use; omitting it here would otherwise hang)."
+        )
+        raise typer.Exit(code=1)
 
 
 def _authenticate_device_owner(reason: str) -> bool:
@@ -343,10 +368,12 @@ def signup(
     """Create a new account and save the resulting session. When the
     password is typed interactively (not supplied via --password), asks
     before saving it to the OS keychain -- same as a browser's own
-    save-password prompt."""
+    save-password prompt. --password is required for scripted/automated
+    use (see _require_password_flag_when_noninteractive)."""
     domain = _resolve_domain(username, domain, dev, prod)
     typed_fresh = password is None
     if password is None:
+        _require_password_flag_when_noninteractive()
         password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
     try:
         result = client.signup(domain, username, password)
@@ -379,9 +406,16 @@ def login(
     password stops working. A freshly-typed password that signs in
     successfully is offered to be saved (see _maybe_save_password) rather
     than saved automatically -- same as a browser's own save-password
-    prompt."""
+    prompt. --password is required for scripted/automated use (see
+    _require_password_flag_when_noninteractive) -- deliberately checked
+    BEFORE the keychain/Touch ID path below, not just before the plain
+    prompt, since the Touch ID dialog is the one that would otherwise hang
+    an unattended run indefinitely rather than just failing outright."""
     domain = _resolve_domain(username, domain, dev, prod)
     key = _keyring_key(domain, username)
+
+    if password is None and not sys.stdin.isatty():
+        _require_password_flag_when_noninteractive()  # always raises -- see its own docstring
 
     from_keychain = False
     typed_fresh = False
