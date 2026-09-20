@@ -193,6 +193,122 @@ def test_chat_resumes_across_separate_invocations_until_new(harness_env):
     assert "Resuming your previous conversation." not in fresh.output
 
 
+def _pause_via_call_tool(cli, hc, domain, token, username, host_label="pausehost"):
+    """Creates a real, server-side pending approval without needing a real
+    OpenAI call (call_tool injects the tool call directly -- see
+    conversations.py's new_turn_from_tool_call) -- used below to simulate
+    exactly what chat_state.json would hold if `harness chat` itself had
+    just paused and been killed before finishing the approval prompt (see
+    the matching _save_chat_state call added right where chat detects a
+    pause, before the -- possibly long-lived, possibly interrupted --
+    resolution prompt)."""
+    pair = hc.pair_host(domain, token, f"rk-{username}", hostname=host_label)
+    hc.report_host_presence(domain, pair["device_token"], f"https://relay.example/agent/{username}")
+    layer = hc.create_policy_layer(domain, token, f"{username}-ask-layer")
+    hc.create_policy_layer_rule(
+        domain, token, layer["id"], positional_constraints=[{"whitelist": "^rm$"}], option_constraints=[], tier="ask"
+    )
+    hc.add_policy_layer_to_host(domain, token, layer["id"], pair["host_id"])
+    # A single positional_arg matching the rule's single positional
+    # constraint exactly -- a length mismatch (e.g. ["rm", "x"] against a
+    # one-constraint rule) falls through to no match at all (tier
+    # resolves to deny, not ask), which drains and dispatches immediately
+    # instead of pausing, needing a real (unmocked) OpenAI follow-up hop.
+    paused = hc.call_tool(domain, token, "run_shell_command", {"positional_args": ["rm"]}, mock=True, default_host=host_label)
+    cli.CHAT_STATE_PATH.write_text(
+        json.dumps({"domain": domain, "username": username, "host": host_label, "mock": True, "turn": paused["turn"]})
+    )
+    return paused["pending_approval"]["approval_id"]
+
+
+# --- Regression: killing `chat` mid-approval-pause must not silently lose
+# track of it -- the paused state has to survive on disk, and relaunching
+# must surface it, not silently resume as if nothing happened.
+def test_chat_resumes_into_a_pending_approval_left_by_a_prior_kill(harness_env):
+    cli, hc, runner, main = harness_env
+    # _get_openai_client() is evaluated eagerly as a plain argument to
+    # run_turn(...) (see auth_service/main.py's _step_response) -- it must
+    # return a usable client even for a call that pauses immediately and
+    # never actually invokes .responses.create() on it, so this needs
+    # mocking before ANY conversation_step call, not just an actual
+    # resolution's own real follow-up hop.
+    main._get_openai_client = lambda: _FakeOpenAI(["done"])
+    _signup(cli, runner, "killeduser")
+    session = json.loads(cli.SESSION_PATH.read_text())
+    approval_id = _pause_via_call_tool(cli, hc, DOMAIN, session["token"], "killeduser")
+
+    # CliRunner's own stdin is never a real tty (confirmed directly --
+    # patching sys.stdin.isatty here has no effect, since CliRunner
+    # substitutes its own stdin object during invoke()), so this can only
+    # exercise the fail-clean, non-interactive path here, not a typed
+    # "allow"/"deny" -- see harness/harness/cli.py's own
+    # _require_flag_when_noninteractive for the identical constraint
+    # elsewhere in this file. What actually matters, and what THIS
+    # regression test is really about: no crash (a real KeyError was
+    # found and fixed here -- the reconstructed result dict passed into
+    # _resolve_pending_approval originally had no "turn" key), the
+    # SAME approval is correctly identified by id, and it's left
+    # genuinely still pending -- not lost, not duplicated.
+    result = runner.invoke(cli.app, ["chat", "--mock"], input="exit\n")
+    assert result.exit_code == 0, result.output
+    assert "Picking up a pending approval from before" in result.output
+    assert f"id={approval_id}" in result.output
+
+    remaining = hc.list_pending_approvals(DOMAIN, session["token"])["pending_approvals"]
+    assert [p["id"] for p in remaining] == [approval_id]
+
+
+# --- The resolution mechanics chat's resume branch hands off to, tested
+# directly (no tty simulation needed -- auto="allow" skips the prompt the
+# same way call-tool's own --approve/--deny do): confirms the
+# reconstructed result dict chat builds on resume (turn + a bare
+# pending_approval.approval_id, not a full server response) is actually
+# resolvable, start to finish, once a decision IS available.
+def test_resolve_pending_approval_resumes_a_chat_reconstructed_result(harness_env):
+    cli, hc, runner, main = harness_env
+    main._get_openai_client = lambda: _FakeOpenAI(["done"])
+    _signup(cli, runner, "resolveuser")
+    session = json.loads(cli.SESSION_PATH.read_text())
+    approval_id = _pause_via_call_tool(cli, hc, DOMAIN, session["token"], "resolveuser")
+    turn = json.loads(cli.CHAT_STATE_PATH.read_text())["turn"]
+
+    result = cli._resolve_pending_approval(
+        {"turn": turn, "status": "pending_approval", "pending_approval": {"approval_id": approval_id}},
+        DOMAIN,
+        session["token"],
+        "allow",
+    )
+    assert result["status"] == "done"
+    calls = result["turn"]["aggregate"]["shell_command_calls"]
+    assert len(calls) == 1
+    assert json.loads(calls[0]["output"])["mock"] is True
+
+    remaining = hc.list_pending_approvals(DOMAIN, session["token"])["pending_approvals"]
+    assert remaining == []
+
+
+def test_chat_notes_other_pending_approvals_from_a_different_source(harness_env):
+    """An approval created via call-tool (or a different session) that
+    this chat session never paused on -- must still be surfaced, not
+    silently invisible."""
+    cli, hc, runner, main = harness_env
+    main._get_openai_client = lambda: _FakeOpenAI([])  # see the sibling test above for why this is needed even for a pure pause
+    _signup(cli, runner, "otheruser")
+    session = json.loads(cli.SESSION_PATH.read_text())
+    pair = hc.pair_host(DOMAIN, session["token"], "rk-otheruser", hostname="otherhost")
+    hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/otheruser")
+    layer = hc.create_policy_layer(DOMAIN, session["token"], "otheruser-ask-layer")
+    hc.create_policy_layer_rule(
+        DOMAIN, session["token"], layer["id"], positional_constraints=[{"whitelist": "^rm$"}], option_constraints=[], tier="ask"
+    )
+    hc.add_policy_layer_to_host(DOMAIN, session["token"], layer["id"], pair["host_id"])
+    hc.call_tool(DOMAIN, session["token"], "run_shell_command", {"positional_args": ["rm"]}, mock=True, default_host="otherhost")
+
+    # No chat_state.json at all -- this session never touched `chat`.
+    result = runner.invoke(cli.app, ["chat", "--mock"], input="exit\n")
+    assert "You also have 1 other pending approval" in result.output
+
+
 # --- Regression: Typer 0.27 vendors its own private Click exception
 # classes -- an early version of _run_interactive's `except
 # click.exceptions.ClickException` silently never matched, so an unknown

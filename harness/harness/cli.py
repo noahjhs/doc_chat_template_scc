@@ -1162,6 +1162,55 @@ def chat(
     console.print("Casper harness chat. Type 'exit' or 'quit' (or Ctrl-C) to leave, 'new' to start over.")
     if resumed:
         console.print("[dim]Resuming your previous conversation.[/dim]")
+
+    # Surfaces any approval left unresolved -- either because THIS session
+    # paused here and was killed/closed before answering (chat_state.json
+    # is now saved the moment a pause is detected, below, so the resumed
+    # turn's own awaiting_approval reliably reflects that -- see the
+    # matching _save_chat_state call inside the loop), or because it was
+    # created some other way entirely (harness call-tool, a different
+    # session) -- without this, either case previously resumed silently as
+    # if nothing were pending, while the approval sat answerable only via
+    # `harness approvals` with no indication here that it existed at all.
+    try:
+        pending_list = client.list_pending_approvals(domain, token).get("pending_approvals", [])
+    except client.ApiError:
+        pending_list = []
+    resumed_approval_id = None
+    if turn is not None and turn.get("awaiting_approval"):
+        resumed_approval_id = turn["awaiting_approval"].get("approval_id")
+        match = next((p for p in pending_list if p["id"] == resumed_approval_id), None)
+        if match is None:
+            # Resolved elsewhere (another session, Telegram) since this
+            # chat_state.json was last saved -- what actually happened to
+            # the conversation from there is unrecoverable locally (the
+            # pending_approvals row is gone once decided), so this is
+            # treated the same as `new`: nothing safe to resume into.
+            console.print(
+                "[dim]The pending approval from your last session was already resolved elsewhere -- starting a new conversation.[/dim]"
+            )
+            turn = None
+            _clear_chat_state()
+        else:
+            console.print(f"[yellow]Picking up a pending approval from before:[/yellow] {match['description']}")
+            # Include the already-loaded turn itself, not just the
+            # approval_id -- _resolve_pending_approval's non-interactive
+            # bail-out path returns whatever `result` it was given
+            # unchanged, and that path still needs a real "turn" to save
+            # back (the same still-paused one), not a KeyError.
+            result = _resolve_pending_approval(
+                {"turn": turn, "status": "pending_approval", "pending_approval": {"approval_id": resumed_approval_id}},
+                domain,
+                token,
+                None,
+            )
+            turn = result["turn"]
+            _save_chat_state(domain, username, host, mock, turn)
+    others = [p for p in pending_list if p["id"] != resumed_approval_id]
+    if others:
+        plural = "s" if len(others) != 1 else ""
+        console.print(f"[dim]You also have {len(others)} other pending approval{plural} -- see `harness approvals list`.[/dim]")
+
     while True:
         try:
             message = typer.prompt("you")
@@ -1183,6 +1232,12 @@ def chat(
             _handle_api_error(e)
         _print_step_result(result)
         if result["status"] == "pending_approval":
+            # Saved BEFORE the (possibly long-lived, possibly interrupted)
+            # resolution prompt below -- a kill/crash right here now
+            # leaves chat_state.json correctly reflecting the paused turn,
+            # instead of the pre-pause state that was there before this
+            # message was ever sent.
+            _save_chat_state(domain, username, host, mock, result["turn"])
             result = _resolve_pending_approval(result, domain, token, None)
         turn = result["turn"]
         _save_chat_state(domain, username, host, mock, turn)
