@@ -15,6 +15,7 @@ import shlex
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -567,6 +568,28 @@ def hosts_forget(host: str):
     console.print("[green]Forgotten.[/green]")
 
 
+def _agent_config_dir(domain: str) -> Path:
+    """Where a real Casper.app on THIS machine keeps its own state for the
+    given auth domain -- mirrors agent/internal/config/appdir.go's
+    appConfigSubdir() (duplicated, not imported -- independent Go/Python
+    processes, same convention already used for pair_url_scheme/
+    _pair_url_scheme elsewhere in this project). Only meaningful because
+    `pair-daemon` itself is documented macOS-only and same-machine-only."""
+    subdir = "Casper-dev" if domain.strip().lower().startswith("dev-") else "Casper"
+    return Path.home() / "Library" / "Application Support" / subdir
+
+
+def _read_pairing_status(domain: str) -> Optional[dict]:
+    """Best-effort read of the real daemon's own record of its last
+    casper://pair attempt (see agent/internal/config/pairing_status.go) --
+    None if the file's missing/corrupt/unreadable, exactly like the daemon's
+    own LoadLastPairingResult tolerates the same on its side."""
+    try:
+        return json.loads((_agent_config_dir(domain) / "pairing_status.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
 @app.command("pair-daemon", rich_help_panel=DEV_PANEL, short_help="Pair a REAL Casper.app on this machine (manual verification only).")
 def pair_daemon(
     timeout: float = typer.Option(15.0, "--timeout", help="Seconds to wait for the host to appear connected."),
@@ -584,6 +607,7 @@ def pair_daemon(
         err_console.print("[red]Not logged in.[/red] Run `harness login` or `harness signup` first.")
         raise typer.Exit(code=1)
     domain, token, username = session["domain"], session["token"], session["username"]
+    fired_at = time.time()
     try:
         before = {h["host_id"] for h in client.list_hosts(domain, token)["hosts"] if h["connected"]}
         client.trigger_real_pairing(domain, username, token)
@@ -596,6 +620,19 @@ def pair_daemon(
     console.print("Pairing dispatched -- waiting for a newly-connected host...")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        # The daemon's own record of what just happened is definitive --
+        # check it before (or instead of) waiting out the full timeout on
+        # a conflict/error a native dialog would otherwise be the only
+        # place to see (see agent/cmd/casper/daemon.go's handlePairURL).
+        status = _read_pairing_status(domain)
+        if status and status.get("result") != "ok":
+            try:
+                fresh = datetime.fromisoformat(status["at"]).timestamp() >= fired_at
+            except (KeyError, ValueError):
+                fresh = False
+            if fresh:
+                err_console.print(f"[red]{status.get('message', 'Pairing failed.')}[/red]")
+                raise typer.Exit(code=1)
         try:
             hosts = client.list_hosts(domain, token)["hosts"]
         except client.ApiError as e:

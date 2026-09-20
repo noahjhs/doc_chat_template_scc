@@ -166,10 +166,13 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	deviceToken, commandKey, _, err := config.ExchangePairingToken(d.authDomain, bootstrapToken, d.routingKey)
 	if err != nil {
 		if errors.Is(err, config.ErrHostConflict) {
+			const conflictMsg = "This machine is already attached to another Casper account. Sign out there first, or pair a different machine."
 			d.logf("casper:// pair: this host is already attached to another account")
-			dialog.ShowError("This machine is already attached to another Casper account. Sign out there first, or pair a different machine.")
+			config.SaveLastPairingResult("conflict", conflictMsg)
+			dialog.ShowError(conflictMsg)
 		} else {
 			d.logf("casper:// pair: couldn't exchange pairing token: %s", err)
+			config.SaveLastPairingResult("error", err.Error())
 		}
 		return
 	}
@@ -179,6 +182,7 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	d.setCredentials(deviceToken, commandKey)
 	d.srv.SetAPIKey(commandKey)
 	d.logf("Paired as %s", username)
+	config.SaveLastPairingResult("ok", fmt.Sprintf("Paired as %s", username))
 	go d.refreshPolicyLayers(deviceToken)
 	// Re-pairing always turns the daemon back on -- a user who just went
 	// through the sign-in flow expects to end up connected, regardless of
