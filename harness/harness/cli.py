@@ -522,7 +522,7 @@ def login(
     _do_login(username, domain, dev, prod, password)
 
 
-@app.command("forget-password", rich_help_panel=USER_PANEL, short_help="Clear a saved OS-keychain password.")
+@app.command("forget-password", rich_help_panel=USER_PANEL, short_help="Clear a saved OS-keychain password.", no_args_is_help=True)
 def forget_password(
     username: str,
     domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
@@ -575,7 +575,7 @@ def hosts_list():
     console.print(table)
 
 
-@hosts_app.command("rename")
+@hosts_app.command("rename", no_args_is_help=True)
 def hosts_rename(host: str, label: str):
     """Rename one of the caller's own hosts (by current label or id)."""
     domain, token = _require_session()
@@ -587,7 +587,7 @@ def hosts_rename(host: str, label: str):
     console.print("[green]Renamed.[/green]")
 
 
-@hosts_app.command("forget")
+@hosts_app.command("forget", no_args_is_help=True)
 def hosts_forget(host: str):
     """Forget one of the caller's own hosts (by label or id) -- removes it
     from every Environment too."""
@@ -687,7 +687,7 @@ def pair_daemon(
     raise typer.Exit(code=1)
 
 
-@app.command(rich_help_panel=DEV_PANEL, short_help="Pair a fake/test host under a routing_key -- no real daemon needed.")
+@app.command(rich_help_panel=DEV_PANEL, short_help="Pair a fake/test host under a routing_key -- no real daemon needed.", no_args_is_help=True)
 def pair(
     routing_key: str,
     hostname: Optional[str] = typer.Option(None, "--hostname"),
@@ -704,7 +704,7 @@ def pair(
     console.print(result)
 
 
-@app.command("report-presence", rich_help_panel=DEV_PANEL, short_help="Make a paired test host show up as connected.")
+@app.command("report-presence", rich_help_panel=DEV_PANEL, short_help="Make a paired test host show up as connected.", no_args_is_help=True)
 def report_presence(
     device_token: str,
     local_agent_url: str = typer.Option(..., "--url"),
@@ -747,7 +747,7 @@ def attend(
     console.print(result)
 
 
-@app.command("respond-approvals", rich_help_panel=DEV_PANEL, short_help="Stand in for the native-dialog approval relay.")
+@app.command("respond-approvals", rich_help_panel=DEV_PANEL, short_help="Stand in for the native-dialog approval relay.", no_args_is_help=True)
 def respond_approvals(
     device_token: str,
     approve: bool = typer.Option(False, "--approve", help="Auto-approve every pending approval."),
@@ -807,7 +807,7 @@ def environment_list():
     console.print(table)
 
 
-@environment_app.command("create")
+@environment_app.command("create", no_args_is_help=True)
 def environment_create(name: str):
     domain, token = _require_session()
     try:
@@ -828,7 +828,7 @@ def _resolve_environment_id(domain: str, token: str, name_or_id: str) -> int:
     return match["id"]
 
 
-@environment_app.command("rename")
+@environment_app.command("rename", no_args_is_help=True)
 def environment_rename(environment: str, name: str):
     domain, token = _require_session()
     try:
@@ -839,7 +839,7 @@ def environment_rename(environment: str, name: str):
     console.print(result)
 
 
-@environment_app.command("delete")
+@environment_app.command("delete", no_args_is_help=True)
 def environment_delete(environment: str):
     domain, token = _require_session()
     try:
@@ -850,7 +850,7 @@ def environment_delete(environment: str):
     console.print("[green]Deleted.[/green]")
 
 
-@environment_app.command("attach")
+@environment_app.command("attach", no_args_is_help=True)
 def environment_attach(environment: str, host: str):
     """Add a host (by label or id) to an Environment (by name or id)."""
     domain, token = _require_session()
@@ -863,7 +863,7 @@ def environment_attach(environment: str, host: str):
     console.print(result)
 
 
-@environment_app.command("detach")
+@environment_app.command("detach", no_args_is_help=True)
 def environment_detach(environment: str, host: str):
     """Remove a host (by label or id) from an Environment (by name or id)."""
     domain, token = _require_session()
@@ -957,7 +957,7 @@ def policy_list():
         _print_layer(layer)
 
 
-@policy_app.command("apply")
+@policy_app.command("apply", no_args_is_help=True)
 def policy_apply(yaml_path: str):
     """kubectl apply-style: create-or-replace a policy layer's rules from
     a YAML file -- see harness/client.py's load_policy_layer_yaml for the
@@ -971,7 +971,7 @@ def policy_apply(yaml_path: str):
     _print_layer(layer)
 
 
-@policy_app.command("delete")
+@policy_app.command("delete", no_args_is_help=True)
 def policy_delete(name_or_id: str):
     """Delete a policy layer by name or numeric id."""
     domain, token = _require_session()
@@ -1005,7 +1005,7 @@ def _resolve_host_id(domain: str, token: str, label_or_id: str) -> int:
     return match["host_id"]
 
 
-@policy_app.command("attach")
+@policy_app.command("attach", no_args_is_help=True)
 def policy_attach(layer: str, host: str):
     """Attach a policy layer (by name or id) to a host (by label or id)."""
     domain, token = _require_session()
@@ -1018,7 +1018,7 @@ def policy_attach(layer: str, host: str):
     _print_layer(result)
 
 
-@policy_app.command("detach")
+@policy_app.command("detach", no_args_is_help=True)
 def policy_detach(layer: str, host: str):
     """Detach a policy layer (by name or id) from a host (by label or id)."""
     domain, token = _require_session()
@@ -1097,7 +1097,7 @@ def _resolve_pending_approval(turn: dict, domain: str, token: str, mock: bool, d
         turn = result["turn"]
 
 
-@app.command("call-tool", rich_help_panel=DEV_PANEL, short_help="Inject one tool call directly, as if the model proposed it.")
+@app.command("call-tool", rich_help_panel=DEV_PANEL, short_help="Inject one tool call directly, as if the model proposed it.", no_args_is_help=True)
 def call_tool_cmd(
     name: str,
     arg: list[str] = typer.Option([], "--arg", help="key=json_value -- may be repeated, e.g. --arg positional_args='[\"npm\",\"run\"]'"),
