@@ -48,14 +48,29 @@ except ImportError:  # Windows without pyreadline3
     readline = None
 
 app = typer.Typer(help="Casper backend test harness -- drives auth_service directly, no GUI in the loop.")
+
+# Split into two --help panels, per the project's own established framing
+# (see this module's own docstring): USER_PANEL is this CLI mocking the
+# eventual real front end -- signup/login/logout/hosts/Environments/
+# profile were built as explicit parity with what the old authenticated
+# Streamlit pages did (see CLAUDE.md), the same actions a real end user
+# takes once a real UI exists. DEV_PANEL is everything that tests the
+# backend's own rule engine directly (eval -> call-tool -> chat's own
+# "escalating ladder of what's actually exercised", policy authoring) or
+# simulates a daemon/native-dialog that isn't really there (pair,
+# pair-daemon, report-presence, attend, respond-approvals) -- things a
+# real end user never does; only someone testing this project does.
+USER_PANEL = "User-facing (mocks the eventual front end)"
+DEV_PANEL = "Developer-facing (tests the backend directly)"
+
 policy_app = typer.Typer(help="Manage policy layers.")
-app.add_typer(policy_app, name="policy")
+app.add_typer(policy_app, name="policy", rich_help_panel=DEV_PANEL)
 hosts_app = typer.Typer(help="Manage known hosts.")
-app.add_typer(hosts_app, name="hosts")
+app.add_typer(hosts_app, name="hosts", rich_help_panel=USER_PANEL)
 environment_app = typer.Typer(help="Manage Environments.")
-app.add_typer(environment_app, name="environment")
+app.add_typer(environment_app, name="environment", rich_help_panel=USER_PANEL)
 profile_app = typer.Typer(help="Manage account profile/notification/permission preferences.")
-app.add_typer(profile_app, name="profile")
+app.add_typer(profile_app, name="profile", rich_help_panel=USER_PANEL)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -365,7 +380,7 @@ def main(
         _run_interactive()
 
 
-@app.command()
+@app.command(rich_help_panel=USER_PANEL, short_help="Create a new account and save the resulting session.")
 def signup(
     username: str,
     domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
@@ -443,7 +458,7 @@ def _do_login(username: str, domain: Optional[str], dev: bool, prod: bool, passw
     console.print(f"[green]Signed in as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
 
 
-@app.command()
+@app.command(rich_help_panel=USER_PANEL, short_help="Sign in and save the resulting session.")
 def login(
     username: Optional[str] = typer.Argument(None, help="Omit to be prompted."),
     domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
@@ -474,7 +489,7 @@ def login(
     _do_login(username, domain, dev, prod, password)
 
 
-@app.command("forget-password")
+@app.command("forget-password", rich_help_panel=USER_PANEL, short_help="Clear a saved OS-keychain password.")
 def forget_password(
     username: str,
     domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
@@ -492,7 +507,7 @@ def forget_password(
     console.print(f"[green]Forgot the saved password for {username}@{domain}.[/green]")
 
 
-@app.command()
+@app.command(rich_help_panel=USER_PANEL)
 def whoami():
     """Show the currently saved session, if any."""
     session = _load_session()
@@ -502,7 +517,7 @@ def whoami():
     console.print(f"{session['username']} @ {session['domain']}")
 
 
-@app.command()
+@app.command(rich_help_panel=USER_PANEL, short_help="Discard the saved session.")
 def logout():
     """Discard the saved session -- leaves any OS-keychain-saved password
     (see `login`) and remembered domain (see `login`'s own docstring)
@@ -552,7 +567,7 @@ def hosts_forget(host: str):
     console.print("[green]Forgotten.[/green]")
 
 
-@app.command("pair-daemon")
+@app.command("pair-daemon", rich_help_panel=DEV_PANEL, short_help="Pair a REAL Casper.app on this machine (manual verification only).")
 def pair_daemon(
     timeout: float = typer.Option(15.0, "--timeout", help="Seconds to wait for the host to appear connected."),
 ):
@@ -599,7 +614,7 @@ def pair_daemon(
     raise typer.Exit(code=1)
 
 
-@app.command()
+@app.command(rich_help_panel=DEV_PANEL, short_help="Pair a fake/test host under a routing_key -- no real daemon needed.")
 def pair(
     routing_key: str,
     hostname: Optional[str] = typer.Option(None, "--hostname"),
@@ -616,7 +631,7 @@ def pair(
     console.print(result)
 
 
-@app.command("report-presence")
+@app.command("report-presence", rich_help_panel=DEV_PANEL, short_help="Make a paired test host show up as connected.")
 def report_presence(
     device_token: str,
     local_agent_url: str = typer.Option(..., "--url"),
@@ -633,7 +648,7 @@ def report_presence(
     console.print(result)
 
 
-@app.command()
+@app.command(rich_help_panel=DEV_PANEL, short_help="Set which host receives native-dialog approval prompts.")
 def attend(
     host: Optional[str] = typer.Argument(None, help="A host label or id -- omit with --clear to unset."),
     clear: bool = typer.Option(False, "--clear", help="Clear the attended host instead of setting one."),
@@ -659,7 +674,7 @@ def attend(
     console.print(result)
 
 
-@app.command("respond-approvals")
+@app.command("respond-approvals", rich_help_panel=DEV_PANEL, short_help="Stand in for the native-dialog approval relay.")
 def respond_approvals(
     device_token: str,
     approve: bool = typer.Option(False, "--approve", help="Auto-approve every pending approval."),
@@ -930,7 +945,7 @@ def policy_detach(layer: str, host: str):
     _print_layer(result)
 
 
-@app.command()
+@app.command(rich_help_panel=DEV_PANEL, short_help="Evaluate a hypothetical call against a composed policy.")
 def eval(
     layer: list[str] = typer.Option([], "--layer", "-l", help="A policy layer name or id -- may be repeated."),
     arg: list[str] = typer.Option([], "--arg", "-a", help="A positional argument, in order -- may be repeated."),
@@ -996,7 +1011,7 @@ def _resolve_pending_approval(turn: dict, domain: str, token: str, mock: bool, d
         turn = result["turn"]
 
 
-@app.command("call-tool")
+@app.command("call-tool", rich_help_panel=DEV_PANEL, short_help="Inject one tool call directly, as if the model proposed it.")
 def call_tool_cmd(
     name: str,
     arg: list[str] = typer.Option([], "--arg", help="key=json_value -- may be repeated, e.g. --arg positional_args='[\"npm\",\"run\"]'"),
@@ -1027,7 +1042,7 @@ def call_tool_cmd(
         _resolve_pending_approval(result["turn"], domain, token, mock, host, auto)
 
 
-@app.command()
+@app.command(rich_help_panel=DEV_PANEL, short_help="Have a real conversational turn -- the model decides what to call.")
 def chat(
     host: Optional[str] = typer.Option(None, "--host"),
     mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
