@@ -63,6 +63,19 @@ code=$("$CURL" -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${AUTH_D
 check "GET /hosts" "401" "$code"
 
 echo
+echo "Functional check (signup -> pair -> policy -> eval -> mock tool call, see functional_smoke_test.py):"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if python3 -c "import harness.client" >/dev/null 2>&1; then
+  if AUTH_DOMAIN="$AUTH_DOMAIN" python3 "$SCRIPT_DIR/functional_smoke_test.py" "$ENVIRONMENT"; then
+    :
+  else
+    FAILURES=$((FAILURES + 1))
+  fi
+else
+  echo "  SKIP (harness isn't installed in this environment -- pip install -e harness/ to include this check)"
+fi
+
+echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "All checks passed."
   exit 0
