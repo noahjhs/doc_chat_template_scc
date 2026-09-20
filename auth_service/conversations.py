@@ -64,6 +64,12 @@ class DispatchContext:
     read_server_storage: Callable[[str], str | None]
     write_server_storage: Callable[[str, str], tuple[str | None, int]]
     create_pending_approval: Callable[[str, str, str, str], str]
+    # The calling user's own custom instructions (see models.py's
+    # ProfileInfo.system_prompt) -- passed as the Responses API's own
+    # `instructions` on every hop of run_turn. Blank means none: the
+    # model's own default behavior, unchanged from before this field
+    # existed.
+    system_prompt: str = ""
 
 
 def _empty_aggregate() -> dict:
@@ -537,6 +543,7 @@ def run_turn(turn: dict, approval_decision: str | None, ctx: DispatchContext, cl
             response = client.responses.create(
                 model=MODEL,
                 input=turn["input"],
+                instructions=ctx.system_prompt or None,
                 previous_response_id=turn["previous_response_id"],
                 tools=build_tools(ctx.configs),
                 stream=False,

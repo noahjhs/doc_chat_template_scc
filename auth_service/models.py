@@ -491,6 +491,10 @@ class ProfileInfo(BaseModel):
     allow_configure_hosts: bool = False
     allow_configure_environments: bool = False
     allow_configure_local_agents: bool = False
+    # Prepended as the model's own instructions on every conversation turn
+    # (see auth_service/conversations.py's run_turn) -- blank means no
+    # custom instructions, the model's own default behavior.
+    system_prompt: str = ""
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -509,6 +513,7 @@ class ProfileUpdateRequest(BaseModel):
     allow_configure_hosts: bool | None = None
     allow_configure_environments: bool | None = None
     allow_configure_local_agents: bool | None = None
+    system_prompt: str | None = Field(default=None, max_length=20000)
 
     @field_validator("email")
     @classmethod

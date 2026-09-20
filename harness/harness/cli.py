@@ -897,9 +897,21 @@ def profile_set(
     allow_configure_hosts: Optional[bool] = typer.Option(None, "--allow-hosts/--no-allow-hosts"),
     allow_configure_environments: Optional[bool] = typer.Option(None, "--allow-environments/--no-allow-environments"),
     allow_configure_local_agents: Optional[bool] = typer.Option(None, "--allow-local-agents/--no-allow-local-agents"),
+    system_prompt: Optional[str] = typer.Option(
+        None, "--system-prompt", help="Custom instructions prepended to every chat turn. Pass '' to clear it."
+    ),
+    system_prompt_file: Optional[Path] = typer.Option(
+        None, "--system-prompt-file", help="Read the system prompt from a file instead of passing it inline."
+    ),
 ):
     """Merge-update the caller's own profile -- only flags actually passed
-    are sent; everything else is left untouched server-side."""
+    are sent; everything else is left untouched server-side. See `profile
+    get` to read the current system prompt back."""
+    if system_prompt is not None and system_prompt_file is not None:
+        err_console.print("[red]--system-prompt and --system-prompt-file are mutually exclusive.[/red]")
+        raise typer.Exit(code=1)
+    if system_prompt_file is not None:
+        system_prompt = system_prompt_file.read_text()
     fields = {
         "email": email,
         "email_notifications_enabled": email_notifications,
@@ -910,6 +922,7 @@ def profile_set(
         "allow_configure_hosts": allow_configure_hosts,
         "allow_configure_environments": allow_configure_environments,
         "allow_configure_local_agents": allow_configure_local_agents,
+        "system_prompt": system_prompt,
     }
     fields = {k: v for k, v in fields.items() if v is not None}
     domain, token = _require_session()

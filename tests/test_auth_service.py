@@ -568,6 +568,22 @@ def test_profile_defaults_and_get_creates_row(client):
         "allow_configure_local_agents",
     ):
         assert body[field] is False
+    assert body["system_prompt"] == ""
+
+
+def test_profile_system_prompt_set_and_read_back(client):
+    signup = _signup(client, "ursula")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    r = client.patch("/profile", json={"system_prompt": "Always answer in haiku."}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["system_prompt"] == "Always answer in haiku."
+    assert client.get("/profile", headers=headers).json()["system_prompt"] == "Always answer in haiku."
+
+    # Clearing it back to blank works too -- "" is a valid value, not
+    # treated as "field not sent" (that's Pydantic's exclude_unset, not a
+    # falsy-value check).
+    cleared = client.patch("/profile", json={"system_prompt": ""}, headers=headers)
+    assert cleared.json()["system_prompt"] == ""
 
 
 def test_profile_partial_update_merges(client):

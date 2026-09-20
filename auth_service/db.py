@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS user_profile (
     allow_configure_apps INTEGER NOT NULL DEFAULT 0,
     allow_configure_hosts INTEGER NOT NULL DEFAULT 0,
     allow_configure_environments INTEGER NOT NULL DEFAULT 0,
-    allow_configure_local_agents INTEGER NOT NULL DEFAULT 0
+    allow_configure_local_agents INTEGER NOT NULL DEFAULT 0,
+    system_prompt TEXT NOT NULL DEFAULT ''
 );
 
 -- SUPERSEDED by rule_chains/rule_chain_rules below -- kept only because
@@ -261,11 +262,31 @@ def _add_cwd_column_to_policy_layer_rules(db):
     db.execute(f"ALTER TABLE policy_layer_rules ADD COLUMN cwd TEXT NOT NULL DEFAULT '{blank_pattern}'")
 
 
+def _add_system_prompt_column_to_user_profile(db):
+    """One-time ALTER TABLE ADD COLUMN for user_profile.system_prompt --
+    the custom instructions text prepended to every conversation turn (see
+    conversations.py's run_turn / DispatchContext.system_prompt). Same
+    posture as _add_cwd_column_to_policy_layer_rules: runs AFTER the
+    CREATE TABLE IF NOT EXISTS script (a fresh database already gets the
+    column from SCHEMA directly; this only ever fires against an existing
+    database that predates it). Idempotent: no-ops once the column already
+    exists, and never runs at all against a database that doesn't have the
+    table yet."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "user_profile" not in existing:
+        return
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(user_profile)").fetchall()}
+    if "system_prompt" in columns:
+        return
+    db.execute("ALTER TABLE user_profile ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''")
+
+
 def init_db():
     with get_db() as db:
         _rename_legacy_rule_chain_tables(db)
         db.executescript(SCHEMA)
         _add_cwd_column_to_policy_layer_rules(db)
+        _add_system_prompt_column_to_user_profile(db)
 
 
 @contextlib.contextmanager

@@ -127,6 +127,33 @@ def test_conversation_simple_message_no_tools(app_env):
     assert fake.responses.calls[0]["previous_response_id"] is None
 
 
+def test_conversation_passes_profile_system_prompt_as_instructions(app_env):
+    main, client = app_env
+    signup = _signup(client, "dana")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    client.patch("/profile", json={"system_prompt": "Always answer in haiku."}, headers=headers)
+
+    fake = FakeClient([FakeResponse(id="resp_1", output_text="Hello there!")])
+    main._get_openai_client = lambda: fake
+
+    r = _step(client, headers, message="hi")
+    assert r.status_code == 200
+    assert fake.responses.calls[0]["instructions"] == "Always answer in haiku."
+
+
+def test_conversation_blank_system_prompt_passes_none_as_instructions(app_env):
+    main, client = app_env
+    signup = _signup(client, "erin3")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+
+    fake = FakeClient([FakeResponse(id="resp_1", output_text="Hello there!")])
+    main._get_openai_client = lambda: fake
+
+    r = _step(client, headers, message="hi")
+    assert r.status_code == 200
+    assert fake.responses.calls[0]["instructions"] is None
+
+
 def test_conversation_continues_same_conversation(app_env):
     main, client = app_env
     signup = _signup(client, "carol")

@@ -1498,6 +1498,7 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         configs = _connected_host_configs(db, user_id)
+        system_prompt = _get_or_create_profile(db, user_id).system_prompt
 
     in_flight = conversations.is_in_flight(body.turn)
     if in_flight:
@@ -1524,6 +1525,7 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
         configs=configs,
         default_host=body.default_host,
         mock=body.mock,
+        system_prompt=system_prompt,
         read_server_storage=read_storage,
         write_server_storage=write_storage,
         create_pending_approval=lambda template_name, binary, args, host_label: _create_pending_approval_record(
@@ -1569,6 +1571,7 @@ def _get_or_create_profile(db, user_id: int) -> ProfileInfo:
         allow_configure_hosts=bool(row["allow_configure_hosts"]),
         allow_configure_environments=bool(row["allow_configure_environments"]),
         allow_configure_local_agents=bool(row["allow_configure_local_agents"]),
+        system_prompt=row["system_prompt"],
     )
 
 
