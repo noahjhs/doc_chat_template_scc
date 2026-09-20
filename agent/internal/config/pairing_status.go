@@ -28,8 +28,8 @@ func pairingStatusFilePath() (string, error) {
 	return filepath.Join(dir, "pairing_status.json"), nil
 }
 
-// SaveLastPairingResult is best-effort (mirrors SaveSession/ClearSession's
-// posture elsewhere in this package) -- a failure to record the status is
+// SaveLastPairingResult is best-effort (mirrors SaveSessions' posture
+// elsewhere in this package) -- a failure to record the status is
 // never worth failing pairing itself over; a harness caller that can't read
 // it back just falls back to its own connected-host polling timeout.
 func SaveLastPairingResult(result, message string) {
@@ -45,7 +45,7 @@ func SaveLastPairingResult(result, message string) {
 }
 
 // LoadLastPairingResult tolerates a missing or corrupt file (nil, nil in
-// either case) -- same convention as LoadSession.
+// either case) -- same convention as LoadSessions.
 func LoadLastPairingResult() (*PairingStatus, error) {
 	path, err := pairingStatusFilePath()
 	if err != nil {

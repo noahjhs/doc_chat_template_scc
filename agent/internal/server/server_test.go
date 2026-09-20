@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,10 +15,7 @@ import (
 )
 
 func newTestServer() *Server {
-	// homeRoot is irrelevant here -- this file tests the HTTP layer
-	// (health/sign-out/API-key auth), never an action that actually
-	// touches the filesystem.
-	return New("initial-key", commands.New(""), log.New(logDiscard{}, "", 0))
+	return New(log.New(logDiscard{}, "", 0))
 }
 
 type logDiscard struct{}
@@ -38,77 +37,152 @@ func doHealth(t *testing.T, ts *httptest.Server, key string) int {
 	return resp.StatusCode
 }
 
-func TestSetAPIKey_TakesEffectLive(t *testing.T) {
-	s := newTestServer()
-	ts := httptest.NewServer(s.Handler())
-	defer ts.Close()
-
-	if got := doHealth(t, ts, "initial-key"); got != http.StatusOK {
-		t.Fatalf("expected 200 with the initial key, got %d", got)
+func doCommand(t *testing.T, ts *httptest.Server, key string, req commands.Request) commands.Result {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	s.SetAPIKey("rotated-key")
-
-	if got := doHealth(t, ts, "initial-key"); got != http.StatusUnauthorized {
-		t.Fatalf("expected 401 with the old key after rotation, got %d", got)
+	httpReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/command", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := doHealth(t, ts, "rotated-key"); got != http.StatusOK {
-		t.Fatalf("expected 200 with the new key after rotation, got %d", got)
+	httpReq.Header.Set("X-API-Key", key)
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer resp.Body.Close()
+	var result commands.Result
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
-func TestSetAPIKey_EmptyRejectsEverything(t *testing.T) {
+func TestUnknownAPIKeyIsRejected(t *testing.T) {
 	s := newTestServer()
+	s.AddIdentity("key-a", commands.New(""), nil, nil)
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	s.SetAPIKey("")
-
+	if got := doHealth(t, ts, "key-a"); got != http.StatusOK {
+		t.Fatalf("expected 200 for a registered key, got %d", got)
+	}
+	if got := doHealth(t, ts, "bogus"); got != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an unregistered key, got %d", got)
+	}
 	if got := doHealth(t, ts, ""); got != http.StatusUnauthorized {
-		t.Fatalf("expected 401 once the key is cleared, got %d", got)
-	}
-	if s.HasAPIKey() {
-		t.Fatal("expected HasAPIKey to report false once cleared")
+		t.Fatalf("expected 401 for a missing key, got %d", got)
 	}
 }
 
-// TestHandleShutdown_ClearsSessionAndSignalsWithoutStoppingServer is the
-// regression test for the daemon-conversion behavior change: signing out
-// must no longer end the process. Confirms ClearSession runs synchronously
-// (before the response is sent), OnSignOut runs afterward, and the HTTP
-// server keeps serving requests once it's done -- unlike the old
-// OnShutdownRequested, which called Shutdown() and ended the process.
-func TestHandleShutdown_ClearsSessionAndSignalsWithoutStoppingServer(t *testing.T) {
+// TestMultipleIdentities_EachDispatchesToItsOwnHandler is the core
+// multi-account-pairing guarantee: two identities registered on the same
+// server, each with its own commands.Handler (its own cached policy
+// layers), must never see the other's state -- confirmed here via
+// list_policy_layers, whose response reflects exactly the calling
+// identity's own Handler.
+func TestMultipleIdentities_EachDispatchesToItsOwnHandler(t *testing.T) {
+	s := newTestServer()
+
+	handlerA := commands.New("")
+	handlerA.SetPolicyLayers([]commands.PolicyLayer{{ID: 1, Name: "A-only-layer"}})
+	handlerB := commands.New("") // no policy layers at all
+
+	s.AddIdentity("key-a", handlerA, nil, nil)
+	s.AddIdentity("key-b", handlerB, nil, nil)
+
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resultA := doCommand(t, ts, "key-a", commands.Request{Action: "list_policy_layers"})
+	if !strings.Contains(resultA.Stdout, "A-only-layer") {
+		t.Fatalf("expected key-a's response to reflect its own handler's policy layers, got %q", resultA.Stdout)
+	}
+
+	resultB := doCommand(t, ts, "key-b", commands.Request{Action: "list_policy_layers"})
+	if strings.Contains(resultB.Stdout, "A-only-layer") {
+		t.Fatalf("key-b's response leaked key-a's policy layer: %q", resultB.Stdout)
+	}
+}
+
+func TestRemoveIdentity_OnlyThatKeyStopsWorking(t *testing.T) {
+	s := newTestServer()
+	s.AddIdentity("key-a", commands.New(""), nil, nil)
+	s.AddIdentity("key-b", commands.New(""), nil, nil)
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	s.RemoveIdentity("key-a")
+
+	if got := doHealth(t, ts, "key-a"); got != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for a removed key, got %d", got)
+	}
+	if got := doHealth(t, ts, "key-b"); got != http.StatusOK {
+		t.Fatalf("expected the other identity to be unaffected, got %d", got)
+	}
+}
+
+func TestHasAPIKey_ReflectsIdentityCount(t *testing.T) {
+	s := newTestServer()
+	if s.HasAPIKey() {
+		t.Fatal("expected HasAPIKey to report false with zero identities")
+	}
+	s.AddIdentity("key-a", commands.New(""), nil, nil)
+	if !s.HasAPIKey() {
+		t.Fatal("expected HasAPIKey to report true once an identity is added")
+	}
+	s.RemoveIdentity("key-a")
+	if s.HasAPIKey() {
+		t.Fatal("expected HasAPIKey to report false once the last identity is removed")
+	}
+}
+
+// TestHandleShutdown_OnlySignsOutTheResolvedIdentity is the regression test
+// for the daemon-conversion behavior change (signing out must no longer
+// end the process) AND for multi-account isolation (signing out one
+// account must never disturb another paired to the same daemon). Confirms
+// clearSession runs synchronously (before the response is sent), onSignOut
+// runs afterward, only the resolved identity's callbacks fire, and the
+// HTTP server keeps serving the OTHER identity's requests throughout.
+func TestHandleShutdown_OnlySignsOutTheResolvedIdentity(t *testing.T) {
 	s := newTestServer()
 
 	var mu sync.Mutex
-	var clearedBeforeResponse, signOutCalled bool
-	responded := make(chan struct{})
-	signedOut := make(chan struct{})
+	var aClearedBeforeResponse, aSignedOut, bClearedOrSignedOut bool
+	signedOutA := make(chan struct{})
 
-	s.ClearSession = func() {
+	s.AddIdentity("key-a", commands.New(""), func() {
 		mu.Lock()
-		clearedBeforeResponse = true
+		aClearedBeforeResponse = true
 		mu.Unlock()
-	}
-	s.OnSignOut = func() {
+	}, func() {
 		mu.Lock()
-		signOutCalled = true
+		aSignedOut = true
 		mu.Unlock()
-		close(signedOut)
-	}
+		close(signedOutA)
+	})
+	s.AddIdentity("key-b", commands.New(""), func() {
+		mu.Lock()
+		bClearedOrSignedOut = true
+		mu.Unlock()
+	}, func() {
+		mu.Lock()
+		bClearedOrSignedOut = true
+		mu.Unlock()
+	})
 
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/shutdown", nil)
-	req.Header.Set("X-API-Key", "initial-key")
+	req.Header.Set("X-API-Key", "key-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	close(responded)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 from /api/shutdown, got %d", resp.StatusCode)
@@ -124,27 +198,34 @@ func TestHandleShutdown_ClearsSessionAndSignalsWithoutStoppingServer(t *testing.
 	}
 
 	mu.Lock()
-	if !clearedBeforeResponse {
-		t.Error("expected ClearSession to have run by the time the response was received")
+	if !aClearedBeforeResponse {
+		t.Error("expected key-a's clearSession to have run by the time the response was received")
 	}
 	mu.Unlock()
 
 	select {
-	case <-signedOut:
+	case <-signedOutA:
 	case <-time.After(2 * time.Second):
-		t.Fatal("OnSignOut was never called")
+		t.Fatal("key-a's onSignOut was never called")
 	}
 	mu.Lock()
-	if !signOutCalled {
-		t.Error("expected OnSignOut to have been called")
+	if !aSignedOut {
+		t.Error("expected key-a's onSignOut to have been called")
+	}
+	if bClearedOrSignedOut {
+		t.Error("expected key-b's callbacks to never fire from key-a's sign-out")
 	}
 	mu.Unlock()
 
-	// The defining behavior change: the server is still up afterward (the
-	// old code's OnShutdownRequested called Shutdown() here and ended the
-	// process). A fresh key set by a re-pairing should still work.
-	s.SetAPIKey("fresh-key")
-	if got := doHealth(t, ts, "fresh-key"); got != http.StatusOK {
-		t.Fatalf("expected the server to still be serving requests after sign-out, got %d", got)
+	// key-a is gone; key-b, never touched, still works. Neither ended the
+	// process (the old one-shot-agent behavior this replaced).
+	if got := doHealth(t, ts, "key-b"); got != http.StatusOK {
+		t.Fatalf("expected key-b to still be accepted after key-a signed out, got %d", got)
+	}
+
+	// A fresh identity (a re-pairing) still registers live, same as before.
+	s.AddIdentity("key-c", commands.New(""), nil, nil)
+	if got := doHealth(t, ts, "key-c"); got != http.StatusOK {
+		t.Fatalf("expected the server to still accept new identities after a sign-out, got %d", got)
 	}
 }

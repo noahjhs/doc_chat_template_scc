@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"net/url"
@@ -19,32 +18,48 @@ import (
 	"github.com/getlantern/systray"
 )
 
+// pairedIdentity is one currently-paired Casper account's own independent
+// state -- its own credentials, its own commands.Handler (so its own
+// cached policy layers, fully isolated from every other identity even
+// though homeRoot is the same underlying directory for all of them -- see
+// server.go's identity type, the HTTP-layer counterpart that only needs
+// the handler/callbacks, not username/deviceToken), and its own
+// approval-relay loop (its own account's pending "ask"-tier approvals are
+// independent of any other account paired to this same machine).
+type pairedIdentity struct {
+	username            string
+	deviceToken         string
+	commandKey          string
+	handler             *commands.Handler
+	cancelApprovalRelay context.CancelFunc
+}
+
 // daemonState holds everything that changes as the daemon moves between its
-// three states -- signed out (no session), signed in + off (session valid,
-// relay tunnel down), signed in + on (tunnel up) -- and the menu items that
-// reflect them. One instance for the process's whole lifetime.
+// three coarse states -- signed out (no identities), signed in + off
+// (at least one identity, relay tunnel down), signed in + on (tunnel up) --
+// and the menu items that reflect them. One instance for the process's
+// whole lifetime. The relay tunnel is genuinely machine-level (see
+// tunnel.go/relay's own dumb-pipe-by-routing_key design) so it stays a
+// single shared resource here regardless of how many identities are
+// paired; everything identity-specific lives in the identities map below.
 type daemonState struct {
 	srv         *server.Server
-	cmdHandler  *commands.Handler // for HomeRoot() -- presence reports it (see reportPresence)
+	homeRoot    string // shared by every identity's own commands.Handler -- see commands.New
 	relayDomain string
 	authDomain  string
 	routingKey  string
 	port        int
+	// Parent of every identity's own approval-relay context -- cancelling
+	// this (process shutdown, see main.go) cancels all of them at once;
+	// signing out one identity only cancels its own child (see
+	// finishSignOut).
+	approvalCtx context.Context
 	logf        func(format string, args ...any)
 
-	mu      sync.Mutex
-	tun     *tunnel.Tunnel
-	enabled bool
-	// The daemon's own copy of its current host credentials -- kept
-	// alongside (not read back from) session.json, so sign-out can still
-	// clear presence/unpair server-side using them even after server.go's
-	// handleShutdown has already deleted that file (ClearSession runs
-	// synchronously, before OnSignOut fires -- see server.go's doc
-	// comment). deviceToken authenticates to the auth service (presence,
-	// verify, unpair); commandKey authenticates the browser to this
-	// daemon's own /api/command -- see internal/config/hostpair.go.
-	deviceToken string
-	commandKey  string
+	mu         sync.Mutex
+	tun        *tunnel.Tunnel
+	enabled    bool
+	identities map[string]*pairedIdentity // keyed by username
 
 	// Set once onReady runs; nil until then. A casper:// pairing event can
 	// arrive before the menu exists (confirmed via a cold-launch spike: the
@@ -54,16 +69,21 @@ type daemonState struct {
 	mStatus *systray.MenuItem
 }
 
-func newDaemonState(srv *server.Server, cmdHandler *commands.Handler, relayDomain, authDomain, routingKey string, port int, logf func(format string, args ...any)) *daemonState {
+func newDaemonState(
+	srv *server.Server, homeRoot, relayDomain, authDomain, routingKey string, port int,
+	approvalCtx context.Context, logf func(format string, args ...any),
+) *daemonState {
 	return &daemonState{
 		srv:         srv,
-		cmdHandler:  cmdHandler,
+		homeRoot:    homeRoot,
 		relayDomain: relayDomain,
 		authDomain:  authDomain,
 		routingKey:  routingKey,
 		port:        port,
+		approvalCtx: approvalCtx,
 		logf:        logf,
 		enabled:     config.LoadEnabled(),
+		identities:  make(map[string]*pairedIdentity),
 	}
 }
 
@@ -99,36 +119,174 @@ func (d *daemonState) tunnelURL() string {
 	return d.tun.URL
 }
 
-func (d *daemonState) setCredentials(deviceToken, commandKey string) {
-	d.mu.Lock()
-	d.deviceToken = deviceToken
-	d.commandKey = commandKey
-	d.mu.Unlock()
+// sessionSnapshotLocked must be called with d.mu already held.
+func (d *daemonState) sessionSnapshotLocked() []config.Session {
+	sessions := make([]config.Session, 0, len(d.identities))
+	for _, pi := range d.identities {
+		sessions = append(sessions, config.Session{Username: pi.username, DeviceToken: pi.deviceToken, CommandKey: pi.commandKey})
+	}
+	return sessions
 }
 
-func (d *daemonState) getDeviceToken() string {
+func (d *daemonState) deviceTokenFor(username string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.deviceToken
+	if pi, ok := d.identities[username]; ok {
+		return pi.deviceToken
+	}
+	return ""
+}
+
+func (d *daemonState) identityCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.identities)
+}
+
+// addOrReplaceIdentity registers a freshly (re-)paired account, live -- a
+// brand-new username gets its own fresh commands.Handler; re-pairing an
+// already-known username (rotating credentials, e.g. reconnecting) reuses
+// its existing Handler so its already-cached policy layers don't
+// momentarily disappear while a fresh fetch is in flight. Persists the
+// full updated session list and (re)starts this identity's own
+// approval-relay loop and policy-layer fetch.
+func (d *daemonState) addOrReplaceIdentity(username, deviceToken, commandKey string) {
+	d.mu.Lock()
+	old := d.identities[username]
+	var handler *commands.Handler
+	if old != nil {
+		handler = old.handler
+		old.cancelApprovalRelay()
+	} else {
+		handler = commands.New(d.homeRoot)
+	}
+	ctx, cancel := context.WithCancel(d.approvalCtx)
+	pi := &pairedIdentity{username: username, deviceToken: deviceToken, commandKey: commandKey, handler: handler, cancelApprovalRelay: cancel}
+	d.identities[username] = pi
+	snapshot := d.sessionSnapshotLocked()
+	d.mu.Unlock()
+
+	handler.SetRefreshPolicyLayersFunc(func() {
+		if dt := d.deviceTokenFor(username); dt != "" {
+			d.refreshPolicyLayers(dt, handler)
+		}
+	})
+
+	if old != nil && old.commandKey != commandKey {
+		d.srv.RemoveIdentity(old.commandKey)
+	}
+	d.srv.AddIdentity(commandKey, handler,
+		func() { d.removeSessionFromDisk(username) },
+		func() { d.finishSignOut(username, commandKey, deviceToken, cancel) },
+	)
+
+	if err := config.SaveSessions(snapshot); err != nil {
+		d.logf("casper:// pair: couldn't save session: %s", err)
+	}
+	go d.refreshPolicyLayers(deviceToken, handler)
+	go d.runApprovalRelayLoop(ctx, deviceToken)
+}
+
+// removeSessionFromDisk is the synchronous half of signing out one identity
+// -- wired as that identity's server-level clearSession callback, run
+// before the /api/shutdown response is sent (see server.go's doc comment
+// on why this half is synchronous: the token is also being revoked
+// server-side right now, so there's nothing left the file could still be
+// useful for). Drops it from the in-memory map too, at the same point --
+// cheap, local, no reason to defer that part to the async half.
+func (d *daemonState) removeSessionFromDisk(username string) {
+	d.mu.Lock()
+	delete(d.identities, username)
+	snapshot := d.sessionSnapshotLocked()
+	d.mu.Unlock()
+	if err := config.SaveSessions(snapshot); err != nil {
+		d.logf("sign-out: couldn't update session file: %s", err)
+	}
+}
+
+// finishSignOut is the async half -- run after the /api/shutdown response
+// is already on the wire (or directly by removeIdentity for a path with no
+// HTTP response to sequence against, e.g. reportPresence's self-heal).
+// Cancels this identity's approval-relay loop, deregisters it from the
+// server, stops the relay tunnel only if it was the LAST paired identity
+// (the tunnel is machine-level, shared by every other identity still
+// paired here), and clears this identity's own presence.
+func (d *daemonState) finishSignOut(username, commandKey, deviceToken string, cancel context.CancelFunc) {
+	cancel()
+	d.srv.RemoveIdentity(commandKey)
+	if d.identityCount() == 0 {
+		d.stopTunnel()
+	}
+	if deviceToken != "" {
+		go config.ClearPresence(d.authDomain, deviceToken)
+	}
+	d.logf("Signed out %s", username)
+	d.applyState()
+}
+
+// removeIdentity fully signs out one identity in one call -- for callers
+// outside the HTTP-triggered sign-out flow (e.g. reportPresence's self-heal
+// on a 401, where there's no separate response to sequence the sync/async
+// halves against).
+func (d *daemonState) removeIdentity(username string) {
+	d.mu.Lock()
+	pi, ok := d.identities[username]
+	if !ok {
+		d.mu.Unlock()
+		return
+	}
+	delete(d.identities, username)
+	snapshot := d.sessionSnapshotLocked()
+	d.mu.Unlock()
+
+	if err := config.SaveSessions(snapshot); err != nil {
+		d.logf("sign-out: couldn't update session file: %s", err)
+	}
+	d.finishSignOut(pi.username, pi.commandKey, pi.deviceToken, pi.cancelApprovalRelay)
+}
+
+// dropUnresumedSession removes username from the persisted session list
+// without ever having added it to d.identities -- used at startup for a
+// cached session that fails verification (config.VerifyInvalid): it was
+// never resumed, so removeIdentity's map-based lookup wouldn't find it.
+func (d *daemonState) dropUnresumedSession(username string) {
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return
+	}
+	filtered := make([]config.Session, 0, len(sessions))
+	for _, s := range sessions {
+		if s.Username != username {
+			filtered = append(filtered, s)
+		}
+	}
+	if err := config.SaveSessions(filtered); err != nil {
+		d.logf("couldn't drop invalid session for %s: %s", username, err)
+	}
 }
 
 // setEnabled flips and persists the on/off toggle, starting or stopping the
 // relay tunnel to match -- the local HTTP server itself is never touched
 // (see internal/server), so /api/health etc. keep responding regardless.
+// Fans presence reporting/clearing out to every currently-paired identity.
 func (d *daemonState) setEnabled(enabled bool) {
 	d.mu.Lock()
 	d.enabled = enabled
+	identities := make([]*pairedIdentity, 0, len(d.identities))
+	for _, pi := range d.identities {
+		identities = append(identities, pi)
+	}
 	d.mu.Unlock()
 	config.SaveEnabled(enabled)
 	if enabled {
 		d.ensureTunnel()
-		if deviceToken := d.getDeviceToken(); deviceToken != "" {
-			go d.reportPresence(deviceToken)
+		for _, pi := range identities {
+			go d.reportPresence(pi.username, pi.deviceToken)
 		}
 	} else {
 		d.stopTunnel()
-		if deviceToken := d.getDeviceToken(); deviceToken != "" {
-			go config.ClearPresence(d.authDomain, deviceToken)
+		for _, pi := range identities {
+			go config.ClearPresence(d.authDomain, pi.deviceToken)
 		}
 	}
 	d.applyState()
@@ -147,6 +305,10 @@ func (d *daemonState) isEnabled() bool {
 // The URL's token is now explicitly a one-time bootstrap value -- see
 // internal/config/hostpair.go -- exchanged here for this installation's own
 // independent device_token/command_key before anything else happens.
+// Pairing a username already paired here rotates its credentials in place
+// (addOrReplaceIdentity); pairing a NEW username adds it alongside every
+// other currently-paired account -- one physical machine can be signed
+// into more than one Casper account at once, each fully isolated.
 func (d *daemonState) handlePairURL(rawURL string) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -165,25 +327,13 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	}
 	deviceToken, commandKey, _, err := config.ExchangePairingToken(d.authDomain, bootstrapToken, d.routingKey)
 	if err != nil {
-		if errors.Is(err, config.ErrHostConflict) {
-			const conflictMsg = "This machine is already attached to another Casper account. Sign out there first, or pair a different machine."
-			d.logf("casper:// pair: this host is already attached to another account")
-			config.SaveLastPairingResult("conflict", conflictMsg)
-			dialog.ShowError(conflictMsg)
-		} else {
-			d.logf("casper:// pair: couldn't exchange pairing token: %s", err)
-			config.SaveLastPairingResult("error", err.Error())
-		}
+		d.logf("casper:// pair: couldn't exchange pairing token: %s", err)
+		config.SaveLastPairingResult("error", err.Error())
 		return
 	}
-	if err := config.SaveSession(username, deviceToken, commandKey); err != nil {
-		d.logf("casper:// pair: couldn't save session: %s", err)
-	}
-	d.setCredentials(deviceToken, commandKey)
-	d.srv.SetAPIKey(commandKey)
+	d.addOrReplaceIdentity(username, deviceToken, commandKey)
 	d.logf("Paired as %s", username)
 	config.SaveLastPairingResult("ok", fmt.Sprintf("Paired as %s", username))
-	go d.refreshPolicyLayers(deviceToken)
 	// Re-pairing always turns the daemon back on -- a user who just went
 	// through the sign-in flow expects to end up connected, regardless of
 	// whatever the toggle was left at before.
@@ -201,20 +351,17 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	}()
 }
 
-// resumeSession is called at startup for a still-valid cached session (see
-// main.go) -- sets the in-memory credentials/API key and re-applies the
-// persisted toggle, but (unlike handlePairURL) doesn't force it back on:
-// resuming an existing session should honor whatever the user last left the
-// toggle at.
-func (d *daemonState) resumeSession(deviceToken, commandKey string) {
-	d.setCredentials(deviceToken, commandKey)
-	d.srv.SetAPIKey(commandKey)
-	go d.refreshPolicyLayers(deviceToken)
+// resumeIdentity is called at startup for each still-valid cached session
+// (see main.go) -- registers the identity and re-applies the persisted
+// toggle, but (unlike handlePairURL) doesn't force it back on: resuming an
+// existing session should honor whatever the user last left the toggle at.
+func (d *daemonState) resumeIdentity(s config.Session) {
+	d.addOrReplaceIdentity(s.Username, s.DeviceToken, s.CommandKey)
 	d.setEnabled(d.isEnabled())
 }
 
-// refreshPolicyLayers fetches this installation's own enabled policy layers
-// from the auth service and replaces the daemon's cached copy (see
+// refreshPolicyLayers fetches one identity's own enabled policy layers from
+// the auth service and replaces its Handler's cached copy (see
 // commands.Handler.SetPolicyLayers) -- called after pairing and after
 // resuming a cached session, both natural points credentials become
 // available, plus on demand via the "refresh_policy_layers" action (not
@@ -224,44 +371,34 @@ func (d *daemonState) resumeSession(deviceToken, commandKey string) {
 // just leaves whatever was cached before in place (or empty, on first
 // fetch) -- v1 has no push/websocket mechanism, so a stale cache only
 // self-heals on the next of these three triggers.
-func (d *daemonState) refreshPolicyLayers(deviceToken string) {
+func (d *daemonState) refreshPolicyLayers(deviceToken string, handler *commands.Handler) {
 	layers, err := config.FetchPolicyLayers(d.authDomain, deviceToken)
 	if err != nil {
 		d.logf("Couldn't fetch policy layers: %s", err)
 		return
 	}
-	d.cmdHandler.SetPolicyLayers(layers)
+	handler.SetPolicyLayers(layers)
 }
 
-// runApprovalRelayLoop long-polls auth_service's GET /hosts/pending-approvals
-// forever, showing a native dialog.Confirm and posting the decision back
-// whenever one shows up -- the alternative, additive channel for answering
-// an "ask"-tier command-template call, alongside pages/chat.py's existing
-// in-chat Approve/Deny UI. Runs unconditionally for the daemon's whole
-// lifetime (started once from main.go, cancelled via ctx on shutdown), on
-// every daemon regardless of whether it's currently anyone's attended host
-// -- it's auth_service's own query, not any local state here, that decides
-// whether this ever actually receives anything, so there's no local
-// "am I attended" branch to get wrong. Waits between attempts while signed
-// out (no device_token yet) rather than long-polling with an empty token.
-func (d *daemonState) runApprovalRelayLoop(ctx context.Context) {
+// runApprovalRelayLoop long-polls auth_service's GET
+// /hosts/pending-approvals for ONE specific paired identity, for as long as
+// ctx is alive (a child of daemonState.approvalCtx -- cancelled when that
+// identity signs out, or all at once when the whole daemon shuts down) --
+// showing a native dialog.Confirm and posting the decision back whenever
+// one shows up. The alternative, additive channel for answering an
+// "ask"-tier command-template call, alongside pages/chat.py's existing
+// in-chat Approve/Deny UI. One of these runs per currently-paired identity
+// (started from addOrReplaceIdentity) -- each account's own pending
+// approvals are entirely independent of any other account paired to this
+// same machine, matching the policy-layer isolation everywhere else here.
+func (d *daemonState) runApprovalRelayLoop(ctx context.Context, deviceToken string) {
 	const (
 		baseDelay   = 1 * time.Second
 		maxDelay    = 30 * time.Second
 		stableAfter = 10 * time.Second
-		noTokenWait = 2 * time.Second
 	)
 	delay := baseDelay
 	for ctx.Err() == nil {
-		deviceToken := d.getDeviceToken()
-		if deviceToken == "" {
-			select {
-			case <-time.After(noTokenWait):
-			case <-ctx.Done():
-			}
-			continue
-		}
-
 		start := time.Now()
 		approval, err := config.LongPollPendingApproval(ctx, d.authDomain, deviceToken)
 		if ctx.Err() != nil {
@@ -309,41 +446,21 @@ func approvalRelayJitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) + offset)
 }
 
-// onSignOut is wired as the HTTP server's OnSignOut -- called after
-// handleShutdown has already cleared session.json and responded to the
-// browser. Clears presence using the daemon's own cached device_token
-// (session.json is already gone by this point) and stops the tunnel; the
-// web app's sign-out flow unpairs the host with the auth service itself,
-// separately (see auth_service's /hosts/signout-all).
-func (d *daemonState) onSignOut() {
-	deviceToken := d.getDeviceToken()
-	d.stopTunnel()
-	d.srv.SetAPIKey("")
-	d.setCredentials("", "")
-	if deviceToken != "" {
-		go config.ClearPresence(d.authDomain, deviceToken)
-	}
-	d.applyState()
-}
-
 // reportPresence self-heals on a 401: the auth service no longer
 // recognizing this device_token (a remote sign-out, or an auth_service
 // restart clearing its in-memory attachment map -- see
-// auth_service/main.py's _attached) means this daemon's session is
-// unrecoverable, so it clears its own state and goes idle rather than
-// retrying forever against a dead credential.
-func (d *daemonState) reportPresence(deviceToken string) {
+// auth_service/main.py's _attached) means this one identity's session is
+// unrecoverable, so it signs out just that identity and goes idle rather
+// than retrying forever against a dead credential -- every OTHER identity
+// still paired here is untouched.
+func (d *daemonState) reportPresence(username, deviceToken string) {
 	tunURL := d.tunnelURL()
 	if tunURL == "" {
 		return
 	}
-	if unauthorized := config.ReportPresence(d.authDomain, deviceToken, tunURL, d.cmdHandler.HomeRoot()); unauthorized {
-		d.logf("Device session no longer recognized by the auth service -- signing out locally")
-		d.stopTunnel()
-		d.srv.SetAPIKey("")
-		d.setCredentials("", "")
-		config.ClearSession(d.logf)
-		d.applyState()
+	if unauthorized := config.ReportPresence(d.authDomain, deviceToken, tunURL, d.homeRoot); unauthorized {
+		d.logf("Device session for %s no longer recognized by the auth service -- signing out locally", username)
+		d.removeIdentity(username)
 	}
 }
 
@@ -367,6 +484,14 @@ func (d *daemonState) reportPresence(deviceToken string) {
 // (mStartup in main.go) was already independent of sign-in state and isn't
 // touched here either.
 //
+// The tooltip additionally notes the number of paired accounts once more
+// than one is signed in -- a small, low-risk nod to multi-account pairing;
+// per-account entries/sign-out buttons inside the menu itself are
+// explicitly deferred (systray's static-menu-item model makes dynamic
+// add/remove nontrivial, and each account can already be signed out
+// independently from the website itself, which only ever knows its own
+// command_key).
+//
 // The status dot itself is set via setStatusDotIcon (statusicon_darwin.go),
 // not MenuItem.SetIcon -- SetIcon sets NSMenuItem.image, a separate column
 // that pushes this item's title text right of every other item's; the
@@ -380,15 +505,19 @@ func (d *daemonState) applyState() {
 	if d.mToggle == nil || d.mStatus == nil {
 		return
 	}
+	suffix := ""
+	if n := d.identityCount(); n > 1 {
+		suffix = fmt.Sprintf(" (%d accounts)", n)
+	}
 	if d.isEnabled() {
 		d.mToggle.SetTitle("Pause")
 		d.mStatus.SetTitle("Service is running")
 		setStatusDotIcon("Service is", greenDotIcon, dotCanvasWidthPt, dotCanvasHeightPt)
-		systray.SetTooltip("Casper — connected")
+		systray.SetTooltip("Casper — connected" + suffix)
 	} else {
 		d.mToggle.SetTitle("Resume")
 		d.mStatus.SetTitle("Service is paused")
 		setStatusDotIcon("Service is", grayDotIcon, dotCanvasWidthPt, dotCanvasHeightPt)
-		systray.SetTooltip("Casper — paused")
+		systray.SetTooltip("Casper — paused" + suffix)
 	}
 }

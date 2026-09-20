@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"syscall"
 
-	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/server"
@@ -133,22 +132,19 @@ func main() {
 	if resolved, err := filepath.EvalSymlinks(homeRoot); err == nil {
 		homeRoot = resolved
 	}
-	cmdHandler := commands.New(homeRoot)
 
-	srv := server.New("", cmdHandler, logger)
-	srv.ClearSession = func() { config.ClearSession(logf) }
+	srv := server.New(logger)
 
-	state := newDaemonState(srv, cmdHandler, relayDomain, authDomain, routingKey, port, logf)
-	srv.OnSignOut = state.onSignOut
-	// Lets the web app's policy-authoring UI ask this daemon to re-fetch its
-	// own enabled policy layers on demand (see commands.Handler's
-	// runRefreshPolicyLayers), rather than waiting for the next
-	// pairing/resume -- a no-op while signed out (getDeviceToken() is "").
-	cmdHandler.SetRefreshPolicyLayersFunc(func() {
-		if deviceToken := state.getDeviceToken(); deviceToken != "" {
-			state.refreshPolicyLayers(deviceToken)
-		}
-	})
+	// Long-polls for each paired identity's own pending approvals to answer
+	// with a native dialog, for the daemon's whole lifetime -- see
+	// runApprovalRelayLoop's own doc comment for why this is a parent
+	// context rather than one loop: each identity gets its own child,
+	// started/stopped as it's paired/signed out; cancelling this parent (in
+	// onExit, mirroring how state.stopTunnel() already tears down
+	// tunnel.go's own background loop there) cancels all of them at once.
+	approvalRelayCtx, approvalRelayCancel := context.WithCancel(context.Background())
+
+	state := newDaemonState(srv, homeRoot, relayDomain, authDomain, routingKey, port, approvalRelayCtx, logf)
 
 	go func() {
 		if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
@@ -162,46 +158,42 @@ func main() {
 		}
 	}()
 
-	// Long-polls for a pending approval to answer with a native dialog, for
-	// the daemon's whole lifetime -- see runApprovalRelayLoop's own doc
-	// comment for why this starts unconditionally rather than only once
-	// paired. approvalRelayCancel is called from onExit, mirroring how
-	// state.stopTunnel() already tears down tunnel.go's own background loop
-	// there.
-	approvalRelayCtx, approvalRelayCancel := context.WithCancel(context.Background())
-	go state.runApprovalRelayLoop(approvalRelayCtx)
-
 	// A non-interactive run (dev/CI): use the key directly, skip the
 	// session file/casper:// pairing entirely. There's no separate
 	// command_key to distinguish here -- both the device_token (unused,
 	// since presence reporting isn't exercised in this mode) and the
 	// command_key (what actually gates /api/command) are set to the same
-	// literal env value.
+	// literal env value. "dev" is a synthetic username -- this mode never
+	// goes through casper://pair, so there's no real one.
 	if envKey := os.Getenv("CONTROL_TOOL_KEY"); envKey != "" {
-		state.setCredentials(envKey, envKey)
-		srv.SetAPIKey(envKey)
+		state.addOrReplaceIdentity("dev", envKey, envKey)
 		state.setEnabled(true)
 	} else {
-		// Verifying a cached session can block on a network call --
+		// Verifying cached sessions can block on network calls --
 		// deliberately not on main()'s startup path, so the status-bar icon
 		// (and the ability to receive a fresh casper:// pairing) is
-		// available immediately even while this is still in flight.
+		// available immediately even while this is still in flight. Each
+		// cached session (one per previously-paired account) is verified
+		// and resumed independently -- one failing verification doesn't
+		// block any other account from resuming.
 		go func() {
-			session, err := config.LoadSession()
-			if err != nil || session == nil {
+			sessions, err := config.LoadSessions()
+			if err != nil || len(sessions) == 0 {
 				return
 			}
-			result := config.VerifyHostSession(authDomain, session.DeviceToken)
-			if result == config.VerifyInvalid {
-				config.ClearSession(logf)
-				logf("Saved session is no longer valid -- waiting to be paired again.")
-				return
+			for _, session := range sessions {
+				result := config.VerifyHostSession(authDomain, session.DeviceToken)
+				if result == config.VerifyInvalid {
+					state.dropUnresumedSession(session.Username)
+					logf("Saved session for %s is no longer valid -- waiting to be paired again.", session.Username)
+					continue
+				}
+				if result == config.VerifyUnknown {
+					logf("Couldn't verify saved session for %s (offline?) -- using it anyway.", session.Username)
+				}
+				logf("Resuming session for %s", session.Username)
+				state.resumeIdentity(session)
 			}
-			if result == config.VerifyUnknown {
-				logf("Couldn't verify saved session (offline?) -- using it anyway.")
-			}
-			logf("Resuming session for %s", session.Username)
-			state.resumeSession(session.DeviceToken, session.CommandKey)
 		}()
 	}
 

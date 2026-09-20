@@ -49,23 +49,30 @@ func TestAppConfigSubdir(t *testing.T) {
 	})
 }
 
-func TestSessionRoundTrip(t *testing.T) {
+func TestSessionsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir) // os.UserConfigDir on darwin is $HOME/Library/Application Support
 
-	if s, err := LoadSession(); err != nil || s != nil {
-		t.Fatalf("expected no session initially, got s=%v err=%v", s, err)
+	if s, err := LoadSessions(); err != nil || len(s) != 0 {
+		t.Fatalf("expected no sessions initially, got s=%v err=%v", s, err)
 	}
 
-	if err := SaveSession("alice", "devtok123", "cmdkey456"); err != nil {
-		t.Fatalf("SaveSession: %v", err)
+	alice := Session{Username: "alice", DeviceToken: "devtok123", CommandKey: "cmdkey456"}
+	bob := Session{Username: "bob", DeviceToken: "devtok789", CommandKey: "cmdkey789"}
+	if err := SaveSessions([]Session{alice, bob}); err != nil {
+		t.Fatalf("SaveSessions: %v", err)
 	}
-	s, err := LoadSession()
-	if err != nil || s == nil {
-		t.Fatalf("expected a session after save, got s=%v err=%v", s, err)
+
+	sessions, err := LoadSessions()
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions after save, got sessions=%v err=%v", sessions, err)
 	}
-	if s.Username != "alice" || s.DeviceToken != "devtok123" || s.CommandKey != "cmdkey456" {
-		t.Fatalf("unexpected session contents: %+v", s)
+	byUsername := map[string]Session{}
+	for _, s := range sessions {
+		byUsername[s.Username] = s
+	}
+	if byUsername["alice"] != alice || byUsername["bob"] != bob {
+		t.Fatalf("unexpected session contents: %+v", sessions)
 	}
 
 	path, _ := sessionFilePath()
@@ -77,8 +84,62 @@ func TestSessionRoundTrip(t *testing.T) {
 		t.Errorf("expected session.json to be 0600, got %o", info.Mode().Perm())
 	}
 
-	ClearSession(nil)
-	if s, err := LoadSession(); err != nil || s != nil {
-		t.Fatalf("expected no session after clear, got s=%v err=%v", s, err)
+	// Removing one identity (mirrors daemon.go's removeSessionFromDisk)
+	// leaves the other untouched.
+	if err := SaveSessions([]Session{bob}); err != nil {
+		t.Fatalf("SaveSessions: %v", err)
+	}
+	sessions, err = LoadSessions()
+	if err != nil || len(sessions) != 1 || sessions[0] != bob {
+		t.Fatalf("expected only bob to remain, got sessions=%v err=%v", sessions, err)
+	}
+
+	if err := SaveSessions(nil); err != nil {
+		t.Fatalf("SaveSessions(nil): %v", err)
+	}
+	if s, err := LoadSessions(); err != nil || len(s) != 0 {
+		t.Fatalf("expected no sessions after clearing, got s=%v err=%v", s, err)
+	}
+}
+
+// TestLoadSessions_TolerantOfOldSingleObjectShape confirms a session.json
+// left over from before multi-account pairing (a single JSON object, not
+// an array) still loads as one identity rather than being treated as
+// corrupt.
+func TestLoadSessions_TolerantOfOldSingleObjectShape(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	path, err := sessionFilePath() // creates AppConfigDir as a side effect
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"username":"carol","device_token":"dt","command_key":"ck"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := LoadSessions()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("expected exactly one session from the old shape, got sessions=%v err=%v", sessions, err)
+	}
+	if sessions[0].Username != "carol" || sessions[0].DeviceToken != "dt" || sessions[0].CommandKey != "ck" {
+		t.Fatalf("unexpected session contents: %+v", sessions[0])
+	}
+}
+
+func TestLoadSessions_TreatsCorruptFileAsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	path, err := sessionFilePath() // creates AppConfigDir as a side effect
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if sessions, err := LoadSessions(); err != nil || len(sessions) != 0 {
+		t.Fatalf("expected a corrupt file to load as empty, got sessions=%v err=%v", sessions, err)
 	}
 }

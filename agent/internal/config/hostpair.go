@@ -3,27 +3,22 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"time"
 )
 
-// ErrHostConflict is returned by ExchangePairingToken when this host's
-// routing_key is currently attached to a different account -- the auth
-// service rejects rather than preempts an existing session (see
-// auth_service/main.py's _pair_host / HostAlreadyAttachedError).
-var ErrHostConflict = errors.New("this host is currently attached to another account")
-
 // ExchangePairingToken trades a one-time browser bootstrap token (carried by
 // a casper://pair URL) for this installation's own independent
 // device_token/command_key, tied to its stable, self-persisted routing key
 // (see routingkey.go). Called once per pairing; from then on the daemon
 // never touches the browser's token again, so a future website login can't
-// disturb an already-attached daemon. os.Hostname() is best-effort/cosmetic
-// only -- a blank value just means the paired host shows up unnamed until
-// the user gives it a label.
+// disturb an already-paired identity. A routing_key can be paired to
+// several different accounts at once (see auth_service/main.py's
+// _pair_host) -- this always succeeds for a well-formed token, no conflict
+// case. os.Hostname() is best-effort/cosmetic only -- a blank value just
+// means the paired host shows up unnamed until the user gives it a label.
 func ExchangePairingToken(authDomain, bootstrapToken, routingKey string) (deviceToken, commandKey, label string, err error) {
 	hostname, _ := os.Hostname()
 
@@ -47,9 +42,6 @@ func ExchangePairingToken(authDomain, bootstrapToken, routingKey string) (device
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusConflict {
-		return "", "", "", ErrHostConflict
-	}
 	if resp.StatusCode != http.StatusCreated {
 		return "", "", "", fmt.Errorf("pairing failed: auth service returned %d", resp.StatusCode)
 	}

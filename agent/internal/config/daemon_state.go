@@ -30,7 +30,7 @@ func LoadEnabled() bool {
 }
 
 // SaveEnabled persists the toggle state so it survives a daemon restart
-// (reboot, login-item relaunch) -- best-effort, matching ClearSession's
+// (reboot, login-item relaunch) -- best-effort, matching SaveSessions'
 // posture (a write failure here isn't worth failing the toggle over).
 func SaveEnabled(enabled bool) {
 	path, err := enabledFilePath()
