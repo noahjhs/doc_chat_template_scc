@@ -118,25 +118,27 @@ def _handle_api_error(e: client.ApiError):
     raise typer.Exit(code=1)
 
 
-def _require_password_flag_when_noninteractive() -> None:
-    """Guards signup/login's own interactive password prompt (and login's
-    Touch ID gate before it -- see _authenticate_device_owner) against an
-    automated/scripted caller that omitted --password: without this, a
+def _require_flag_when_noninteractive(flag: str) -> None:
+    """Guards an interactive prompt (the username argument, or --password
+    -- and, transitively, login's own Touch ID gate that only runs once a
+    username is in hand -- see _authenticate_device_owner) against an
+    automated/scripted caller that omitted it: without this, a
     non-interactive run wouldn't just fail cleanly, it would either hang
-    forever on typer.prompt (no human to type anything) or -- worse, for
-    login specifically -- hang forever on a REAL system Touch ID/password
-    dialog nobody is present to answer, on any machine that happens to
-    have an active GUI session (the mini, notably, which runs unattended).
-    sys.stdin.isatty() is the standard, simple way to tell "a human is
-    plausibly at a real terminal" apart from "piped/redirected/scripted" --
-    not foolproof (a script could itself run inside a real pty), but
-    exactly right for this: the one thing that actually matters is whether
-    there's a reasonable expectation of headless/automated use, and
-    --password is always the correct, hang-free way to drive that
-    regardless of this heuristic either way."""
+    forever on typer.prompt (no human to type anything) or -- worse, for a
+    saved password specifically -- hang forever on a REAL system Touch
+    ID/password dialog nobody is present to answer, on any machine that
+    happens to have an active GUI session (the mini, notably, which runs
+    unattended). sys.stdin.isatty() is the standard, simple way to tell "a
+    human is plausibly at a real terminal" apart from
+    "piped/redirected/scripted" -- not foolproof (a script could itself
+    run inside a real pty), but exactly right for this: the one thing that
+    actually matters is whether there's a reasonable expectation of
+    headless/automated use, and passing the value explicitly is always
+    the correct, hang-free way to drive that regardless of this heuristic
+    either way."""
     if not sys.stdin.isatty():
         err_console.print(
-            "[red]Not running interactively -- pass --password explicitly[/red] "
+            f"[red]Not running interactively -- pass {flag} explicitly[/red] "
             "(required for scripted/automated use; omitting it here would otherwise hang)."
         )
         raise typer.Exit(code=1)
@@ -348,12 +350,18 @@ def main(
     debug: bool = typer.Option(False, "--debug", "--raw", help="Print every request/response."),
 ):
     """Casper backend test harness. Run with no command for interactive
-    mode -- requires already being logged in (`harness login`/`signup`
-    first; that itself never enters interactive mode on its own, whether
-    run here or from inside it)."""
+    mode. If not already logged in, prompts for a username and logs in
+    first -- exactly the same flow as `harness login` with no other flags
+    (see _do_login), never a special case of its own -- then enters
+    interactive mode; `harness login`/`signup` themselves still never
+    enter interactive mode on their own, whether run here or from inside
+    it."""
     client.toggle_debug(debug)
     if ctx.invoked_subcommand is None:
-        _require_session()
+        if _load_session() is None:
+            _require_flag_when_noninteractive("`harness login <username> --password ...`")
+            username = typer.prompt("Username")
+            _do_login(username, None, False, False, None)
         _run_interactive()
 
 
@@ -369,11 +377,11 @@ def signup(
     password is typed interactively (not supplied via --password), asks
     before saving it to the OS keychain -- same as a browser's own
     save-password prompt. --password is required for scripted/automated
-    use (see _require_password_flag_when_noninteractive)."""
+    use (see _require_flag_when_noninteractive)."""
     domain = _resolve_domain(username, domain, dev, prod)
     typed_fresh = password is None
     if password is None:
-        _require_password_flag_when_noninteractive()
+        _require_flag_when_noninteractive("--password")
         password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
     try:
         result = client.signup(domain, username, password)
@@ -386,36 +394,16 @@ def signup(
     console.print(f"[green]Signed up as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
 
 
-@app.command()
-def login(
-    username: str,
-    domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
-    dev: bool = typer.Option(False, "--dev", help=f"Use the dev deployment ({DEV_AUTH_DOMAIN})."),
-    prod: bool = typer.Option(False, "--prod", help=f"Use the prod deployment ({PROD_AUTH_DOMAIN})."),
-    password: Optional[str] = typer.Option(
-        None, "--password", hide_input=True, help="Omit to use a saved OS-keychain password, or be prompted."
-    ),
-):
-    """Sign in and save the resulting session. Without --domain/--dev/--prod,
-    reuses whichever domain this username last logged into. Without
-    --password, reuses a password already saved in the OS keychain for this
-    domain+username -- gated behind a Touch ID/password check each time
-    (see `harness forget-password` to clear it), same as a browser's own
-    saved-password autofill -- falling back to an interactive prompt the
-    first time, if Touch ID is declined/unavailable, or if the saved
-    password stops working. A freshly-typed password that signs in
-    successfully is offered to be saved (see _maybe_save_password) rather
-    than saved automatically -- same as a browser's own save-password
-    prompt. --password is required for scripted/automated use (see
-    _require_password_flag_when_noninteractive) -- deliberately checked
-    BEFORE the keychain/Touch ID path below, not just before the plain
-    prompt, since the Touch ID dialog is the one that would otherwise hang
-    an unattended run indefinitely rather than just failing outright."""
+def _do_login(username: str, domain: Optional[str], dev: bool, prod: bool, password: Optional[str]) -> None:
+    """Everything `login` does once it already has a username in hand --
+    factored out so main()'s own not-logged-in fallback (see its own
+    callback below) can drive the exact same flow inline (after prompting
+    for a username itself) rather than duplicating it."""
     domain = _resolve_domain(username, domain, dev, prod)
     key = _keyring_key(domain, username)
 
-    if password is None and not sys.stdin.isatty():
-        _require_password_flag_when_noninteractive()  # always raises -- see its own docstring
+    if password is None:
+        _require_flag_when_noninteractive("--password")  # only raises if non-interactive -- see its own docstring
 
     from_keychain = False
     typed_fresh = False
@@ -453,6 +441,37 @@ def login(
     _remember_domain(result["username"], domain)
     _save_session(domain, result["username"], result["token"])
     console.print(f"[green]Signed in as {result['username']}.[/green] Session saved to {SESSION_PATH}.")
+
+
+@app.command()
+def login(
+    username: Optional[str] = typer.Argument(None, help="Omit to be prompted."),
+    domain: Optional[str] = typer.Option(None, "--domain", envvar="CASPER_HARNESS_DOMAIN"),
+    dev: bool = typer.Option(False, "--dev", help=f"Use the dev deployment ({DEV_AUTH_DOMAIN})."),
+    prod: bool = typer.Option(False, "--prod", help=f"Use the prod deployment ({PROD_AUTH_DOMAIN})."),
+    password: Optional[str] = typer.Option(
+        None, "--password", hide_input=True, help="Omit to use a saved OS-keychain password, or be prompted."
+    ),
+):
+    """Sign in and save the resulting session. Without --domain/--dev/--prod,
+    reuses whichever domain this username last logged into. Without
+    --password, reuses a password already saved in the OS keychain for this
+    domain+username -- gated behind a Touch ID/password check each time
+    (see `harness forget-password` to clear it), same as a browser's own
+    saved-password autofill -- falling back to an interactive prompt the
+    first time, if Touch ID is declined/unavailable, or if the saved
+    password stops working. A freshly-typed password that signs in
+    successfully is offered to be saved (see _maybe_save_password) rather
+    than saved automatically -- same as a browser's own save-password
+    prompt. The username argument and --password are both required for
+    scripted/automated use (see _require_flag_when_noninteractive) --
+    checked as each is actually needed, not both up front, so a script
+    that already passes username positionally only needs --password too,
+    never a redundant flag for the one it already gave inline."""
+    if username is None:
+        _require_flag_when_noninteractive("the username argument")
+        username = typer.prompt("Username")
+    _do_login(username, domain, dev, prod, password)
 
 
 @app.command("forget-password")
