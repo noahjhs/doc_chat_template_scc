@@ -39,13 +39,27 @@ fi
 # restore them on a mistake since they're untracked, not just modified.
 DEPLOY_ENV="${DEPLOY_ENV:-prod}"
 case "$DEPLOY_ENV" in
-    prod) SUFFIX="" ;;
-    dev)  SUFFIX=".dev" ;;
+    prod) SUFFIX="" ;      APP_DISPLAY_NAME="Casper";     BUNDLE_ID_SUFFIX=""; URL_SCHEME="casper" ;;
+    dev)  SUFFIX=".dev" ;  APP_DISPLAY_NAME="Casper Dev"; BUNDLE_ID_SUFFIX=".dev"; URL_SCHEME="casper-dev" ;;
     *)
         echo "Unknown DEPLOY_ENV '$DEPLOY_ENV' -- expected 'prod' or 'dev'." >&2
         exit 1
         ;;
 esac
+# BUNDLE_ID_SUFFIX/URL_SCHEME exist so a dev build and a prod build can run
+# side by side on the SAME machine/user without LaunchServices confusion --
+# confirmed directly that two .app bundles sharing one CFBundleIdentifier
+# and one registered URL scheme is a real hazard, not just theoretical: a
+# casper://pair link fired from a dev sign-in could get routed to whichever
+# instance macOS currently considers "the" registered handler for that
+# scheme, possibly the prod one. The Go side needs no matching change for
+# the scheme itself (agent/internal/urlscheme's Apple Event handler is
+# scheme-agnostic -- LaunchServices, driven by Info.plist below, is what
+# decides which app receives a given scheme's events at all) -- it DOES
+# derive its own per-environment config directory from the embedded auth
+# domain's "dev-" prefix instead (see agent/internal/config/appdir.go),
+# the same underlying signal, just read a different way since Go can't
+# see this shell variable.
 AUTH_SERVER_FILE="auth_server${SUFFIX}.txt"
 RELAY_SERVER_FILE="relay_server${SUFFIX}.txt"
 APP_SERVER_FILE="app_server${SUFFIX}.txt"
@@ -133,20 +147,22 @@ fi
 # present Dock icon with no window behind it would just be confusing clutter
 # for something meant to run quietly as a login item.
 #
-# CFBundleURLTypes -- registers the casper:// scheme with LaunchServices, so
-# a signed-in web app can hand this (already-running, or freshly-launched)
-# process a fresh pairing token via casper://pair?token=...&username=...
-# (see agent/internal/urlscheme). Confirmed via a throwaway spike that this
-# registers reliably for an unsigned bundle like this one, as long as it's
-# not sitting in a system staging/temp path (e.g. /private/tmp) -- a normal
-# install location (Applications, Desktop, Downloads, etc.) is fine.
+# CFBundleURLTypes -- registers ${URL_SCHEME}:// with LaunchServices, so a
+# signed-in web app can hand this (already-running, or freshly-launched)
+# process a fresh pairing token via ${URL_SCHEME}://pair?token=...&username=...
+# (see agent/internal/urlscheme -- scheme-agnostic on the Go side; it's
+# this Info.plist registration, not anything Go reads, that decides which
+# scheme reaches this bundle at all). Confirmed via a throwaway spike that
+# this registers reliably for an unsigned bundle like this one, as long as
+# it's not sitting in a system staging/temp path (e.g. /private/tmp) -- a
+# normal install location (Applications, Desktop, Downloads, etc.) is fine.
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Casper</string>
-  <key>CFBundleDisplayName</key><string>Casper</string>
-  <key>CFBundleIdentifier</key><string>com.docchat.casper</string>
+  <key>CFBundleName</key><string>${APP_DISPLAY_NAME}</string>
+  <key>CFBundleDisplayName</key><string>${APP_DISPLAY_NAME}</string>
+  <key>CFBundleIdentifier</key><string>com.docchat.casper${BUNDLE_ID_SUFFIX}</string>
   <key>CFBundleExecutable</key><string>Casper</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
@@ -155,8 +171,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>CFBundleURLTypes</key>
   <array><dict>
-    <key>CFBundleURLName</key><string>com.docchat.casper.pair</string>
-    <key>CFBundleURLSchemes</key><array><string>casper</string></array>
+    <key>CFBundleURLName</key><string>com.docchat.casper${BUNDLE_ID_SUFFIX}.pair</string>
+    <key>CFBundleURLSchemes</key><array><string>${URL_SCHEME}</string></array>
   </dict></array>
 $( [ -f build/Casper.icns ] && echo '  <key>CFBundleIconFile</key><string>Casper.icns</string>' )
 </dict></plist>

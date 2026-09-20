@@ -55,7 +55,7 @@ if "_login_token" not in st.session_state:
 if "_login_token" in st.session_state:
     token = st.session_state["_login_token"]
     username = st.session_state["_login_username"]
-    pair_url = build_pair_url(token, username)
+    pair_url = build_pair_url(token, username, auth_domain)
 
     st.success(f"Signed in as {username}.")
     # There's no post-pairing page to send you to anymore (Environments

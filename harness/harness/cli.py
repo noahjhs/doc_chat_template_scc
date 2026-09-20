@@ -586,7 +586,7 @@ def pair_daemon(
     domain, token, username = session["domain"], session["token"], session["username"]
     try:
         before = {h["host_id"] for h in client.list_hosts(domain, token)["hosts"] if h["connected"]}
-        client.trigger_real_pairing(username, token)
+        client.trigger_real_pairing(domain, username, token)
     except client.ApiError as e:
         _handle_api_error(e)
     except RuntimeError as e:

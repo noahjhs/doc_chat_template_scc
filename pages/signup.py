@@ -56,7 +56,7 @@ if "_signup_token" not in st.session_state:
 if "_signup_token" in st.session_state:
     token = st.session_state["_signup_token"]
     username = st.session_state["_signup_username"]
-    pair_url = build_pair_url(token, username)
+    pair_url = build_pair_url(token, username, auth_domain)
 
     st.success(f"Signed up as {username}.")
     # See pages/signin.py's identical block for why this is the actual end

@@ -19,6 +19,36 @@ func TestBaseURL(t *testing.T) {
 	}
 }
 
+func TestAppConfigSubdir(t *testing.T) {
+	// embeddedAuthServer is a plain var (go:embed populates it at compile
+	// time in a real build), not a const -- safe to mutate directly here
+	// and restore afterward.
+	original := embeddedAuthServer
+	defer func() { embeddedAuthServer = original }()
+
+	t.Run("prod domain", func(t *testing.T) {
+		embeddedAuthServer = "auth.casperagent.dev"
+		t.Setenv("CONTROL_TOOL_AUTH_DOMAIN", "")
+		if got := appConfigSubdir(); got != "Casper" {
+			t.Fatalf("expected %q, got %q", "Casper", got)
+		}
+	})
+	t.Run("dev domain", func(t *testing.T) {
+		embeddedAuthServer = "dev-auth.casperagent.dev"
+		t.Setenv("CONTROL_TOOL_AUTH_DOMAIN", "")
+		if got := appConfigSubdir(); got != "Casper-dev" {
+			t.Fatalf("expected %q, got %q", "Casper-dev", got)
+		}
+	})
+	t.Run("env override wins over embedded", func(t *testing.T) {
+		embeddedAuthServer = "auth.casperagent.dev"
+		t.Setenv("CONTROL_TOOL_AUTH_DOMAIN", "dev-auth.casperagent.dev")
+		if got := appConfigSubdir(); got != "Casper-dev" {
+			t.Fatalf("expected the env override to win, got %q", got)
+		}
+	})
+}
+
 func TestSessionRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir) // os.UserConfigDir on darwin is $HOME/Library/Application Support

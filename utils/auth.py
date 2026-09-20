@@ -126,13 +126,30 @@ def login_with_auth_service(auth_domain, username, password):
     return {"error": _error_detail(response, "Log in failed.")}
 
 
-def build_pair_url(token, username):
-    """The casper://pair URL pages/signin.py and pages/signup.py fire on
+def pair_url_scheme(auth_domain: str) -> str:
+    """"casper-dev" for a dev deployment (auth_domain starting with
+    "dev-", this project's established dev/prod naming convention -- see
+    e.g. scripts/smoke_test.sh's own AUTH_DOMAIN defaults), "casper"
+    otherwise. Must match whichever scheme the TARGET daemon build
+    actually registered (see build_go_macos.sh's own DEPLOY_ENV-driven
+    URL_SCHEME) -- a dev build and a prod build register different
+    schemes specifically so they can coexist on one machine without
+    LaunchServices routing a pairing link to the wrong one; this is the
+    other half of that, matching the daemon's own choice by applying the
+    identical "dev-" prefix rule to the identical (auth) domain the Go
+    side keys off of (agent/internal/config/appdir.go)."""
+    return "casper-dev" if auth_domain.strip().lower().startswith("dev-") else "casper"
+
+
+def build_pair_url(token, username, auth_domain):
+    """The <scheme>://pair URL pages/signin.py and pages/signup.py fire on
     success -- the OS hands this to the user's already-running (or
     freshly-launched) Casper daemon as an Apple Event (see
     agent/internal/urlscheme), which is what actually completes pairing.
     token is the plain session token /signup or /login just returned --
     the daemon exchanges it server-side for its own independent
     device_token/command_key (see config.ExchangePairingToken), so this is
-    a one-time bootstrap value, not the daemon's long-lived credential."""
-    return f"casper://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"
+    a one-time bootstrap value, not the daemon's long-lived credential.
+    See pair_url_scheme for why auth_domain decides the scheme."""
+    scheme = pair_url_scheme(auth_domain)
+    return f"{scheme}://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"

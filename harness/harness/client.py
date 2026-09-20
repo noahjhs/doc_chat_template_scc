@@ -228,19 +228,37 @@ def get_pending_approval(domain: str, token: str, approval_id: str, wait_seconds
 
 
 # --- Real-daemon pairing (manual verification only, not CI-automatable) ------
-def trigger_real_pairing(username: str, token: str) -> None:
-    """Fires the same casper://pair hand-off a browser sign-in click would,
-    via `open` -- the OS-level Apple Event dispatch this depends on is
-    macOS-only (matching this project's current single-platform reality),
-    and requires an already-installed, registered Casper.app on this same
-    machine (it doesn't need to already be running -- `open` launches it
-    fresh if not, and the event still delivers). Doesn't call auth_service
-    itself; the daemon that receives the event does that, exactly as it
-    does for a real sign-in. Not automatable in CI -- see harness/cli.py's
-    `pair-daemon` command, the intended manual-verification entry point."""
+def _pair_url_scheme(auth_domain: str) -> str:
+    """"casper-dev" for a dev deployment (auth_domain starting with
+    "dev-", this project's established dev/prod naming convention), else
+    "casper" -- mirrors auth_service/utils/auth.py's own
+    pair_url_scheme (duplicated, not imported -- independently deployed
+    services). Must match whichever scheme the TARGET daemon build
+    actually registered (see build_go_macos.sh's DEPLOY_ENV-driven
+    URL_SCHEME) -- a dev build and a prod build register different
+    schemes specifically so they can coexist on one machine without
+    LaunchServices routing a pairing link to the wrong one."""
+    return "casper-dev" if auth_domain.strip().lower().startswith("dev-") else "casper"
+
+
+def trigger_real_pairing(domain: str, username: str, token: str) -> None:
+    """Fires the same <scheme>://pair hand-off a browser sign-in click
+    would, via `open` -- the OS-level Apple Event dispatch this depends on
+    is macOS-only (matching this project's current single-platform
+    reality), and requires an already-installed, registered Casper.app on
+    this same machine (it doesn't need to already be running -- `open`
+    launches it fresh if not, and the event still delivers). Doesn't call
+    auth_service itself; the daemon that receives the event does that,
+    exactly as it does for a real sign-in. Not automatable in CI -- see
+    harness/cli.py's `pair-daemon` command, the intended manual-
+    verification entry point. domain picks the scheme (see
+    _pair_url_scheme) -- get this wrong (e.g. dev domain, prod-built
+    daemon) and the event silently reaches no daemon at all, not the
+    wrong one, since nothing registered that scheme."""
     if sys.platform != "darwin":
-        raise RuntimeError("trigger_real_pairing is macOS-only (casper://pair is dispatched via an Apple Event).")
-    url = f"casper://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"
+        raise RuntimeError("trigger_real_pairing is macOS-only (pairing is dispatched via an Apple Event).")
+    scheme = _pair_url_scheme(domain)
+    url = f"{scheme}://pair?token={quote(token, safe='')}&username={quote(username, safe='')}"
     subprocess.run(["open", url], check=True)
 
 
