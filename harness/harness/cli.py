@@ -252,7 +252,18 @@ def _run_interactive() -> None:
     keychain password elsewhere in this file. Silently does neither if
     readline isn't available (Windows without pyreadline3) -- history
     navigation itself just doesn't work there, same as it wouldn't with a
-    bare `input()` and no readline at all."""
+    bare `input()` and no readline at all.
+
+    Requires an existing session -- see main()'s own callback, which gates
+    entry to this function on _require_session() before ever calling it,
+    so this itself doesn't need to check. Logging out from inside the
+    loop (`logout`, which clears SESSION_PATH -- see its own command) ends
+    the session the same way `exit`/Ctrl-D does, checked generically after
+    every dispatched command (whether the session file still exists, not
+    by matching the literal text "logout") so this stays correct if some
+    other future command ever clears it too. The reverse isn't true:
+    exiting the REPL (`exit`/`quit`/Ctrl-D) never touches the session --
+    only an explicit `logout` does."""
     if readline is not None:
         readline.set_history_length(HISTORY_MAX_ENTRIES)
         try:
@@ -294,6 +305,9 @@ def _run_interactive() -> None:
                     e.show()
                 else:
                     err_console.print(f"[red]{type(e).__name__}:[/red] {e}")
+            if _load_session() is None:
+                console.print("Logged out -- leaving interactive mode.")
+                break
     finally:
         if readline is not None:
             HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -308,9 +322,13 @@ def main(
     ctx: typer.Context,
     debug: bool = typer.Option(False, "--debug", "--raw", help="Print every request/response."),
 ):
-    """Casper backend test harness. Run with no command for interactive mode."""
+    """Casper backend test harness. Run with no command for interactive
+    mode -- requires already being logged in (`harness login`/`signup`
+    first; that itself never enters interactive mode on its own, whether
+    run here or from inside it)."""
     client.toggle_debug(debug)
     if ctx.invoked_subcommand is None:
+        _require_session()
         _run_interactive()
 
 
