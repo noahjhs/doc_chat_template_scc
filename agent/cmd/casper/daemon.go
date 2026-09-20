@@ -192,17 +192,24 @@ func (d *daemonState) removeSessionFromDisk(username string) {
 // finishSignOut is the async half -- run after the /api/shutdown response
 // is already on the wire (or directly by removeIdentity for a path with no
 // HTTP response to sequence against, e.g. reportPresence's self-heal).
-// Deregisters this identity from the server, stops the relay tunnel only
-// if it was the LAST paired identity (the tunnel is machine-level, shared
-// by every other identity still paired here), and clears this identity's
-// own presence.
+// Deregisters this identity from the server; stopping the relay tunnel and
+// clearing presence both only happen if this was the LAST paired identity
+// -- both are machine-level state (see auth_service/main.py's
+// clear_host_presence -- "_live" is shared by every identity currently
+// paired to this routing_key, not per-device), so clearing either while
+// another identity is still paired here would incorrectly show THAT
+// identity as disconnected too, even though its own tunnel connection
+// never actually dropped. Confirmed directly against a real two-account
+// daemon: signing one out without this guard left the other showing
+// connected=false in `harness hosts list` until its own next presence
+// beat (which, with no periodic timer, might never come on its own).
 func (d *daemonState) finishSignOut(username, commandKey, deviceToken string) {
 	d.srv.RemoveIdentity(commandKey)
 	if d.identityCount() == 0 {
 		d.stopTunnel()
-	}
-	if deviceToken != "" {
-		go config.ClearPresence(d.authDomain, deviceToken)
+		if deviceToken != "" {
+			go config.ClearPresence(d.authDomain, deviceToken)
+		}
 	}
 	d.logf("Signed out %s", username)
 	d.applyState()
