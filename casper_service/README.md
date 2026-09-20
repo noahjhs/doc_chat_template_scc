@@ -1,4 +1,4 @@
-# Doc Chat Auth Service
+# Doc Chat Casper Service
 
 A small standalone FastAPI service that owns user accounts for Casper's
 sign-up/sign-in flow, plus host/policy-layer state and the tool-calling
@@ -33,7 +33,7 @@ AUTH_DB_PATH=./users.db uvicorn main:app --port 8100
 
 ## Deploying on Render
 
-New Web Service, **Root Directory = `auth_service`**:
+New Web Service, **Root Directory = `casper_service`**:
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Env var `AUTH_DB_PATH` pointed at a path under an attached **persistent

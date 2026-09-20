@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
+CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
 
 
 class FakeItem:
@@ -50,11 +50,11 @@ class FakeClient:
 
 @pytest.fixture()
 def app_env():
-    """Same fresh-SQLite-file-per-test posture as test_auth_service.py's own
+    """Same fresh-SQLite-file-per-test posture as test_casper_service.py's own
     fixture, but yields (main_module, TestClient) instead of just the
     client -- tests need the module reference to patch _get_openai_client
     (module-boundary injection, per the plan's own testing guidance)."""
-    sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.insert(0, os.path.abspath(CASPER_SERVICE_DIR))
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
@@ -64,7 +64,7 @@ def app_env():
         from fastapi.testclient import TestClient
 
         yield auth_main, TestClient(auth_main.app)
-    sys.path.remove(os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
     for mod in ("main", "db", "models", "policy", "conversations"):
         sys.modules.pop(mod, None)
 
@@ -82,17 +82,6 @@ def _pair_and_connect_host(client, headers, routing_key, hostname, cwd=""):
         headers=device_headers,
     )
     return pair
-
-
-def _create_policy_layer(client, headers, name="test layer"):
-    return client.post("/policy-layers", json={"name": name}, headers=headers).json()
-
-
-def _add_rule(client, headers, layer_id, positional_constraints, option_constraints=None, tier="ask", cwd=None):
-    body = {"positional_constraints": positional_constraints, "option_constraints": option_constraints or [], "tier": tier}
-    if cwd is not None:
-        body["cwd"] = cwd
-    return client.post(f"/policy-layers/{layer_id}/rules", json=body, headers=headers).json()
 
 
 def _step(client, headers, **body):
@@ -187,10 +176,7 @@ def test_conversation_tool_call_injection_dispatches_with_mock(app_env):
     main, client = app_env
     signup = _signup(client, "erin")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-erin-1", "erins-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^echo$"}], tier="allow")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-erin-1", "erins-mac")
 
     fake = FakeClient([FakeResponse(id="resp_1", output_text="Ran it.")])
     main._get_openai_client = lambda: fake
@@ -216,13 +202,14 @@ def test_conversation_tool_call_injection_dispatches_with_mock(app_env):
 
 
 def test_conversation_shell_command_deny_tier_never_pauses(app_env):
+    """mock_tier="deny" is the explicit, caller-supplied decision -- mocking
+    never evaluates policy itself (see conversations.py's
+    DispatchContext.mock_tier), so there's no real policy layer/rule to
+    author here at all."""
     main, client = app_env
     signup = _signup(client, "frank")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-frank-1", "franks-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}], tier="allow")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-frank-1", "franks-mac")
 
     fake = FakeClient([FakeResponse(id="resp_1", output_text="done")])
     main._get_openai_client = lambda: fake
@@ -231,6 +218,8 @@ def test_conversation_shell_command_deny_tier_never_pauses(app_env):
         client,
         headers,
         tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["rm", "-rf", "/"]}},
+        mock=True,
+        mock_tier="deny",
     )
     assert r.status_code == 200
     body = r.json()
@@ -244,10 +233,7 @@ def test_conversation_shell_command_ask_tier_pauses_then_resumes(app_env):
     main, client = app_env
     signup = _signup(client, "gina")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-gina-1", "ginas-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="ask")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-gina-1", "ginas-mac")
 
     fake = FakeClient([FakeResponse(id="resp_2", output_text="ok, ran it")])
     main._get_openai_client = lambda: fake
@@ -257,6 +243,7 @@ def test_conversation_shell_command_ask_tier_pauses_then_resumes(app_env):
         headers,
         tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}},
         mock=True,
+        mock_tier="ask",
     ).json()
     assert paused["status"] == "pending_approval"
     assert paused["pending_approval"]["host"] == "ginas-mac"
@@ -288,17 +275,15 @@ def test_conversation_pending_approval_visible_and_resolvable_via_decide_endpoin
     other = _signup(client, "ivy3")
     other_headers = {"Authorization": f"Bearer {other['token']}"}
 
-    pair = _pair_and_connect_host(client, headers, "rk-hank3-1", "hanks-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="ask")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-hank3-1", "hanks-mac")
 
     fake = FakeClient([FakeResponse(id="resp_2", output_text="ok, ran it")])
     main._get_openai_client = lambda: fake
 
     paused = _step(
         client, headers,
-        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}}, mock=True,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}},
+        mock=True, mock_tier="ask",
     ).json()
     approval_id = paused["pending_approval"]["approval_id"]
 
@@ -367,17 +352,15 @@ def test_telegram_callback_resolves_pending_approval_and_resumes_conversation(ap
         user_id = main._resolve_user_id(db, f"Bearer {signup['token']}")
         db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("555", user_id))
 
-    pair = _pair_and_connect_host(client, headers, "rk-juan-1", "juans-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="ask")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-juan-1", "juans-mac")
 
     fake = FakeClient([FakeResponse(id="resp_tg", output_text="ok, ran it")])
     main._get_openai_client = lambda: fake
 
     paused = _step(
         client, headers,
-        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}}, mock=True,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm", "run"]}},
+        mock=True, mock_tier="ask",
     ).json()
     assert paused["status"] == "pending_approval"
     approval_id = paused["pending_approval"]["approval_id"]
@@ -397,81 +380,19 @@ def test_telegram_callback_resolves_pending_approval_and_resumes_conversation(ap
     assert len(fake.responses.calls) == 1  # only the follow-up hop after resuming -- the injected tool_call never needed a model call to pause
 
 
-def test_conversation_shell_command_cwd_scoped_tier_decision(app_env):
-    """_decide_tier threads args["path"] through as cwd -- a rule scoped to
-    one directory allows a call whose path matches it and denies (never
-    pauses) one that doesn't, purely from this service's own tier preview,
-    no daemon/mock dispatch needed to observe the decision."""
-    main, client = app_env
-    signup = _signup(client, "iris")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-iris-1", "iris-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(
-        client, headers, layer["id"], [{"whitelist": "^ls$"}], tier="allow", cwd={"whitelist": "^/home/iris(/.*)?$"}
-    )
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
-
-    fake = FakeClient([FakeResponse(id="resp_1", output_text="done"), FakeResponse(id="resp_2", output_text="done")])
-    main._get_openai_client = lambda: fake
-
-    allowed = _step(
-        client,
-        headers,
-        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["ls"], "path": "/home/iris/docs"}},
-        mock=True,
-    ).json()
-    assert allowed["status"] == "done"
-    assert json.loads(allowed["turn"]["aggregate"]["shell_command_calls"][0]["output"])["mock"] is True
-
-    denied = _step(
-        client,
-        headers,
-        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["ls"], "path": "/etc"}},
-        mock=True,
-    ).json()
-    assert denied["status"] == "done"
-    assert denied["turn"]["aggregate"]["shell_command_calls"][0]["output"] == "Denied by policy (no matching rule allows this call)."
-
-
-def test_conversation_shell_command_falls_back_to_presence_reported_cwd(app_env):
-    """When the model's own call doesn't override `path`, _decide_tier uses
-    the host's presence-reported cwd (its daemon's own homeRoot) as the
-    join base for a cwd-constrained rule -- no explicit path needed."""
-    main, client = app_env
-    signup = _signup(client, "jill")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-jill-1", "jills-mac", cwd="/home/jill")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(
-        client, headers, layer["id"], [{"whitelist": "^ls$"}], tier="allow", cwd={"whitelist": "^/home/jill(/.*)?$"}
-    )
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
-
-    fake = FakeClient([FakeResponse(id="resp_1", output_text="done")])
-    main._get_openai_client = lambda: fake
-
-    r = _step(
-        client, headers, tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["ls"]}}, mock=True
-    ).json()
-    assert r["status"] == "done"
-    assert json.loads(r["turn"]["aggregate"]["shell_command_calls"][0]["output"])["mock"] is True
-
-
 def test_conversation_shell_command_denied_by_user(app_env):
     main, client = app_env
     signup = _signup(client, "hank")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-hank-1", "hanks-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}], tier="ask")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-hank-1", "hanks-mac")
 
     fake = FakeClient([FakeResponse(id="resp_2", output_text="okay, skipped")])
     main._get_openai_client = lambda: fake
 
     paused = _step(
-        client, headers, tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm"]}}
+        client, headers,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm"]}},
+        mock=True, mock_tier="ask",
     ).json()
     assert paused["status"] == "pending_approval"
 
@@ -485,14 +406,13 @@ def test_conversation_rejects_message_while_in_flight(app_env):
     main, client = app_env
     signup = _signup(client, "ivy")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-ivy-1", "ivys-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}], tier="ask")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-ivy-1", "ivys-mac")
     main._get_openai_client = lambda: FakeClient([])
 
     paused = _step(
-        client, headers, tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm"]}}
+        client, headers,
+        tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["npm"]}},
+        mock=True, mock_tier="ask",
     ).json()
     assert paused["status"] == "pending_approval"
 
@@ -505,10 +425,7 @@ def test_conversation_default_host_used_for_ambiguous_call(app_env):
     signup = _signup(client, "jack")
     headers = {"Authorization": f"Bearer {signup['token']}"}
     _pair_and_connect_host(client, headers, "rk-jack-1", "jacks-laptop")
-    pair2 = _pair_and_connect_host(client, headers, "rk-jack-2", "jacks-mini")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^pwd$"}], tier="allow")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair2['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-jack-2", "jacks-mini")
 
     fake = FakeClient([FakeResponse(id="resp_1", output_text="done")])
     main._get_openai_client = lambda: fake
@@ -526,11 +443,12 @@ def test_conversation_default_host_used_for_ambiguous_call(app_env):
 
 
 def test_conversation_ambiguous_host_without_default_errors(app_env):
-    """Unlike a tool that resolves its own host directly (e.g. transfer_file),
-    run_shell_command's host resolution happens as a side effect of tier
-    decision (_decide_tier composes an unresolved host's policy as empty) --
-    an ambiguous host with no default therefore surfaces as a policy denial,
-    not a distinct "which host?" error message."""
+    """run_shell_command's host resolution happens inside
+    _dispatch_shell_command, BEFORE any daemon round trip is even
+    attempted -- an ambiguous host with no default now surfaces its own
+    distinct error message (never reaching the daemon at all), rather
+    than being conflated with a policy denial the way it was under the
+    old, locally-decided tier preview."""
     main, client = app_env
     signup = _signup(client, "karen")
     headers = {"Authorization": f"Bearer {signup['token']}"}
@@ -544,7 +462,9 @@ def test_conversation_ambiguous_host_without_default_errors(app_env):
         client, headers, tool_call={"name": "run_shell_command", "arguments": {"positional_args": ["pwd"]}}, mock=True
     ).json()
     output = r["turn"]["aggregate"]["shell_command_calls"][0]["output"]
-    assert output == "Denied by policy (no matching rule allows this call)."
+    assert output == (
+        "Shell command error: multiple machines connected (karens-laptop, karens-mini) -- specify which one via 'host'."
+    )
 
 
 def test_conversation_model_initiated_tool_call(app_env):
@@ -554,10 +474,7 @@ def test_conversation_model_initiated_tool_call(app_env):
     main, client = app_env
     signup = _signup(client, "laura")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    pair = _pair_and_connect_host(client, headers, "rk-laura-1", "lauras-mac")
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{"whitelist": "^pwd$"}], tier="allow")
-    client.put(f"/policy-layers/{layer['id']}/hosts/{pair['host_id']}", headers=headers)
+    _pair_and_connect_host(client, headers, "rk-laura-1", "lauras-mac")
 
     first_hop = FakeResponse(
         id="resp_1",

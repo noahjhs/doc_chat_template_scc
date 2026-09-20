@@ -16,7 +16,6 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from policy import compose_policy, match_policy
 import conversations
 from models import (
     AuthResponse,
@@ -255,7 +254,7 @@ def _resolve_user_id(db, authorization: str) -> int | None:
 # that prove it) lives in SQLite's host_pairings table -- see db.py's own
 # schema comment for why this used to be an in-memory-only dict, and why
 # that was the actual cause of daemons needing to be manually re-paired
-# after every routine redeploy (an auth_service restart lost it, even
+# after every routine redeploy (an casper_service restart lost it, even
 # though the daemon's own device_token was still perfectly valid).
 #
 # Live reachability (where a paired host is CURRENTLY reachable, and its
@@ -448,10 +447,10 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
     un-composed (a list of (layer_id, rules) pairs) -- composition happens
     per-call via policy.compose_policy, same as everywhere else this
     project composes a host's policy. cwd is the host's own daemon-reported
-    confined directory (see report_host_presence) -- conversations.py's
-    _decide_tier uses it as the join base for a rule's best-effort "."
-    path_resolution preview when the model's own call doesn't explicitly
-    override it via `path`."""
+    confined directory (see report_host_presence) -- kept here for display/
+    debugging purposes; no server-side policy preview consults it anymore
+    (that matching now only ever happens daemon-side -- see
+    conversations.py's own module docstring)."""
     rows = db.execute(
         "SELECT h.id, h.routing_key, uh.label FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id WHERE uh.user_id = ?",
         (user_id,),
@@ -993,15 +992,19 @@ def reorder_policy_layer_rules(
         return _policy_layer_info(db, policy_layer_id)
 
 
-# --- Policy evaluation (browser/harness-facing, no daemon involved) ------
-# The fast/deterministic bottom of the testing pyramid: evaluates one
-# hypothetical call against an ad hoc composition of the caller's own
-# policy layers, with no side effects and no daemon round trip. Distinct
-# from GET /hosts/policy-layers below (the daemon's own, host-scoped,
-# always-every-attached-layer fetch) -- eval lets the caller compose
-# whichever arbitrary subset of layers it wants, exactly the "policy is a
-# layer composition, layer IDs may be ad hoc" vocabulary this project
-# settled on.
+# --- Policy evaluation (browser/harness-facing, ROUTES TO A REAL DAEMON) --
+# No local evaluation attempt of any kind happens here anymore -- this asks
+# a REAL, connected daemon (the same one run_shell_command itself would
+# dispatch to) to evaluate the hypothetical call, via its own eval_policy
+# action (agent/internal/commands/policy.go's runEvalPolicy), using the
+# daemon's own authoritative matcher. The caller still composes whichever
+# arbitrary/ad hoc subset of their own policy layers they want (exactly the
+# "policy is a layer composition, layer IDs may be ad hoc" vocabulary this
+# project settled on) -- those layer definitions are sent inline on the
+# request, never assumed to be attached to the target host. If the named
+# host isn't currently connected, or its daemon can't be reached, this
+# fails loudly (502) -- there is deliberately no silent fallback to a local
+# match.
 @app.post("/policies/eval", response_model=PolicyEvalResponse)
 def eval_policy(body: PolicyEvalRequest, authorization: str = Header(default="")):
     with get_db() as db:
@@ -1011,11 +1014,47 @@ def eval_policy(body: PolicyEvalRequest, authorization: str = Header(default="")
         for policy_layer_id in body.policy_layer_ids:
             if not _user_owns_policy_layer(db, user_id, policy_layer_id):
                 raise HTTPException(status_code=404, detail="Policy layer not found.")
-        layers = [(policy_layer_id, _policy_layer_rules(db, policy_layer_id)) for policy_layer_id in body.policy_layer_ids]
-    composed = compose_policy(layers)
-    options = [o.model_dump() for o in body.options]
-    matched_layer_id, matched_rule = match_policy(composed, body.positional_args, options, body.cwd)
-    tier = matched_rule.tier if matched_rule else "deny"
+        policy_layers = [
+            HostPolicyLayerInfo(
+                id=pid,
+                name=db.execute("SELECT name FROM policy_layers WHERE id = ?", (pid,)).fetchone()["name"],
+                rules=_policy_layer_rules(db, pid),
+            )
+            for pid in body.policy_layer_ids
+        ]
+        configs = _connected_host_configs(db, user_id)
+
+    resolved_host, config, err = conversations.resolve_host(configs, body.host, None)
+    if err:
+        raise HTTPException(status_code=404, detail=err)
+    try:
+        response = requests.post(
+            f"{config['url']}/api/command",
+            json={
+                "action": "eval_policy",
+                "positional_args": body.positional_args,
+                "options": [o.model_dump() for o in body.options],
+                "cwd": body.cwd,
+                "policy_layers": [pl.model_dump() for pl in policy_layers],
+            },
+            headers={"X-API-Key": config["api_key"]},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Couldn't reach host {resolved_host!r}: {e}") from e
+    if response.status_code == 401:
+        raise HTTPException(status_code=502, detail=f"Host {resolved_host!r} rejected its own API key -- re-pair it.")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=conversations.daemon_error_detail(response, f"HTTP {response.status_code}"))
+
+    result = response.json()
+    tier = result.get("tier") or "deny"
+    matched_layer_id = result.get("matched_layer_id") or None
+    matched_rule_id = result.get("matched_rule_id") or None
+    matched_rule = None
+    if matched_layer_id is not None and matched_rule_id is not None:
+        layer = next((pl for pl in policy_layers if pl.id == matched_layer_id), None)
+        matched_rule = next((r for r in layer.rules if r.id == matched_rule_id), None) if layer else None
     return PolicyEvalResponse(tier=tier, matched_layer_id=matched_layer_id, matched_rule=matched_rule)
 
 
@@ -1276,11 +1315,12 @@ def step_conversation(body: ConversationStepRequest, authorization: str = Header
         configs=configs,
         default_host=body.default_host,
         mock=body.mock,
+        mock_tier=body.mock_tier,
         system_prompt=system_prompt,
         read_server_storage=read_storage,
         write_server_storage=write_storage,
         create_pending_approval=lambda description, turn_snapshot: _create_pending_approval_record(
-            user_id, description, turn_snapshot, body.default_host, body.mock
+            user_id, description, turn_snapshot, body.default_host, body.mock, body.mock_tier
         ),
     )
     return _step_response(turn, body.approval_decision, ctx)
@@ -1314,21 +1354,25 @@ def _step_response(turn: dict, approval_decision: str | None, ctx: "conversation
 # it conflated "which host executes a command" with "which screen a human
 # happens to be watching").
 def _create_pending_approval_record(
-    user_id: int, description: str, turn: dict, default_host: str | None, mock: bool
+    user_id: int, description: str, turn: dict, default_host: str | None, mock: bool, mock_tier: str
 ) -> str:
     """Self-contained (opens its own db connection) since every caller --
     a fresh /conversations/step call, or a resume in _resume_pending_approval
     below -- invokes this via DispatchContext.create_pending_approval from
     OUTSIDE any db connection it's itself holding open (matching
-    step_conversation's own db-work-then-network-call ordering)."""
+    step_conversation's own db-work-then-network-call ordering). mock_tier
+    persists the explicit tier a mocked call was paused under (see
+    conversations.py's DispatchContext.mock_tier), so resuming it later
+    simulates the same decision, not a fresh (and now policy-eval-free)
+    one."""
     approval_id = secrets.token_urlsafe(12)
     with get_db() as db:
         db.execute(
             """
-            INSERT INTO pending_approvals (id, user_id, description, turn, default_host, mock)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO pending_approvals (id, user_id, description, turn, default_host, mock, mock_tier)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (approval_id, user_id, description, json.dumps(turn), default_host, int(mock)),
+            (approval_id, user_id, description, json.dumps(turn), default_host, int(mock), mock_tier),
         )
     _send_approval_telegram(user_id, description, approval_id)
     return approval_id
@@ -1391,11 +1435,12 @@ def _resume_pending_approval(row, decision: str) -> ConversationStepResponse:
         configs=configs,
         default_host=row["default_host"],
         mock=bool(row["mock"]),
+        mock_tier=row["mock_tier"],
         system_prompt=system_prompt,
         read_server_storage=read_storage,
         write_server_storage=write_storage,
         create_pending_approval=lambda description, turn_snapshot: _create_pending_approval_record(
-            user_id, description, turn_snapshot, row["default_host"], bool(row["mock"])
+            user_id, description, turn_snapshot, row["default_host"], bool(row["mock"]), row["mock_tier"]
         ),
     )
     return _step_response(turn, decision, ctx)
@@ -1568,7 +1613,7 @@ async def telegram_webhook(request: Request):
 # anywhere yet (nothing in conversations.py's tool-calling loop reads
 # allow_configure_* today). "Command sets"/"Apps"/"Local agents" don't
 # correspond to any existing modeled concept in this codebase the way
-# Hosts/Environments do (see auth_service/db.py's hosts/environments
+# Hosts/Environments do (see casper_service/db.py's hosts/environments
 # tables) -- wiring real enforcement for those three needs its own design
 # pass first, so this deliberately stops at "saved preference" for now.
 

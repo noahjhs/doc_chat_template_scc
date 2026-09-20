@@ -1,5 +1,5 @@
 """End-to-end harness flow tests -- imports harness/client.py directly
-(never the CLI, never a subprocess) and drives it against auth_service's
+(never the CLI, never a subprocess) and drives it against casper_service's
 FastAPI app through an in-process fastapi.testclient.TestClient (the same
 one test_conversations.py/test_policies.py already use), so this exercises
 the exact same code path a real `harness` CLI invocation over a real
@@ -18,7 +18,9 @@ import tempfile
 import pytest
 import yaml
 
-AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
+from fake_daemon import FakeDaemon
+
+CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
 
 
 class FakeItem:
@@ -54,10 +56,10 @@ class FakeClient:
 
 @pytest.fixture()
 def harness_env():
-    """Fresh SQLite-file-per-test auth_service app, wired to harness/
+    """Fresh SQLite-file-per-test casper_service app, wired to harness/
     client.py through an in-process TestClient -- no real socket, no real
     subprocess. Yields (main_module, harness_client_module)."""
-    sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.insert(0, os.path.abspath(CASPER_SERVICE_DIR))
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
@@ -73,7 +75,7 @@ def harness_env():
             yield auth_main, hc
         finally:
             hc.set_client(None)
-    sys.path.remove(os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
     for mod in ("main", "db", "models", "policy", "conversations"):
         sys.modules.pop(mod, None)
 
@@ -89,6 +91,14 @@ def _write_yaml(tmp_path, spec: dict) -> str:
 
 
 def test_full_flow_signup_through_eval(harness_env, tmp_path):
+    """/policies/eval now routes to a real, connected daemon (see
+    casper_service/main.py's eval_policy) -- FakeDaemon stands in for one,
+    scripted to return exactly the verdict each call should get, never
+    asked to actually match anything itself (that's the Go daemon's own
+    tested concern -- see agent/internal/commands/policy_test.go and
+    tests/test_policy_parity.py). This test is about the ROUTING/plumbing
+    (host resolution, response reshaping back into matched_rule), not
+    matching semantics."""
     _main, hc = harness_env
 
     signup = hc.signup(DOMAIN, "flowuser", "correct-horse-battery")
@@ -110,31 +120,45 @@ def test_full_flow_signup_through_eval(harness_env, tmp_path):
     assert len(layer["rules"]) == 2
 
     # Re-applying is idempotent -- same layer id, same rule count, not
-    # duplicated.
+    # duplicated, though re-applying does replace the rule rows (new rule
+    # ids) -- allow_rule_id is captured AFTER this, from the rules that
+    # actually persist.
     reapplied = hc.apply_policy_layer(DOMAIN, token, yaml_path)
     assert reapplied["id"] == layer["id"]
     assert len(reapplied["rules"]) == 2
+    allow_rule_id = reapplied["rules"][0]["id"]
 
     pair = hc.pair_host(DOMAIN, token, "rk-flow-1", hostname="flow-host")
     assert pair["label"] == "flow-host"
 
     hc.add_policy_layer_to_host(DOMAIN, token, layer["id"], pair["host_id"])
 
-    matching = hc.eval_policy(DOMAIN, token, [layer["id"]], positional_args=["npm", "run"])
-    assert matching["tier"] == "allow"
-
-    non_matching = hc.eval_policy(DOMAIN, token, [layer["id"]], positional_args=["rm", "-rf"])
-    assert non_matching["tier"] == "deny"
-
     hosts = hc.list_hosts(DOMAIN, token)["hosts"]
     assert hosts[0]["connected"] is False
 
-    presence = hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/flow", "/tmp/ws")
-    assert presence["connected"] is True
+    with FakeDaemon(
+        queue=[
+            (200, {"tier": "allow", "matched_layer_id": layer["id"], "matched_rule_id": allow_rule_id}),
+            (200, {"tier": "deny"}),
+        ]
+    ) as daemon:
+        presence = hc.report_host_presence(DOMAIN, pair["device_token"], daemon.url, "/tmp/ws")
+        assert presence["connected"] is True
 
-    hosts_after = hc.list_hosts(DOMAIN, token)["hosts"]
-    assert hosts_after[0]["connected"] is True
-    assert hosts_after[0]["cwd"] == "/tmp/ws"
+        hosts_after = hc.list_hosts(DOMAIN, token)["hosts"]
+        assert hosts_after[0]["connected"] is True
+        assert hosts_after[0]["cwd"] == "/tmp/ws"
+
+        matching = hc.eval_policy(DOMAIN, token, [layer["id"]], positional_args=["npm", "run"], host="flow-host")
+        assert matching["tier"] == "allow"
+        assert matching["matched_layer_id"] == layer["id"]
+        assert matching["matched_rule"]["id"] == allow_rule_id
+
+        non_matching = hc.eval_policy(DOMAIN, token, [layer["id"]], positional_args=["rm", "-rf"], host="flow-host")
+        assert non_matching["tier"] == "deny"
+        assert non_matching["matched_rule"] is None
+
+        assert [req["action"] for req in daemon.requests] == ["eval_policy", "eval_policy"]
 
 
 def test_mock_call_tool_flow(harness_env):
@@ -144,9 +168,6 @@ def test_mock_call_tool_flow(harness_env):
 
     pair = hc.pair_host(DOMAIN, token, "rk-toolflow-1", hostname="toolflow-host")
     hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/toolflow")
-    layer = hc.create_policy_layer(DOMAIN, token, "toolflow layer")
-    hc.create_policy_layer_rule(DOMAIN, token, layer["id"], [{"whitelist": "^pwd$"}], [], "allow")
-    hc.add_policy_layer_to_host(DOMAIN, token, layer["id"], pair["host_id"])
 
     main._get_openai_client = lambda: FakeClient([FakeResponse(id="resp_1", output_text="Ran it.")])
 
@@ -164,13 +185,8 @@ def test_mock_chat_flow_with_approval(harness_env, tmp_path):
     signup = hc.signup(DOMAIN, "chatflowuser", "correct-horse-battery")
     token = signup["token"]
 
-    yaml_path = _write_yaml(
-        tmp_path, {"name": "rm ask", "rules": [{"tier": "ask", "positional": [{"whitelist": "^rm$"}]}]}
-    )
-    layer = hc.apply_policy_layer(DOMAIN, token, yaml_path)
     pair = hc.pair_host(DOMAIN, token, "rk-chatflow-1", hostname="chatflow-host")
     hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/chatflow")
-    hc.add_policy_layer_to_host(DOMAIN, token, layer["id"], pair["host_id"])
 
     first_hop = FakeResponse(
         id="resp_1",
@@ -188,7 +204,7 @@ def test_mock_chat_flow_with_approval(harness_env, tmp_path):
     fake = FakeClient([first_hop, second_hop])
     main._get_openai_client = lambda: fake
 
-    paused = hc.chat_step(DOMAIN, token, message="please delete scratch.txt", mock=True)
+    paused = hc.chat_step(DOMAIN, token, message="please delete scratch.txt", mock=True, mock_tier="ask")
     assert paused["status"] == "pending_approval"
     assert paused["pending_approval"]["host"] == "chatflow-host"
 
@@ -201,7 +217,7 @@ def test_mock_chat_flow_with_approval(harness_env, tmp_path):
     assert output["mock"] is True
 
 
-def test_pending_approval_answerable_from_any_session_via_the_durable_queue(harness_env, tmp_path):
+def test_pending_approval_answerable_from_any_session_via_the_durable_queue(harness_env):
     """The durable, per-user pending-approval queue (replacing the removed
     "attended host" native-dialog relay): a pause from one call is
     discoverable and resolvable via list_pending_approvals/
@@ -216,16 +232,12 @@ def test_pending_approval_answerable_from_any_session_via_the_durable_queue(harn
     pair = hc.pair_host(DOMAIN, token, "rk-attended-dispatch-1", hostname="dispatch-host")
     hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/dispatch")
 
-    yaml_path = _write_yaml(
-        tmp_path, {"name": "rm ask", "rules": [{"tier": "ask", "positional": [{"whitelist": "^rm$"}]}]}
-    )
-    layer = hc.apply_policy_layer(DOMAIN, token, yaml_path)
-    hc.add_policy_layer_to_host(DOMAIN, token, layer["id"], pair["host_id"])
-
     fake = FakeClient([FakeResponse(id="resp_1", output_text="Ran it.")])
     main._get_openai_client = lambda: fake
 
-    paused = hc.call_tool(DOMAIN, token, "run_shell_command", {"positional_args": ["rm", "scratch.txt"]}, mock=True)
+    paused = hc.call_tool(
+        DOMAIN, token, "run_shell_command", {"positional_args": ["rm", "scratch.txt"]}, mock=True, mock_tier="ask"
+    )
     assert paused["status"] == "pending_approval"
     approval_id = paused["pending_approval"]["approval_id"]
     assert approval_id

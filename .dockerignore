@@ -9,7 +9,7 @@ __pycache__
 build/
 dist/
 vendor/
-auth_service/
+casper_service/
 tests/
 .streamlit/secrets.toml
 command_log.txt

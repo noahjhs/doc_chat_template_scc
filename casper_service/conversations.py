@@ -1,5 +1,5 @@
 """The tool-calling orchestration loop backing POST /conversations/step
-(auth_service/main.py) -- originally a Streamlit page's own tool-calling
+(casper_service/main.py) -- originally a Streamlit page's own tool-calling
 loop (_process_turn/_dispatch_tool_call/call_local_agent/
 call_transfer_file), moved server-side and made stateless as part of
 deprecating that GUI in favor of a CLI+library test harness. Key design
@@ -33,7 +33,7 @@ from typing import Any, Callable
 
 import requests
 
-from policy import compose_policy, describe_rule, match_policy
+from policy import compose_policy, describe_rule
 
 MODEL = "gpt-4.1-mini"
 
@@ -54,7 +54,7 @@ class DispatchContext:
     read_server_storage/write_server_storage close over the calling user's
     own storage directory and cap-check logic (see main.py's
     _make_storage_io) -- kept as callbacks rather than passing a raw path
-    so this module never needs to know auth_service's storage layout or
+    so this module never needs to know casper_service's storage layout or
     STORAGE_CAP_BYTES itself. create_pending_approval likewise closes over
     the calling user_id (see main.py's _create_pending_approval_record) --
     called with (description, turn_snapshot), returns an approval_id; the
@@ -74,6 +74,19 @@ class DispatchContext:
     # model's own default behavior, unchanged from before this field
     # existed.
     system_prompt: str = ""
+    # Explicit tier to simulate for a MOCKED run_shell_command call --
+    # consulted only when mock is True. Mocking never evaluates policy
+    # itself (see this module's own docstring): the caller supplies the
+    # tier outright, and this only simulates (a) what the daemon's own
+    # dispatch result would have been (for "allow", or an approved resend)
+    # and (b) that the call is pausing for approval (for "ask") -- (b)'s
+    # actual resolution still goes through the real, unmocked
+    # pending_approvals/create_pending_approval machinery above,
+    # completely unaffected by this flag. Defaults to "allow" -- the
+    # common case for a mocked call is "let it run and show me the canned
+    # result", same posture today's mock branch already had before there
+    # was any tier to pick.
+    mock_tier: str = "allow"
 
 
 def _empty_aggregate() -> dict:
@@ -271,7 +284,7 @@ def build_tools(configs: dict[str, dict]) -> list[dict]:
     return tools
 
 
-def _daemon_error_detail(response, fallback: str) -> str:
+def daemon_error_detail(response, fallback: str) -> str:
     try:
         detail = response.json().get("detail")
     except ValueError:
@@ -294,13 +307,13 @@ def _fetch_local_json(config: dict, action: str, **kwargs) -> dict:
         if response.status_code == 401:
             return {"success": False, "stdout": "", "stderr": "Invalid API key."}
         if response.status_code >= 400:
-            return {"success": False, "stdout": "", "stderr": _daemon_error_detail(response, f"HTTP {response.status_code}")}
+            return {"success": False, "stdout": "", "stderr": daemon_error_detail(response, f"HTTP {response.status_code}")}
         return response.json()
     except requests.RequestException as e:
         return {"success": False, "stdout": "", "stderr": str(e)}
 
 
-def _resolve_host(
+def resolve_host(
     configs: dict[str, dict], host: str | None, default_host: str | None
 ) -> tuple[str | None, dict | None, str | None]:
     """host selection isn't in any tool schema's "required" list (there's no
@@ -328,28 +341,89 @@ def _resolve_host(
     return host, config, None
 
 
-def _call_shell_command(configs, positional_args, options, host, default_host, path, mock) -> str:
-    _resolved_host, config, err = _resolve_host(configs, host, default_host)
+def _dispatch_shell_command(
+    configs: dict[str, dict],
+    args: dict,
+    host: str | None,
+    default_host: str | None,
+    mock: bool,
+    mock_tier: str,
+    approved: bool,
+) -> tuple[str, str, str | None]:
+    """The ONE place a run_shell_command call round-trips to a daemon --
+    replaces the old split (a local tier decision via match_policy, THEN a
+    separate dispatch call for "allow") with a single call that returns
+    everything: (tier, output_text, resolved_host). No local policy
+    evaluation happens here at all -- the daemon decides allow/ask/deny
+    authoritatively (see agent/internal/commands/policy.go's
+    runRunShellCommand); this only forwards the call and interprets its
+    verdict.
+
+    approved=True marks a RESEND of a call the user already approved via
+    the durable pending_approvals flow (see run_turn's own resume branch)
+    -- carried straight through to the daemon's own Request.Approved,
+    consulted by the daemon ONLY when it re-matches this exact call to
+    tier "ask" again; a policy change that's since made it "deny" is never
+    overridden by an old approval, and the daemon has no memory of the
+    earlier "ask" itself.
+
+    mock never evaluates policy either (see DispatchContext.mock_tier) --
+    it takes the caller-supplied mock_tier outright and simulates ONLY
+    what the daemon's own dispatch result would have been (for "allow"/an
+    approved resend) or that the call is pausing (for "ask", with an
+    unapproved resend never actually happening for a mocked call in
+    practice, but handled the same way regardless, for symmetry with the
+    real branch below)."""
+    resolved_host, config, err = resolve_host(configs, host, default_host)
     if err:
-        return f"Shell command error: {err}"
+        return "deny", f"Shell command error: {err}", resolved_host
+
     if mock:
-        return json.dumps(
-            {"mock": True, "action": "run_shell_command", "positional_args": positional_args, "options": options, "path": path}
+        if mock_tier == "deny":
+            return "deny", "Denied by policy (no matching rule allows this call).", resolved_host
+        if mock_tier == "ask" and not approved:
+            return "ask", "", resolved_host
+        return (
+            "allow",
+            json.dumps(
+                {
+                    "mock": True,
+                    "action": "run_shell_command",
+                    "positional_args": args.get("positional_args"),
+                    "options": args.get("options"),
+                    "path": args.get("path"),
+                }
+            ),
+            resolved_host,
         )
+
     try:
         response = requests.post(
             f"{config['url']}/api/command",
-            json={"action": "run_shell_command", "positional_args": positional_args, "options": options, "path": path},
+            json={
+                "action": "run_shell_command",
+                "positional_args": args.get("positional_args") or [],
+                "options": args.get("options") or [],
+                "path": args.get("path"),
+                "approved": approved,
+            },
             headers={"X-API-Key": config["api_key"]},
             timeout=15,
         )
-        if response.status_code == 401:
-            return "Shell command error: invalid API key."
-        if response.status_code >= 400:
-            return f"Shell command error: {_daemon_error_detail(response, f'HTTP {response.status_code}')}"
-        return json.dumps(response.json())
     except requests.RequestException as e:
-        return f"Shell command error: {e}"
+        return "deny", f"Shell command error: {e}", resolved_host
+    if response.status_code == 401:
+        return "deny", "Shell command error: invalid API key.", resolved_host
+    if response.status_code >= 400:
+        return "deny", f"Shell command error: {daemon_error_detail(response, f'HTTP {response.status_code}')}", resolved_host
+
+    result = response.json()
+    tier = result.get("tier") or "deny"
+    if tier == "deny":
+        return "deny", "Denied by policy (no matching rule allows this call).", resolved_host
+    if tier == "ask" and not approved:
+        return "ask", "", resolved_host
+    return "allow", json.dumps(result), resolved_host
 
 
 def _call_transfer_file(configs, source, source_path, destination, destination_path, ctx: DispatchContext) -> str:
@@ -380,7 +454,7 @@ def _call_transfer_file(configs, source, source_path, destination, destination_p
         content = read_result.get("stdout", "")
 
     if destination == SERVER_STORAGE:
-        # Server storage is flat (no subdirectories -- see auth_service's
+        # Server storage is flat (no subdirectories -- see casper_service's
         # _safe_filename), so a destination_path with directory components
         # just contributes its basename.
         filename = destination_path.replace("\\", "/").rsplit("/", 1)[-1]
@@ -410,48 +484,21 @@ def _describe_call_args(positional_args: list[str], options: list[dict]) -> str:
 
 
 def _dispatch_tool_call(call: dict, ctx: DispatchContext, aggregate: dict) -> str:
-    """Executes ONE already-decided tool call -- never an ask-tier
-    run_shell_command still awaiting approval; _drain_pending_calls
-    intercepts those before they ever reach here."""
+    """Executes ONE already-decided tool call -- transfer_file only.
+    run_shell_command never goes through here: it's dispatched directly by
+    _drain_pending_calls (a fresh call) or run_turn's own resume branch
+    (an approved resend), both via _dispatch_shell_command, since those are
+    the only two places that know whether a given dispatch is a fresh
+    attempt or an approved resend."""
     args = json.loads(call["arguments"])
     if call["name"] == "transfer_file":
         output = _call_transfer_file(
             ctx.configs, args.get("source"), args.get("source_path"), args.get("destination"), args.get("destination_path"), ctx
         )
         aggregate["transfer_calls"].append({"args": args, "output": output})
-    elif call["name"] == "run_shell_command":
-        output = _call_shell_command(
-            ctx.configs,
-            args.get("positional_args") or [],
-            args.get("options") or [],
-            host=args.get("host"),
-            default_host=ctx.default_host,
-            path=args.get("path"),
-            mock=ctx.mock,
-        )
-        aggregate["shell_command_calls"].append({"args": args, "output": output})
     else:
         output = f"Unknown tool: {call['name']}"
     return output
-
-
-def _decide_tier(resolved_config: dict | None, args: dict) -> str:
-    """Finds the first matching rule in the already-composed policy of the
-    host resolve_host resolved (None if that failed -- an unresolved host
-    has no policy to check, so this falls back to "deny", same "absence
-    means deny" posture the daemon itself uses) and returns its tier. cwd
-    is the call's own path (args["path"], already threaded through by
-    run_shell_command's own tool schema) when the model explicitly
-    overrode it, else resolved_config's own cached cwd -- the daemon's
-    reported homeRoot (see main.py's report_host_presence), kept fresh
-    without a live round-trip on every call (see
-    agent/internal/config/presence.go's own doc comment). Still only ever
-    a best-effort preview (see match_policy's own docstring) -- the Go
-    daemon's own resolvePath-derived cwd is what's actually enforced."""
-    composed = compose_policy(resolved_config["policy_layers"]) if resolved_config else []
-    cwd = args.get("path") or (resolved_config or {}).get("cwd") or ""
-    _, matched_rule = match_policy(composed, args.get("positional_args") or [], args.get("options") or [], cwd)
-    return matched_rule.tier if matched_rule else "deny"
 
 
 def _drain_pending_calls(turn: dict, ctx: DispatchContext) -> bool:
@@ -459,19 +506,17 @@ def _drain_pending_calls(turn: dict, ctx: DispatchContext) -> bool:
     is empty (returns False) or a run_shell_command needing approval pauses
     it (sets turn["awaiting_approval"] and returns True) -- the call stays
     at the front of pending_calls in that case, popped only once resolved
-    (see run_turn's own resume branch)."""
+    (see run_turn's own resume branch). run_shell_command makes exactly one
+    round trip to the daemon (see _dispatch_shell_command) -- no local
+    policy evaluation happens here at all; the daemon's own verdict is
+    what decides allow/ask/deny."""
     while turn["pending_calls"]:
         call = turn["pending_calls"][0]
         if call["name"] == "run_shell_command":
             args = json.loads(call["arguments"])
-            resolved_host, resolved_config, _err = _resolve_host(ctx.configs, args.get("host"), ctx.default_host)
-            tier = _decide_tier(resolved_config, args)
-            if tier == "deny":
-                output = "Denied by policy (no matching rule allows this call)."
-                turn["aggregate"]["shell_command_calls"].append({"args": args, "output": output})
-                turn["outputs"].append({"type": "function_call_output", "call_id": call["call_id"], "output": output})
-                turn["pending_calls"].pop(0)
-                continue
+            tier, output, resolved_host = _dispatch_shell_command(
+                ctx.configs, args, args.get("host"), ctx.default_host, ctx.mock, ctx.mock_tier, approved=False
+            )
             if tier == "ask":
                 positional_args = args.get("positional_args") or []
                 binary = positional_args[0] if positional_args else ""
@@ -491,7 +536,10 @@ def _drain_pending_calls(turn: dict, ctx: DispatchContext) -> bool:
                 }
                 turn["awaiting_approval"]["approval_id"] = ctx.create_pending_approval(description, turn)
                 return True
-            # tier == "allow" -- fall through to dispatch below.
+            turn["aggregate"]["shell_command_calls"].append({"args": args, "output": output})
+            turn["outputs"].append({"type": "function_call_output", "call_id": call["call_id"], "output": output})
+            turn["pending_calls"].pop(0)
+            continue
         output = _dispatch_tool_call(call, ctx, turn["aggregate"])
         turn["outputs"].append({"type": "function_call_output", "call_id": call["call_id"], "output": output})
         turn["pending_calls"].pop(0)
@@ -539,10 +587,19 @@ def run_turn(turn: dict, approval_decision: str | None, ctx: DispatchContext, cl
             turn["awaiting_approval"] = None
             if approval_decision == "deny":
                 output = "Denied by user."
-                turn["aggregate"]["shell_command_calls"].append({"args": pending["args"], "output": output})
             else:
-                call = {"call_id": pending["call_id"], "name": "run_shell_command", "arguments": json.dumps(pending["args"])}
-                output = _dispatch_tool_call(call, ctx, turn["aggregate"])
+                # RESEND the identical call with Approved=true -- the
+                # daemon re-checks its own policy fresh (it remembers
+                # nothing about the earlier "ask") and only executes if
+                # the call still matches an "ask" (or now "allow") rule; a
+                # policy change to "deny" since the ask always wins
+                # regardless of this approval (_dispatch_shell_command
+                # already produces the right denial text for that case).
+                args = pending["args"]
+                _tier, output, _resolved_host = _dispatch_shell_command(
+                    ctx.configs, args, args.get("host"), ctx.default_host, ctx.mock, ctx.mock_tier, approved=True
+                )
+            turn["aggregate"]["shell_command_calls"].append({"args": pending["args"], "output": output})
             turn["outputs"].append({"type": "function_call_output", "call_id": pending["call_id"], "output": output})
             turn["pending_calls"].pop(0)
             approval_decision = None  # only ever applies to the one call that was actually paused

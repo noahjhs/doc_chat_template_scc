@@ -15,7 +15,7 @@ import (
 // (see routingkey.go). Called once per pairing; from then on the daemon
 // never touches the browser's token again, so a future website login can't
 // disturb an already-paired identity. A routing_key can be paired to
-// several different accounts at once (see auth_service/main.py's
+// several different accounts at once (see casper_service/main.py's
 // _pair_host) -- this always succeeds for a well-formed token, no conflict
 // case. os.Hostname() is best-effort/cosmetic only -- a blank value just
 // means the paired host shows up unnamed until the user gives it a label.
@@ -89,7 +89,7 @@ func VerifyHostSession(authDomain, deviceToken string) VerifyResult {
 // UnpairHost POSTs to the auth service's /hosts/unpair endpoint -- mirrors
 // the old RevokeSession. Self-service deregistration: clears this host's
 // attachment, but never touches the user's remembered relationship to it
-// (see auth_service/main.py's unpair_host).
+// (see casper_service/main.py's unpair_host).
 func UnpairHost(authDomain, deviceToken string) {
 	req, err := http.NewRequest(http.MethodPost, BaseURL(authDomain)+"/hosts/unpair", bytes.NewReader(nil))
 	if err != nil {

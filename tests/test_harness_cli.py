@@ -6,7 +6,7 @@ new here -- the CLI layer had no automated coverage at all before this,
 so real bugs found by hand this session (the `-dev`/`-d` short-option
 collision, Typer 0.27 vendoring its own private Click exception classes)
 went undetected until manual testing. Drives the exact same in-process
-auth_service TestClient wiring test_harness_flows.py uses (client.set_client)
+casper_service TestClient wiring test_harness_flows.py uses (client.set_client)
 -- no real network, no live server."""
 
 import json
@@ -18,7 +18,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
+CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
 DOMAIN = "test-auth.invalid"  # ignored entirely once client.set_client() is active
 
 PASSWORD = "correct-horse-battery-staple"
@@ -26,13 +26,13 @@ PASSWORD = "correct-horse-battery-staple"
 
 @pytest.fixture()
 def harness_env(tmp_path, monkeypatch):
-    """Wires harness.cli/harness.client to an in-process auth_service
+    """Wires harness.cli/harness.client to an in-process casper_service
     TestClient (same mechanism tests/test_harness_flows.py uses) AND
     isolates every on-disk state file (session, known domains, chat
     state, readline history) into tmp_path, so tests never touch the
     real ~/.casper-harness. Yields (cli module, client module, CliRunner,
-    auth_service's own main module -- for patching _get_openai_client)."""
-    sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
+    casper_service's own main module -- for patching _get_openai_client)."""
+    sys.path.insert(0, os.path.abspath(CASPER_SERVICE_DIR))
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
@@ -53,7 +53,7 @@ def harness_env(tmp_path, monkeypatch):
             yield harness_cli, harness_client, CliRunner(), auth_main
         finally:
             harness_client.set_client(None)
-    sys.path.remove(os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
     for mod in ("main", "db", "models", "policy", "conversations"):
         sys.modules.pop(mod, None)
 
@@ -201,20 +201,16 @@ def _pause_via_call_tool(cli, hc, domain, token, username, host_label="pausehost
     just paused and been killed before finishing the approval prompt (see
     the matching _save_chat_state call added right where chat detects a
     pause, before the -- possibly long-lived, possibly interrupted --
-    resolution prompt)."""
+    resolution prompt). mock_tier="ask" is what actually produces the
+    pause -- mocking never evaluates policy (see conversations.py's
+    DispatchContext.mock_tier), so no real policy layer/rule needs
+    authoring here at all; pairing + presence still matter, since host
+    resolution (which host the pause is attributed to) is real."""
     pair = hc.pair_host(domain, token, f"rk-{username}", hostname=host_label)
     hc.report_host_presence(domain, pair["device_token"], f"https://relay.example/agent/{username}")
-    layer = hc.create_policy_layer(domain, token, f"{username}-ask-layer")
-    hc.create_policy_layer_rule(
-        domain, token, layer["id"], positional_constraints=[{"whitelist": "^rm$"}], option_constraints=[], tier="ask"
+    paused = hc.call_tool(
+        domain, token, "run_shell_command", {"positional_args": ["rm"]}, mock=True, mock_tier="ask", default_host=host_label
     )
-    hc.add_policy_layer_to_host(domain, token, layer["id"], pair["host_id"])
-    # A single positional_arg matching the rule's single positional
-    # constraint exactly -- a length mismatch (e.g. ["rm", "x"] against a
-    # one-constraint rule) falls through to no match at all (tier
-    # resolves to deny, not ask), which drains and dispatches immediately
-    # instead of pausing, needing a real (unmocked) OpenAI follow-up hop.
-    paused = hc.call_tool(domain, token, "run_shell_command", {"positional_args": ["rm"]}, mock=True, default_host=host_label)
     cli.CHAT_STATE_PATH.write_text(
         json.dumps({"domain": domain, "username": username, "host": host_label, "mock": True, "turn": paused["turn"]})
     )
@@ -227,7 +223,7 @@ def _pause_via_call_tool(cli, hc, domain, token, username, host_label="pausehost
 def test_chat_resumes_into_a_pending_approval_left_by_a_prior_kill(harness_env):
     cli, hc, runner, main = harness_env
     # _get_openai_client() is evaluated eagerly as a plain argument to
-    # run_turn(...) (see auth_service/main.py's _step_response) -- it must
+    # run_turn(...) (see casper_service/main.py's _step_response) -- it must
     # return a usable client even for a call that pauses immediately and
     # never actually invokes .responses.create() on it, so this needs
     # mocking before ANY conversation_step call, not just an actual
@@ -297,12 +293,9 @@ def test_chat_notes_other_pending_approvals_from_a_different_source(harness_env)
     session = json.loads(cli.SESSION_PATH.read_text())
     pair = hc.pair_host(DOMAIN, session["token"], "rk-otheruser", hostname="otherhost")
     hc.report_host_presence(DOMAIN, pair["device_token"], "https://relay.example/agent/otheruser")
-    layer = hc.create_policy_layer(DOMAIN, session["token"], "otheruser-ask-layer")
-    hc.create_policy_layer_rule(
-        DOMAIN, session["token"], layer["id"], positional_constraints=[{"whitelist": "^rm$"}], option_constraints=[], tier="ask"
+    hc.call_tool(
+        DOMAIN, session["token"], "run_shell_command", {"positional_args": ["rm"]}, mock=True, mock_tier="ask", default_host="otherhost"
     )
-    hc.add_policy_layer_to_host(DOMAIN, session["token"], layer["id"], pair["host_id"])
-    hc.call_tool(DOMAIN, session["token"], "run_shell_command", {"positional_args": ["rm"]}, mock=True, default_host="otherhost")
 
     # No chat_state.json at all -- this session never touched `chat`.
     result = runner.invoke(cli.app, ["chat", "--mock"], input="exit\n")

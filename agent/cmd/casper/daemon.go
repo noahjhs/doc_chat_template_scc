@@ -194,7 +194,7 @@ func (d *daemonState) removeSessionFromDisk(username string) {
 // HTTP response to sequence against, e.g. reportPresence's self-heal).
 // Deregisters this identity from the server; stopping the relay tunnel and
 // clearing presence both only happen if this was the LAST paired identity
-// -- both are machine-level state (see auth_service/main.py's
+// -- both are machine-level state (see casper_service/main.py's
 // clear_host_presence -- "_live" is shared by every identity currently
 // paired to this routing_key, not per-device), so clearing either while
 // another identity is still paired here would incorrectly show THAT
@@ -372,9 +372,9 @@ func (d *daemonState) refreshPolicyLayers(deviceToken string, handler *commands.
 }
 
 // reportPresence self-heals on a 401: the auth service no longer
-// recognizing this device_token (a remote sign-out, or an auth_service
+// recognizing this device_token (a remote sign-out, or an casper_service
 // restart clearing its in-memory attachment map -- see
-// auth_service/main.py's _attached) means this one identity's session is
+// casper_service/main.py's _attached) means this one identity's session is
 // unrecoverable, so it signs out just that identity and goes idle rather
 // than retrying forever against a dead credential -- every OTHER identity
 // still paired here is untouched.

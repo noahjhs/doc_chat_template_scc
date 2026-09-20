@@ -1,7 +1,7 @@
 [project]
 name = "casper-harness"
 version = "0.1.0"
-description = "CLI + library test harness for Casper's backend (auth_service) -- no GUI in the loop."
+description = "CLI + library test harness for Casper's backend (casper_service) -- no GUI in the loop."
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",

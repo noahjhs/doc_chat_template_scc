@@ -50,6 +50,37 @@ type Request struct {
 	// runRunShellCommand).
 	PositionalArgs []string        `json:"positional_args,omitempty"`
 	Options        []RequestOption `json:"options,omitempty"`
+	// Approved marks a run_shell_command call as already user-approved via
+	// casper_service's durable pending_approvals flow -- consulted ONLY when
+	// the freshly re-matched rule's own tier is "ask" (see
+	// runRunShellCommand). The daemon keeps no memory of an earlier "ask"
+	// verdict itself: resending the identical call with Approved=true is
+	// what carries that fact across the round trip, and the match always
+	// happens fresh, from h.PolicyLayers() as currently cached -- an
+	// approval never survives a policy change that's since made the same
+	// call newly "deny". No new session/token state; Approved is an
+	// ordinary request field, exactly as trustworthy as command_key
+	// possession already makes every other field here.
+	Approved bool `json:"approved,omitempty"`
+	// Cwd is eval_policy's own hypothetical "directory the call would run
+	// in" -- unlike Path (above), never resolved/confined via resolvePath:
+	// eval_policy never actually runs anything, so there's no real
+	// directory to confine to, just a string checked against a rule's own
+	// Cwd pattern (and used as PathResolutionDot's join base). Ignored by
+	// every other action, including run_shell_command itself, which keeps
+	// using Path/homeRoot for this.
+	Cwd string `json:"cwd,omitempty"`
+	// PolicyLayers is eval_policy's own inline, ad hoc set of layers to
+	// compose and match against -- distinct from run_shell_command's use
+	// of h.PolicyLayers() (this handler's cached, host-attached set). A
+	// caller composing an arbitrary/unattached set of layers (auth
+	// service's own POST /policies/eval, on the caller's behalf) supplies
+	// its own layer definitions inline rather than trusting anything
+	// already cached here. Same shape GET /hosts/policy-layers already
+	// returns (see PolicyLayerWire). Ignored by every other action --
+	// run_shell_command in particular NEVER consults this field, only its
+	// own cached h.PolicyLayers().
+	PolicyLayers []PolicyLayerWire `json:"policy_layers,omitempty"`
 }
 
 // RequestOption is one model-supplied option entry for run_shell_command --
@@ -72,6 +103,19 @@ type Result struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode *int   `json:"exit_code,omitempty"`
+	// Tier is the matched rule's tier ("allow"/"ask"/"deny") -- populated
+	// on every run_shell_command response (verdict-only, no execution, for
+	// "ask"/"deny"; alongside a real Success/Stdout/Stderr for an executed
+	// "allow" or an approved "ask" resend) and every eval_policy response
+	// (which never executes -- Success is always false there). Omitted
+	// only when no action-specific matcher ran at all.
+	Tier string `json:"tier,omitempty"`
+	// MatchedLayerID/MatchedRuleID identify which rule Tier came from --
+	// both omitted (zero) when no rule matched at all (Tier == "deny" by
+	// the same "absence means deny" convention every matcher in this
+	// project uses -- DB-assigned IDs never legitimately reach 0).
+	MatchedLayerID int `json:"matched_layer_id,omitempty"`
+	MatchedRuleID  int `json:"matched_rule_id,omitempty"`
 }
 
 // ActionError is a client-facing failure (HTTP 400 in the Python version's
@@ -98,7 +142,7 @@ func (e *ActionError) Error() string { return e.Detail }
 type Handler struct {
 	mu                    sync.Mutex
 	homeRoot              string
-	policyLayers          []PolicyLayer // see policy.go -- the daemon's own cached copy of policy layers attached to this host, fetched from auth_service
+	policyLayers          []PolicyLayer // see policy.go -- the daemon's own cached copy of policy layers attached to this host, fetched from casper_service
 	refreshPolicyLayersFn func()        // see policy.go's SetRefreshPolicyLayersFunc
 }
 
@@ -108,7 +152,7 @@ func New(homeRoot string) *Handler {
 
 // HomeRoot returns the single directory every path-taking action is
 // confined to -- also what cmd/casper/daemon.go reports via presence (see
-// config.ReportPresence) so auth_service can cache it for its own
+// config.ReportPresence) so casper_service can cache it for its own
 // best-effort "." path_resolution preview (see policy.py's module
 // docstring).
 func (h *Handler) HomeRoot() string {
@@ -333,6 +377,8 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 		return h.runRunShellCommand(req)
 	case "refresh_policy_layers":
 		return h.runRefreshPolicyLayers(req)
+	case "eval_policy":
+		return h.runEvalPolicy(req)
 	default:
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

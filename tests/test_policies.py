@@ -1,32 +1,47 @@
+"""POST /policies/eval's own routing/plumbing -- host resolution, ownership,
+response reshaping, and error handling. Real policy MATCHING semantics
+(composition order, positional/option/cwd pattern states, path_resolution)
+are no longer evaluated here at all -- eval now always routes to a real,
+connected daemon and relays its verdict (see casper_service/main.py's
+eval_policy and agent/internal/commands/policy.go's runEvalPolicy), so that
+matching logic is tested once, where it actually runs: Go's own
+agent/internal/commands/policy_test.go (TestEvalPolicy_*/TestMatchPolicy_*)
+and the Go<->Python parity fixture (tests/test_policy_parity.py, which
+still cross-checks policy.py's matcher against the Go daemon's -- unrelated
+to which one is wired into a live request path). FakeDaemon (see
+tests/fake_daemon.py) stands in for a real daemon here, always scripted
+with an explicit, arbitrary verdict -- never asked to actually match
+anything, matching this project's own "mocking never evaluates policy"
+design (see casper_service/conversations.py's module docstring)."""
+
 import os
 import sys
 import tempfile
 
 import pytest
 
-AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
+from fake_daemon import FakeDaemon
 
-# Must match auth_service/models.py's own Pattern.blacklist default exactly.
-BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
+CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
 
 
 @pytest.fixture()
 def client():
-    """Same fresh-SQLite-file-per-test posture as test_auth_service.py's own
+    """Same fresh-SQLite-file-per-test posture as test_casper_service.py's own
     fixture -- duplicated rather than shared via a conftest.py, matching
     this test suite's existing self-contained-per-file convention."""
-    sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.insert(0, os.path.abspath(CASPER_SERVICE_DIR))
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
-        for mod in ("main", "db", "models", "policy"):
+        for mod in ("main", "db", "models", "policy", "conversations"):
             sys.modules.pop(mod, None)
         import main as auth_main
         from fastapi.testclient import TestClient
 
         yield TestClient(auth_main.app)
-    sys.path.remove(os.path.abspath(AUTH_SERVICE_DIR))
-    for mod in ("main", "db", "models", "policy"):
+    sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
+    for mod in ("main", "db", "models", "policy", "conversations"):
         sys.modules.pop(mod, None)
 
 
@@ -49,188 +64,117 @@ def _add_rule(client, headers, layer_id, positional_constraints, option_constrai
     return client.post(f"/policy-layers/{layer_id}/rules", json=body, headers=headers).json()
 
 
+def _pair_and_connect_host(client, headers, routing_key, hostname, url):
+    pair = client.post("/hosts/pair", json={"routing_key": routing_key, "hostname": hostname}, headers=headers).json()
+    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
+    client.post("/hosts/presence", json={"local_agent_url": url, "cwd": ""}, headers=device_headers)
+    return pair
+
+
 def _eval(client, headers, **body):
     return client.post("/policies/eval", json=body, headers=headers)
 
 
-def test_eval_no_layers_means_terminal_deny(client):
-    signup = _signup(client, "alice")
-    headers = {"Authorization": f"Bearer {signup['token']}"}
-    r = _eval(client, headers, policy_layer_ids=[], positional_args=["npm", "run"])
-    assert r.status_code == 200
-    assert r.json() == {"tier": "deny", "matched_layer_id": None, "matched_rule": None}
-
-
-def test_eval_composes_multiple_layers_in_id_order_first_match_wins(client):
+def test_eval_routes_to_connected_daemon_and_relays_verdict(client):
+    """The daemon is the sole authority on the verdict -- this only checks
+    that /policies/eval forwards the right request shape and correctly
+    reshapes the response (matched_rule rebuilt from the caller's own
+    already-fetched rule data, not re-sent by the daemon)."""
     signup = _signup(client, "bob")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    # layer_a is created (and so gets a lower id) before layer_b.
-    layer_a = _create_policy_layer(client, headers, name="npm allow")
-    _add_rule(client, headers, layer_a["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="allow")
-    layer_b = _create_policy_layer(client, headers, name="catch-all deny")
-    _add_rule(client, headers, layer_b["id"], [], tier="deny")
+    layer = _create_policy_layer(client, headers, name="npm allow")
+    rule = _add_rule(client, headers, layer["id"], [{"whitelist": "^npm$"}, {"whitelist": "^run$"}], tier="allow")
 
-    # Composed regardless of the order layer ids are listed in the request --
-    # sorted ascending (layer_a's rule first) before matching.
-    matched = _eval(
-        client, headers, policy_layer_ids=[layer_b["id"], layer_a["id"]], positional_args=["npm", "run"]
-    ).json()
-    assert matched["tier"] == "allow"
-    assert matched["matched_layer_id"] == layer_a["id"]
+    with FakeDaemon(
+        queue=[
+            (200, {"tier": "allow", "matched_layer_id": layer["id"], "matched_rule_id": rule["id"]}),
+            (200, {"tier": "deny"}),
+        ]
+    ) as daemon:
+        pair = _pair_and_connect_host(client, headers, "rk-bob-1", "bobs-mac", daemon.url)
 
-    # A call layer_a's rule doesn't match falls through to layer_b's catch-all.
-    fallthrough = _eval(
-        client, headers, policy_layer_ids=[layer_a["id"], layer_b["id"]], positional_args=["rm", "-rf"]
-    ).json()
-    assert fallthrough["tier"] == "deny"
-    assert fallthrough["matched_layer_id"] == layer_b["id"]
+        matched = _eval(
+            client, headers, policy_layer_ids=[layer["id"]], positional_args=["npm", "run"], host="bobs-mac"
+        ).json()
+        assert matched["tier"] == "allow"
+        assert matched["matched_layer_id"] == layer["id"]
+        assert matched["matched_rule"]["id"] == rule["id"]
 
-    # A subset composition (ad hoc, harness-style) only sees what it's given.
-    only_b = _eval(
-        client, headers, policy_layer_ids=[layer_b["id"]], positional_args=["npm", "run"]
-    ).json()
-    assert only_b["tier"] == "deny"
-    assert only_b["matched_layer_id"] == layer_b["id"]
+        no_match = _eval(
+            client, headers, policy_layer_ids=[layer["id"]], positional_args=["rm", "-rf"], host="bobs-mac"
+        ).json()
+        assert no_match["tier"] == "deny"
+        assert no_match["matched_layer_id"] is None
+        assert no_match["matched_rule"] is None
+
+    assert len(daemon.requests) == 2
+    first = daemon.requests[0]
+    assert first["action"] == "eval_policy"
+    assert first["positional_args"] == ["npm", "run"]
+    assert first["policy_layers"][0]["id"] == layer["id"]
+    assert first["policy_layers"][0]["rules"][0]["id"] == rule["id"]
+    assert pair["host_id"]  # sanity -- pairing itself succeeded
 
 
-def test_eval_positional_pattern_states(client):
+def test_eval_ad_hoc_subset_sends_only_the_requested_layers(client):
+    """The caller composes whichever arbitrary subset of their own layers
+    they want -- confirms /policies/eval sends ONLY that subset inline,
+    never every layer the user owns."""
     signup = _signup(client, "carol")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    # position 0: value required (must be "rm"); position 1: value not
-    # allowed (must be absent/""); position 2: value not required (blank).
-    _add_rule(
-        client, headers, layer["id"], [{"whitelist": "^rm$"}, {"whitelist": "^$"}, {}], tier="allow"
-    )
+    layer_a = _create_policy_layer(client, headers, name="layer-a")
+    layer_b = _create_policy_layer(client, headers, name="layer-b")
 
-    matches = _eval(client, headers, policy_layer_ids=[layer["id"]], positional_args=["rm"]).json()
-    assert matches["tier"] == "allow"
+    with FakeDaemon(queue=[(200, {"tier": "deny"})]) as daemon:
+        _pair_and_connect_host(client, headers, "rk-carol-1", "carols-mac", daemon.url)
+        _eval(client, headers, policy_layer_ids=[layer_b["id"]], positional_args=["ls"], host="carols-mac")
 
-    wrong_binary = _eval(client, headers, policy_layer_ids=[layer["id"]], positional_args=["mv"]).json()
-    assert wrong_binary["tier"] == "deny"
-
-    disallowed_value_present = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["rm", "-rf"]
-    ).json()
-    assert disallowed_value_present["tier"] == "deny"
-
-    # position 2 accepts anything (or absence) -- doesn't affect the match.
-    extra_arg_ok = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["rm", "", "anything"]
-    ).json()
-    assert extra_arg_ok["tier"] == "allow"
+    sent_ids = [pl["id"] for pl in daemon.requests[0]["policy_layers"]]
+    assert sent_ids == [layer_b["id"]]
+    assert layer_a["id"] not in sent_ids
 
 
-def test_eval_option_pattern_states(client):
+def test_eval_requires_host_when_multiple_connected(client):
     signup = _signup(client, "dave")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    _add_rule(
-        client,
-        headers,
-        layer["id"],
-        [{}],
-        option_constraints=[
-            {"long": "force", "pattern": {"whitelist": "^$"}},  # must be present, no value
-            {"long": "output", "pattern": {"whitelist": ".+"}},  # must be present, value required
-        ],
-        tier="allow",
-    )
+    with FakeDaemon(queue=[]) as daemon_a, FakeDaemon(queue=[]) as daemon_b:
+        _pair_and_connect_host(client, headers, "rk-dave-1", "daves-laptop", daemon_a.url)
+        _pair_and_connect_host(client, headers, "rk-dave-2", "daves-mini", daemon_b.url)
 
-    matches = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cmd"],
-        options=[{"long": "force"}, {"long": "output", "value": "out.txt"}],
-    ).json()
-    assert matches["tier"] == "allow"
-
-    missing_required_option = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["cmd"], options=[{"long": "force"}]
-    ).json()
-    assert missing_required_option["tier"] == "deny"
-
-    force_with_disallowed_value = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cmd"],
-        options=[{"long": "force", "value": "yes"}, {"long": "output", "value": "out.txt"}],
-    ).json()
-    assert force_with_disallowed_value["tier"] == "deny"
+        r = _eval(client, headers, policy_layer_ids=[], positional_args=["ls"])
+        assert r.status_code == 404
+        assert "specify which one" in r.json()["detail"]
 
 
-def test_eval_cwd_constraint(client):
-    signup = _signup(client, "cwd-user")
+def test_eval_no_connected_host_available(client):
+    signup = _signup(client, "erin")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    _add_rule(
-        client, headers, layer["id"], [{}], tier="allow", cwd={"whitelist": "^/home/alice(/.*)?$"}
-    )
-
-    inside = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"], cwd="/home/alice/project"
-    ).json()
-    assert inside["tier"] == "allow"
-
-    outside = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"], cwd="/etc"
-    ).json()
-    assert outside["tier"] == "deny"
-
-    # cwd omitted entirely ("") doesn't satisfy a non-blank cwd pattern --
-    # same fail-closed posture as every other constraint.
-    omitted = _eval(client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"]).json()
-    assert omitted["tier"] == "deny"
+    r = _eval(client, headers, policy_layer_ids=[], positional_args=["ls"])
+    assert r.status_code == 404
+    assert r.json()["detail"] == "no connected machines available."
 
 
-def test_eval_blank_cwd_means_any_directory(client):
-    signup = _signup(client, "cwd-user2")
+def test_eval_unreachable_daemon_fails_loudly(client):
+    """No silent fallback to a local match when the named daemon can't be
+    reached -- the accepted latency/availability tradeoff for no longer
+    maintaining redundant server-side evaluation logic."""
+    signup = _signup(client, "frank")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    _add_rule(client, headers, layer["id"], [{}], tier="allow")
-
-    matched = _eval(
-        client, headers, policy_layer_ids=[layer["id"]], positional_args=["ls"], cwd="/anywhere/at/all"
-    ).json()
-    assert matched["tier"] == "allow"
+    with FakeDaemon(queue=[]) as daemon:
+        _pair_and_connect_host(client, headers, "rk-frank-1", "franks-mac", daemon.url)
+    # The daemon is now closed -- its port is no longer accepting connections.
+    r = _eval(client, headers, policy_layer_ids=[], positional_args=["ls"], host="franks-mac")
+    assert r.status_code == 502
 
 
-def test_eval_dot_path_resolution_is_best_effort_join(client):
-    """This service can't resolve symlinks (no real filesystem access) --
-    it does a plain string-join of a relative value against cwd, matched
-    against the pattern as given. See policy.py's own module docstring for
-    why the Go daemon, not this preview, is what actually enforces this
-    accurately."""
-    signup = _signup(client, "cwd-user3")
+def test_eval_daemon_rejects_stale_api_key(client):
+    signup = _signup(client, "gale")
     headers = {"Authorization": f"Bearer {signup['token']}"}
-    layer = _create_policy_layer(client, headers)
-    _add_rule(
-        client,
-        headers,
-        layer["id"],
-        [{}, {"whitelist": "^/home/alice/notes\\.txt$", "path_resolution": "."}],
-        tier="allow",
-    )
-
-    joined = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "notes.txt"],
-        cwd="/home/alice",
-    ).json()
-    assert joined["tier"] == "allow"
-
-    elsewhere = _eval(
-        client,
-        headers,
-        policy_layer_ids=[layer["id"]],
-        positional_args=["cat", "notes.txt"],
-        cwd="/etc",
-    ).json()
-    assert elsewhere["tier"] == "deny"
+    with FakeDaemon(queue=[(401, {"detail": "Invalid or missing X-API-Key."})]) as daemon:
+        _pair_and_connect_host(client, headers, "rk-gale-1", "gales-mac", daemon.url)
+        r = _eval(client, headers, policy_layer_ids=[], positional_args=["ls"], host="gales-mac")
+    assert r.status_code == 502
+    assert "re-pair it" in r.json()["detail"]
 
 
 def test_eval_ownership_enforced(client):

@@ -1,4 +1,4 @@
-"""Cross-implementation parity: auth_service/policy.py's match_policy vs.
+"""Cross-implementation parity: casper_service/policy.py's match_policy vs.
 agent/internal/commands/policy.go's matchPolicy are two independent
 implementations of the same rule-matching semantics -- nothing else proves
 they actually agree. Both this file and agent/internal/commands/
@@ -18,19 +18,19 @@ import sys
 
 import pytest
 
-AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
+CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "policy_parity.json")
 
 
 @pytest.fixture(scope="module")
 def policy_module():
-    sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.insert(0, os.path.abspath(CASPER_SERVICE_DIR))
     for mod in ("models", "policy"):
         sys.modules.pop(mod, None)
     import policy as policy_module
 
     yield policy_module
-    sys.path.remove(os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
     for mod in ("models", "policy"):
         sys.modules.pop(mod, None)
 

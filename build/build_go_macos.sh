@@ -6,7 +6,7 @@
 #
 # DEPLOY_ENV=prod (default) or DEPLOY_ENV=dev selects which domains get
 # baked in -- e.g. `DEPLOY_ENV=dev ./build/build_go_macos.sh` for a binary
-# that can actually pair against the dev environment's auth_service/relay.
+# that can actually pair against the dev environment's casper_service/relay.
 # See the DEPLOY_ENV block below for the two file sets this reads from.
 #
 # Signs with a real Developer ID Application identity and submits to

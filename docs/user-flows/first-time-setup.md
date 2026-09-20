@@ -94,7 +94,7 @@ doc's Known Issues below and its step text).
   pages load and execute without exception (`streamlit.testing.v1.
   AppTest`); `https://dev-app.casperagent.dev/signin` and `/signup` both
   serve real 200s post-deploy; `signup_with_auth_service` called directly
-  against the live dev `auth_service` returns a real token and
+  against the live dev `casper_service` returns a real token and
   `build_pair_url` forms a correct `casper://pair?...` URL from it — i.e.
   every piece of the page's own logic has been exercised against the real
   live deployment. **Still not verified: an actual browser click through

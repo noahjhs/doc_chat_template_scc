@@ -1,7 +1,7 @@
 // Package wire defines the JSON frame protocol exchanged between the relay
 // and each connected agent over its WebSocket connection. This struct is
 // deliberately duplicated (not shared via a common module) in
-// agent/internal/tunnel -- matches how auth_service and the Streamlit app
+// agent/internal/tunnel -- matches how casper_service and the Streamlit app
 // already have no shared schema module between them.
 package wire
 

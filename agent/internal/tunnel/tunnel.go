@@ -26,7 +26,7 @@ import (
 )
 
 // Frame mirrors relay/internal/wire.Frame exactly -- deliberately
-// duplicated rather than shared, matching how auth_service and the
+// duplicated rather than shared, matching how casper_service and the
 // Streamlit app already have no shared schema module between them.
 type Frame struct {
 	ID      string            `json:"id"`

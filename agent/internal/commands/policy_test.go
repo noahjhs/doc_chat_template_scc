@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"regexp"
@@ -180,7 +181,7 @@ func TestComposePolicy_ConcatenatesInLayerIDOrder(t *testing.T) {
 	if len(rules) != 3 {
 		t.Fatalf("expected 3 rules, got %d", len(rules))
 	}
-	got := []int{rules[0].ID, rules[1].ID, rules[2].ID}
+	got := []int{rules[0].Rule.ID, rules[1].Rule.ID, rules[2].Rule.ID}
 	want := []int{10, 11, 20}
 	for i := range want {
 		if got[i] != want[i] {
@@ -199,16 +200,16 @@ func TestMatchPolicy_FirstMatchWinsAcrossLayers(t *testing.T) {
 		{ID: 1, Rules: []Rule{{ID: 1, PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "ask"}}},
 		{ID: 2, Rules: []Rule{{ID: 2, PositionalConstraints: []Pattern{unconstrained()}, Tier: "allow"}}},
 	}
-	rule := h.matchPolicy(layers, []string{"echo"}, nil, "")
-	if rule == nil || rule.ID != 1 {
-		t.Fatalf("expected the first (more specific) rule, from layer 1, to win, got %+v", rule)
+	layerID, rule := h.matchPolicy(layers, []string{"echo"}, nil, "")
+	if rule == nil || rule.ID != 1 || layerID != 1 {
+		t.Fatalf("expected the first (more specific) rule, from layer 1, to win, got %+v (layer %d)", rule, layerID)
 	}
 	// A binary layer 1 doesn't recognize still matches, via layer 2's
 	// unconstrained rule -- proof both layers are actually composed, not
 	// just the first one checked.
-	rule = h.matchPolicy(layers, []string{"git"}, nil, "")
-	if rule == nil || rule.ID != 2 {
-		t.Fatalf("expected layer 2's rule to win for a binary layer 1 doesn't match, got %+v", rule)
+	layerID, rule = h.matchPolicy(layers, []string{"git"}, nil, "")
+	if rule == nil || rule.ID != 2 || layerID != 2 {
+		t.Fatalf("expected layer 2's rule to win for a binary layer 1 doesn't match, got %+v (layer %d)", rule, layerID)
 	}
 }
 
@@ -217,14 +218,14 @@ func TestMatchPolicy_TerminalDenyWhenNothingMatches(t *testing.T) {
 	layers := []PolicyLayer{
 		{ID: 1, Rules: []Rule{{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"}}},
 	}
-	if h.matchPolicy(layers, []string{"echo"}, nil, "") != nil {
+	if layerID, rule := h.matchPolicy(layers, []string{"echo"}, nil, ""); rule != nil || layerID != 0 {
 		t.Fatal("expected no match (terminal deny)")
 	}
 }
 
 func TestMatchPolicy_NoLayersMeansTerminalDeny(t *testing.T) {
 	h, _ := newTestHandler(t)
-	if h.matchPolicy(nil, []string{"echo"}, nil, "") != nil {
+	if layerID, rule := h.matchPolicy(nil, []string{"echo"}, nil, ""); rule != nil || layerID != 0 {
 		t.Fatal("expected no match -- zero layers attached composes to zero rules")
 	}
 }
@@ -285,19 +286,32 @@ func TestRunShellCommand_ComposesEveryAttachedLayer(t *testing.T) {
 }
 
 func TestRunShellCommand_RejectsWhenNoRuleMatches(t *testing.T) {
+	// No rule matched at all is now a normal Tier:"deny" verdict (HTTP 200
+	// via handleCommand), not an ActionError -- the daemon is the sole
+	// decider of allow/ask/deny now, so the caller must only ever consult
+	// Tier, never separately distinguish "nothing matched" from "a rule
+	// matched with its own tier deny".
 	h, _ := newTestHandler(t)
 	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{
 		{PositionalConstraints: []Pattern{mustWhitelist("^git$")}, Tier: "allow"},
 	}}})
-	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"rm", "-rf", "/"}}); err == nil {
-		t.Fatal("expected an ActionError -- no rule matches, terminal deny")
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"rm", "-rf", "/"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" || res.Success || res.MatchedLayerID != 0 || res.MatchedRuleID != 0 {
+		t.Fatalf("expected Tier:\"deny\" with no execution and no matched IDs, got %+v", res)
 	}
 }
 
 func TestRunShellCommand_NoLayersAttachedMeansTerminalDeny(t *testing.T) {
 	h, _ := newTestHandler(t)
-	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}}); err == nil {
-		t.Fatal("expected an ActionError -- zero policy layers attached composes to zero rules, terminal deny")
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" {
+		t.Fatalf("expected Tier:\"deny\" -- zero policy layers attached composes to zero rules, got %+v", res)
 	}
 }
 
@@ -350,8 +364,12 @@ func TestRunShellCommand_BareBinaryNameNoLongerMatchesUnresolved(t *testing.T) {
 	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{
 		{PositionalConstraints: []Pattern{mustWhitelist("^echo$")}, Tier: "allow"},
 	}}})
-	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}}); err == nil {
-		t.Fatal("expected an ActionError -- the bare name no longer matches the resolved absolute path")
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" {
+		t.Fatalf("expected Tier:\"deny\" -- the bare name no longer matches the resolved absolute path, got %+v", res)
 	}
 }
 
@@ -376,13 +394,17 @@ func TestRunShellCommand_CwdConstraint(t *testing.T) {
 	}}}})
 
 	// The rule requires cwd == subdir -- the default root doesn't satisfy
-	// it, so this is rejected even though the positional constraint (the
+	// it, so this is denied even though the positional constraint (the
 	// only other constraint) is wide open.
-	if _, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}}); err == nil {
-		t.Fatal("expected an ActionError -- cwd is the root, not subdir")
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" {
+		t.Fatalf("expected Tier:\"deny\" -- cwd is the root, not subdir, got %+v", res)
 	}
 	// Redirecting into subdir via Path satisfies the Cwd constraint.
-	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}, Path: subdir})
+	res, err = h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}, Path: subdir})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -494,4 +516,246 @@ func TestListPolicyLayers(t *testing.T) {
 	if res.Stdout == "" || res.Stdout == "No policy layers enabled on this host." {
 		t.Fatalf("expected a non-empty listing, got %q", res.Stdout)
 	}
+}
+
+// --- Tier-aware run_shell_command (the daemon is now the sole decider of
+// allow/ask/deny -- these confirm the verdict/execute branching in
+// runRunShellCommand, not just "did a rule match at all"). ------------------
+
+func TestRunShellCommand_AskTierPausesWithoutExecuting(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{
+		ID:                    7,
+		PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo")},
+		Tier:                  "ask",
+	}}}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "ask" || res.Success || res.Stdout != "" || res.MatchedLayerID != 1 || res.MatchedRuleID != 7 {
+		t.Fatalf("expected an unexecuted ask verdict naming the matched rule, got %+v", res)
+	}
+}
+
+func TestRunShellCommand_DenyTierRuleIsDeniedWithoutExecuting(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{
+		ID:                    9,
+		PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo")},
+		Tier:                  "deny",
+	}}}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" || res.Success || res.MatchedLayerID != 1 || res.MatchedRuleID != 9 {
+		t.Fatalf("expected a deny verdict naming the matched (deny-tier) rule, got %+v", res)
+	}
+}
+
+func TestRunShellCommand_ApprovedResendExecutesAskTierRule(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{
+		ID:                    7,
+		PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo"), mustWhitelist("^hi$")},
+		Tier:                  "ask",
+	}}}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}, Approved: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "ask" || !res.Success || res.Stdout != "hi" || res.MatchedLayerID != 1 || res.MatchedRuleID != 7 {
+		t.Fatalf("expected an approved ask-tier resend to execute, got %+v", res)
+	}
+}
+
+func TestRunShellCommand_ApprovedFlagIgnoredWhenPolicyNowDenies(t *testing.T) {
+	// The daemon keeps no memory of the earlier "ask" -- it re-matches fresh
+	// every time. If the policy changed to deny between the ask and the
+	// resend, Approved never overrides that.
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{
+		ID:                    9,
+		PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo")},
+		Tier:                  "deny",
+	}}}})
+	res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}, Approved: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" || res.Success {
+		t.Fatalf("expected Approved to never override a since-changed deny verdict, got %+v", res)
+	}
+}
+
+func TestRunShellCommand_ApprovedFlagIgnoredForAllowTier(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetPolicyLayers([]PolicyLayer{{ID: 1, Rules: []Rule{{
+		ID:                    1,
+		PositionalConstraints: []Pattern{mustResolvedBinaryWhitelist(t, "echo"), mustWhitelist("^hi$")},
+		Tier:                  "allow",
+	}}}})
+	for _, approved := range []bool{false, true} {
+		res, err := h.Dispatch(&Request{Action: "run_shell_command", PositionalArgs: []string{"echo", "hi"}, Approved: approved})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Tier != "allow" || !res.Success || res.Stdout != "hi" {
+			t.Fatalf("expected an allow-tier rule to execute regardless of Approved=%v, got %+v", approved, res)
+		}
+	}
+}
+
+// --- eval_policy: evaluates an AD HOC, inline set of rules, no execution,
+// never consulting h.PolicyLayers() (that's run_shell_command's own cached,
+// host-attached set). --------------------------------------------------------
+
+func TestEvalPolicy_MatchesInlineLayersNotTheCachedSet(t *testing.T) {
+	h, _ := newTestHandler(t)
+	// A completely different set is attached for real dispatch -- proves
+	// eval_policy never consults it.
+	h.SetPolicyLayers([]PolicyLayer{{ID: 99, Rules: []Rule{{ID: 99, PositionalConstraints: []Pattern{unconstrained()}, Tier: "deny"}}}})
+
+	res, err := h.Dispatch(&Request{
+		Action:         "eval_policy",
+		PositionalArgs: []string{"echo", "hi"},
+		PolicyLayers: []PolicyLayerWire{{
+			ID:   1,
+			Name: "ad hoc",
+			Rules: []RuleWire{{
+				ID:                    5,
+				PositionalConstraints: []PatternWire{},
+				Tier:                  "ask",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "ask" || res.Success || res.MatchedLayerID != 1 || res.MatchedRuleID != 5 {
+		t.Fatalf("expected the inline layer's rule to match (never the cached, attached set), got %+v", res)
+	}
+}
+
+func TestEvalPolicy_NoMatchIsTerminalDeny(t *testing.T) {
+	h, _ := newTestHandler(t)
+	res, err := h.Dispatch(&Request{Action: "eval_policy", PositionalArgs: []string{"echo"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "deny" || res.MatchedLayerID != 0 || res.MatchedRuleID != 0 {
+		t.Fatalf("expected a terminal deny with no matched IDs for an empty inline layer set, got %+v", res)
+	}
+}
+
+func TestEvalPolicy_RequiresAtLeastTheBinary(t *testing.T) {
+	h, _ := newTestHandler(t)
+	if _, err := h.Dispatch(&Request{Action: "eval_policy", PositionalArgs: []string{}}); err == nil {
+		t.Fatal("expected an ActionError -- positional_args must include at least the binary")
+	}
+}
+
+func TestEvalPolicy_MalformedRegexIsRejected(t *testing.T) {
+	h, _ := newTestHandler(t)
+	badWhitelist := "["
+	_, err := h.Dispatch(&Request{
+		Action:         "eval_policy",
+		PositionalArgs: []string{"echo"},
+		PolicyLayers: []PolicyLayerWire{{
+			ID:   1,
+			Name: "bad",
+			Rules: []RuleWire{{
+				ID:                    1,
+				PositionalConstraints: []PatternWire{mustPatternWire(t, &badWhitelist, nil)},
+				Tier:                  "allow",
+			}},
+		}},
+	})
+	if _, ok := err.(*ActionError); !ok {
+		t.Fatalf("expected an ActionError for an uncompilable inline pattern, got %v", err)
+	}
+}
+
+func TestEvalPolicy_DegradesGracefullyWhenBinaryNotOnPath(t *testing.T) {
+	// Unlike run_shell_command, a lookup failure never fails the whole
+	// eval -- eval never executes anything, so a hypothetical binary that
+	// doesn't exist on this machine is still a legitimate thing to ask
+	// "what would happen if..." about (matched against the raw, unresolved
+	// name it degrades to).
+	h, _ := newTestHandler(t)
+	res, err := h.Dispatch(&Request{
+		Action:         "eval_policy",
+		PositionalArgs: []string{"definitely-not-a-real-binary-xyz"},
+		PolicyLayers: []PolicyLayerWire{{
+			ID:   1,
+			Name: "raw-name",
+			Rules: []RuleWire{{
+				ID:                    1,
+				PositionalConstraints: []PatternWire{mustPatternWire(t, strPtr("^definitely-not-a-real-binary-xyz$"), nil)},
+				Tier:                  "allow",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "allow" {
+		t.Fatalf("expected the raw (unresolved) name to still match, got %+v", res)
+	}
+}
+
+func TestEvalPolicy_CwdConstraint(t *testing.T) {
+	h, _ := newTestHandler(t)
+	res, err := h.Dispatch(&Request{
+		Action:         "eval_policy",
+		PositionalArgs: []string{"definitely-not-a-real-binary-xyz"},
+		Cwd:            "/home/alice",
+		PolicyLayers: []PolicyLayerWire{{
+			ID:   1,
+			Name: "cwd-scoped",
+			Rules: []RuleWire{{
+				ID:  1,
+				Cwd: mustPatternWire(t, strPtr("^/home/.+"), nil),
+				PositionalConstraints: []PatternWire{
+					mustPatternWire(t, strPtr("^definitely-not-a-real-binary-xyz$"), nil),
+				},
+				Tier: "allow",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Tier != "allow" {
+		t.Fatalf("expected the cwd constraint to be satisfied by req.Cwd, got %+v", res)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// mustPatternWire builds a PatternWire the same way JSON decoding would --
+// via UnmarshalJSON -- since its fields are unexported and there's no
+// exported constructor (mirrors how a real eval_policy request arrives).
+func mustPatternWire(t *testing.T, whitelist, blacklist *string) PatternWire {
+	t.Helper()
+	obj := map[string]any{}
+	if whitelist != nil {
+		obj["whitelist"] = *whitelist
+	}
+	if blacklist != nil {
+		obj["blacklist"] = *blacklist
+	}
+	data, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var pw PatternWire
+	if err := json.Unmarshal(data, &pw); err != nil {
+		// Not a Fatal -- some tests deliberately construct an uncompilable
+		// pattern this way and expect Compile (not UnmarshalJSON) to be
+		// where it fails; a raw regex string is always valid JSON/decode
+		// input regardless of whether it later compiles.
+	}
+	return pw
 }

@@ -3,7 +3,7 @@
 # after every deploy this session. Hits every remaining Streamlit page (200
 # expected -- Streamlit itself always returns the app shell, so this only
 # catches the container being down/crash-looping, not a bad page) and a
-# couple of auth_service endpoints with a bogus token (401 expected --
+# couple of casper_service endpoints with a bogus token (401 expected --
 # confirms the service is up AND its auth gate is actually enforcing,
 # rather than e.g. silently misconfigured to accept anything).
 #

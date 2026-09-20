@@ -1,4 +1,4 @@
-"""Plain functions wrapping auth_service's HTTP API -- no CLI dependency
+"""Plain functions wrapping casper_service's HTTP API -- no CLI dependency
 here at all (no typer, no rich): tests/test_harness_flows.py imports this
 module directly for end-to-end automation, same posture as any other unit
 under test, and harness/cli.py is a thin presentation layer on top of it.
@@ -36,7 +36,7 @@ def set_client(client_obj) -> None:
     """Routes every request through the given object's own .request(method,
     url, headers=..., **kwargs) instead of a real socket -- what
     tests/test_harness_flows.py uses (a fastapi.testclient.TestClient bound
-    directly to auth_service's FastAPI app) to exercise this library
+    directly to casper_service's FastAPI app) to exercise this library
     end-to-end with no live server process and no real network at all.
     domain is ignored entirely when a client_obj is set (TestClient already
     scopes every request to its own app). Pass None to restore real-network
@@ -192,7 +192,7 @@ def telegram_link(domain: str, token: str) -> dict:
 # --- Pending approvals (durable, per-user) --------------------------------
 # Host/device-agnostic -- resolvable from any interface holding the
 # account's own session token, not a designated "attended" machine (see
-# auth_service/db.py's pending_approvals table for why).
+# casper_service/db.py's pending_approvals table for why).
 def list_pending_approvals(domain: str, token: str) -> dict:
     return _request(domain, "GET", "/conversations/pending-approvals", token=token)
 
@@ -210,7 +210,7 @@ def decide_pending_approval(domain: str, token: str, approval_id: str, decision:
 def _pair_url_scheme(auth_domain: str) -> str:
     """"casper-dev" for a dev deployment (auth_domain starting with
     "dev-", this project's established dev/prod naming convention), else
-    "casper" -- mirrors auth_service/utils/auth.py's own
+    "casper" -- mirrors utils/auth.py's own
     pair_url_scheme (duplicated, not imported -- independently deployed
     services). Must match whichever scheme the TARGET daemon build
     actually registered (see build_go_macos.sh's DEPLOY_ENV-driven
@@ -227,7 +227,7 @@ def trigger_real_pairing(domain: str, username: str, token: str) -> None:
     reality), and requires an already-installed, registered Casper.app on
     this same machine (it doesn't need to already be running -- `open`
     launches it fresh if not, and the event still delivers). Doesn't call
-    auth_service itself; the daemon that receives the event does that,
+    casper_service itself; the daemon that receives the event does that,
     exactly as it does for a real sign-in. Not automatable in CI -- see
     harness/cli.py's `pair-daemon` command, the intended manual-
     verification entry point. domain picks the scheme (see
@@ -318,7 +318,7 @@ def load_policy_layer_yaml(yaml_path: str) -> dict:
     simply omitted -- the API already defaults them ("" /
     BLACKLIST_MATCHES_NOTHING) server-side, so this format never needs to
     duplicate that sentinel itself. path_resolution is never valid on cwd
-    (see Pattern's own docstring in auth_service/models.py for why) -- this
+    (see Pattern's own docstring in casper_service/models.py for why) -- this
     format doesn't accept one there, same as the API itself doesn't expect
     one to matter."""
     import yaml
@@ -379,13 +379,19 @@ def eval_policy(
     positional_args: list[str] | None = None,
     options: list[dict] | None = None,
     cwd: str = "",
+    host: str | None = None,
 ) -> dict:
+    """Routes to a real, connected daemon (see casper_service/main.py's
+    eval_policy) -- host names which one, required unless the caller has
+    exactly one host connected."""
     body = {
         "policy_layer_ids": policy_layer_ids,
         "positional_args": positional_args or [],
         "options": options or [],
         "cwd": cwd,
     }
+    if host is not None:
+        body["host"] = host
     return _request(domain, "POST", "/policies/eval", token=token, json=body)
 
 
@@ -399,8 +405,9 @@ def conversation_step(
     approval_decision: str | None = None,
     default_host: str | None = None,
     mock: bool = False,
+    mock_tier: str = "allow",
 ) -> dict:
-    body: dict = {"mock": mock}
+    body: dict = {"mock": mock, "mock_tier": mock_tier}
     if turn is not None:
         body["turn"] = turn
     if message is not None:
@@ -420,15 +427,24 @@ def call_tool(
     name: str,
     arguments: dict,
     mock: bool = False,
+    mock_tier: str = "allow",
     turn: dict | None = None,
     default_host: str | None = None,
 ) -> dict:
     """Convenience wrapper over conversation_step for the harness's `call
     tool`/`call mock tool` verbs -- injects a tool call directly (see
-    auth_service/conversations.py's new_turn_from_tool_call), bypassing
-    the model's own decision to call it."""
+    casper_service/conversations.py's new_turn_from_tool_call), bypassing
+    the model's own decision to call it. mock_tier is the explicit,
+    caller-supplied allow/ask/deny decision for a mocked run_shell_command
+    call -- mocking never evaluates policy itself."""
     return conversation_step(
-        domain, token, turn=turn, tool_call={"name": name, "arguments": arguments}, mock=mock, default_host=default_host
+        domain,
+        token,
+        turn=turn,
+        tool_call={"name": name, "arguments": arguments},
+        mock=mock,
+        mock_tier=mock_tier,
+        default_host=default_host,
     )
 
 
@@ -440,10 +456,18 @@ def chat_step(
     approval_decision: str | None = None,
     default_host: str | None = None,
     mock: bool = False,
+    mock_tier: str = "allow",
 ) -> dict:
     """The harness's `chat`/`chat --mock` verb -- a real conversational
     turn where the model decides what to call, as opposed to call_tool's
     direct injection."""
     return conversation_step(
-        domain, token, turn=turn, message=message, approval_decision=approval_decision, default_host=default_host, mock=mock
+        domain,
+        token,
+        turn=turn,
+        message=message,
+        approval_decision=approval_decision,
+        default_host=default_host,
+        mock=mock,
+        mock_tier=mock_tier,
     )

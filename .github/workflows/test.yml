@@ -17,11 +17,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install -r auth_service/requirements.txt
+          pip install -r casper_service/requirements.txt
           pip install -e harness/
           pip install pytest pyflakes
       - name: pyflakes
-        run: pyflakes auth_service utils pages casper_app.py harness/harness tests
+        run: pyflakes casper_service utils pages casper_app.py harness/harness tests
       - name: pytest
         run: pytest tests/ -v
 
@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install -r auth_service/requirements.txt
+          pip install -r casper_service/requirements.txt
           pip install -e harness/
           pip install pytest
       - name: pytest (harness)

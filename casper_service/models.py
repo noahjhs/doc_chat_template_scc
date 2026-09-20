@@ -261,15 +261,22 @@ class PolicyEvalOption(BaseModel):
 class PolicyEvalRequest(BaseModel):
     """POST /policies/eval's body -- composes policy_layer_ids (sorted
     ascending, concatenated -- the same v1 composition rule the Go daemon's
-    composePolicy and conversations.py's own tier decision use) into one
-    Policy and evaluates one hypothetical call against it. No side effects,
-    no daemon involved -- the fast/deterministic bottom of the testing
-    pyramid."""
+    composePolicy uses) into one Policy and evaluates one hypothetical call
+    against it. Routes to a REAL, connected daemon (see main.py's
+    eval_policy) to evaluate it, using the daemon's own authoritative
+    matcher (agent/internal/commands/policy.go's runEvalPolicy) -- no local
+    evaluation attempt of any kind happens server-side anymore. host names
+    which of the caller's own CONNECTED hosts to route the evaluation to
+    (same label-not-URL convention run_shell_command's own `host` field
+    uses) -- optional only when exactly one host is connected, same
+    "ambiguity enforced at resolve time" posture conversations.py's own
+    resolve_host already has (reused directly, see main.py's eval_policy)."""
 
     policy_layer_ids: list[int] = Field(default_factory=list)
     positional_args: list[str] = Field(default_factory=list)
     options: list[PolicyEvalOption] = Field(default_factory=list)
     cwd: str = ""
+    host: str | None = None
 
 
 class PolicyEvalResponse(BaseModel):
@@ -306,7 +313,10 @@ class ConversationStepRequest(BaseModel):
     call should default to when it doesn't specify one and more than one
     is connected (mirrors run_shell_command's own `host` field -- this is
     a label, never a URL/API key; the server looks those up itself from
-    its own state). mock, see conversations.py's own module docstring."""
+    its own state). mock/mock_tier, see conversations.py's own module
+    docstring and DispatchContext.mock_tier -- mocking never evaluates
+    policy itself, mock_tier is the caller's own explicit, arbitrary
+    allow/ask/deny decision for a mocked run_shell_command call."""
 
     turn: dict[str, Any] | None = None
     message: str | None = None
@@ -314,6 +324,7 @@ class ConversationStepRequest(BaseModel):
     approval_decision: Literal["allow", "deny"] | None = None
     default_host: str | None = None
     mock: bool = False
+    mock_tier: Literal["allow", "ask", "deny"] = "allow"
 
     @model_validator(mode="after")
     def _validate(self):
@@ -455,7 +466,7 @@ class ProfileInfo(BaseModel):
     # Whether the assistant may make changes in each of these areas
     # directly during a chat session, rather than only ever suggesting
     # them -- all off by default. Not yet enforced anywhere (see
-    # auth_service/main.py's /profile endpoints' own docstring) -- persisted
+    # casper_service/main.py's /profile endpoints' own docstring) -- persisted
     # preferences only for now.
     allow_configure_command_sets: bool = False
     allow_configure_apps: bool = False
@@ -463,7 +474,7 @@ class ProfileInfo(BaseModel):
     allow_configure_environments: bool = False
     allow_configure_local_agents: bool = False
     # Prepended as the model's own instructions on every conversation turn
-    # (see auth_service/conversations.py's run_turn) -- blank means no
+    # (see casper_service/conversations.py's run_turn) -- blank means no
     # custom instructions, the model's own default behavior.
     system_prompt: str = ""
     # telegram_chat_id is set only via the /telegram/link deep-link flow

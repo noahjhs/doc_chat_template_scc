@@ -17,7 +17,7 @@ services:
 
   auth:
     build:
-      context: ./auth_service
+      context: ./casper_service
       dockerfile: Dockerfile
     container_name: casper-auth
     restart: unless-stopped

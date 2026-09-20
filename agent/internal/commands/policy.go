@@ -9,7 +9,7 @@ import (
 )
 
 // Pattern is one whitelist/blacklist pair for a single positional or option
-// argument value -- see auth_service/models.py's Pattern for the full
+// argument value -- see casper_service/models.py's Pattern for the full
 // reasoning (RE2). Compiled once at fetch/decode time (see
 // config/policy.go's FetchPolicyLayers), never per-match. A missing value (a
 // position beyond what was supplied, or an option present with no value) is
@@ -66,7 +66,7 @@ const (
 // checked against its value, or against "" if it was present with no
 // value -- so a blank Pattern (Whitelist/Blacklist both nil) accepts
 // any/no value, and a Whitelist of "^$" requires no value specifically.
-// See auth_service/models.py's OptionConstraint for the full reasoning.
+// See casper_service/models.py's OptionConstraint for the full reasoning.
 type OptionConstraint struct {
 	Short, Long string
 	Pattern     Pattern
@@ -93,7 +93,7 @@ type Rule struct {
 }
 
 // PolicyLayer is the daemon's own cached copy of a user-authored, ordered
-// rule list -- fetched from auth_service (see config.FetchPolicyLayers) and
+// rule list -- fetched from casper_service (see config.FetchPolicyLayers) and
 // cached here so enforcement never has to trust the browser/model to have
 // applied a rule correctly. Rules is already ordered by position. A Policy
 // (see composePolicy below) is the concatenation of every PolicyLayer
@@ -105,7 +105,7 @@ type PolicyLayer struct {
 }
 
 // SetPolicyLayers replaces the entire cached set -- called after every fetch
-// from auth_service (pairing, resume, or an explicit refresh triggered
+// from casper_service (pairing, resume, or an explicit refresh triggered
 // from the web app), never merged incrementally.
 func (h *Handler) SetPolicyLayers(layers []PolicyLayer) {
 	h.mu.Lock()
@@ -301,38 +301,51 @@ func (h *Handler) ruleMatches(r Rule, positionalArgs []string, options []Request
 	return true
 }
 
+// composedRule pairs one Rule with the ID of the PolicyLayer it came from --
+// mirrors casper_service/policy.py's own compose_policy (a list of
+// (layer_id, rule) tuples), so matchPolicy can report which layer decided a
+// match (needed for eval_policy's verdict, and for run_shell_command's own
+// Result.MatchedLayerID) without a second bookkeeping pass.
+type composedRule struct {
+	LayerID int
+	Rule    Rule
+}
+
 // composePolicy concatenates every given layer's Rules into one ordered
 // list -- v1's whole composition rule (see the plan discussion this
 // implements: "our v1 engine can simply concatenate them... re-evaluate
 // after realistic usage"). Layers are sorted by ID ascending first, so
 // composition order is stable and independent of whatever order the caller
-// (or auth_service's own query, which currently orders by name) happened to
+// (or casper_service's own query, which currently orders by name) happened to
 // supply them in.
-func composePolicy(layers []PolicyLayer) []Rule {
+func composePolicy(layers []PolicyLayer) []composedRule {
 	sorted := append([]PolicyLayer(nil), layers...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-	var rules []Rule
+	var rules []composedRule
 	for _, pl := range sorted {
-		rules = append(rules, pl.Rules...)
+		for _, r := range pl.Rules {
+			rules = append(rules, composedRule{LayerID: pl.ID, Rule: r})
+		}
 	}
 	return rules
 }
 
 // matchPolicy composes layers into one Policy (see composePolicy) and walks
-// it in order, returning the first rule that matches -- nil means terminal
-// deny (every rule exhausted, none matched, including the case where layers
-// is empty or composes to zero rules). cwd is the effective directory the
-// call would run in (see runRunShellCommand) -- checked against each rule's
-// own Cwd pattern, and used as the join base for any PathResolutionDot
-// constraint.
-func (h *Handler) matchPolicy(layers []PolicyLayer, positionalArgs []string, options []RequestOption, cwd string) *Rule {
+// it in order, returning the first rule that matches (and the ID of the
+// layer it came from) -- (0, nil) means terminal deny (every rule
+// exhausted, none matched, including the case where layers is empty or
+// composes to zero rules; a real layer ID from the DB never legitimately
+// reaches 0). cwd is the effective directory the call would run in (see
+// runRunShellCommand) -- checked against each rule's own Cwd pattern, and
+// used as the join base for any PathResolutionDot constraint.
+func (h *Handler) matchPolicy(layers []PolicyLayer, positionalArgs []string, options []RequestOption, cwd string) (int, *Rule) {
 	rules := composePolicy(layers)
 	for i := range rules {
-		if h.ruleMatches(rules[i], positionalArgs, options, cwd) {
-			return &rules[i]
+		if h.ruleMatches(rules[i].Rule, positionalArgs, options, cwd) {
+			return rules[i].LayerID, &rules[i].Rule
 		}
 	}
-	return nil
+	return 0, nil
 }
 
 // buildArgv constructs the actual argv (excluding the binary itself, which
@@ -407,13 +420,26 @@ func (h *Handler) runRunShellCommand(req *Request) (Result, error) {
 	}
 	matchArgs := append([]string{resolvedBinary}, req.PositionalArgs[1:]...)
 
-	rule := h.matchPolicy(h.PolicyLayers(), matchArgs, req.Options, dir)
+	layerID, rule := h.matchPolicy(h.PolicyLayers(), matchArgs, req.Options, dir)
 	if rule == nil {
-		return Result{}, &ActionError{Detail: "Denied: no matching rule for this call."}
+		// Terminal deny, no rule matched at all -- a normal verdict (HTTP
+		// 200 via handleCommand, Tier "deny"), not an ActionError: the
+		// daemon is now the sole, authoritative decider of allow/ask/deny
+		// (no more "the caller already decided before ever calling this
+		// action" posture), so the caller must only ever consult Tier,
+		// never have to separately distinguish "nothing matched" from "a
+		// rule matched with its own tier deny".
+		return Result{Cwd: dir, Tier: "deny"}, nil
 	}
-	// Tier is NOT enforced here -- same posture as before: the web app
-	// decides ask/allow/deny before ever calling this action; command_key
-	// possession remains the real security boundary.
+	if rule.Tier == "deny" || (rule.Tier == "ask" && !req.Approved) {
+		// Verdict only, no execution. "ask" executes ONLY when
+		// req.Approved is set, and only because the rule matched THIS
+		// TIME, on THIS call, as tier "ask" (or "allow", if the policy
+		// changed to more permissive in the meantime) -- never because of
+		// anything remembered from an earlier call; the daemon keeps no
+		// state about a prior "ask" response at all.
+		return Result{Cwd: dir, Tier: rule.Tier, MatchedLayerID: layerID, MatchedRuleID: rule.ID}, nil
+	}
 
 	argv := buildArgv(req.PositionalArgs[1:], req.Options)
 
@@ -437,14 +463,60 @@ func (h *Handler) runRunShellCommand(req *Request) (Result, error) {
 			exitCode = exitErr.ExitCode()
 		}
 		return Result{
-			Success:  false,
-			Cwd:      dir,
-			Stdout:   strings.TrimSpace(stdout.String()),
-			Stderr:   strings.TrimSpace(stderr.String()),
-			ExitCode: &exitCode,
+			Success:        false,
+			Cwd:            dir,
+			Stdout:         strings.TrimSpace(stdout.String()),
+			Stderr:         strings.TrimSpace(stderr.String()),
+			ExitCode:       &exitCode,
+			Tier:           rule.Tier,
+			MatchedLayerID: layerID,
+			MatchedRuleID:  rule.ID,
 		}, nil
 	}
 	return Result{
 		Success: true, Cwd: dir, Stdout: strings.TrimSpace(stdout.String()), Stderr: strings.TrimSpace(stderr.String()),
+		Tier: rule.Tier, MatchedLayerID: layerID, MatchedRuleID: rule.ID,
 	}, nil
+}
+
+// runEvalPolicy evaluates a hypothetical call against an AD HOC, possibly-
+// unattached composition of rules supplied inline on the request (see
+// Request.PolicyLayers) -- never h.PolicyLayers() (this handler's own
+// cached, host-attached set; that's run_shell_command's job). No
+// execution, ever: exists purely so casper_service's POST /policies/eval can
+// ask a REAL, connected daemon to evaluate a call the exact same way
+// run_shell_command itself would, without casper_service maintaining its own
+// copy of the matcher. Success is always false; Tier/MatchedLayerID/
+// MatchedRuleID are the whole point.
+func (h *Handler) runEvalPolicy(req *Request) (Result, error) {
+	if len(req.PositionalArgs) == 0 {
+		return Result{}, &ActionError{Detail: "'positional_args' must include at least the binary."}
+	}
+	layers := make([]PolicyLayer, 0, len(req.PolicyLayers))
+	for _, lw := range req.PolicyLayers {
+		rules := make([]Rule, 0, len(lw.Rules))
+		for _, rw := range lw.Rules {
+			rule, err := CompileRule(rw)
+			if err != nil {
+				return Result{}, &ActionError{Detail: fmt.Sprintf("policy layer %d (%s): rule %d failed to compile: %s", lw.ID, lw.Name, rw.ID, err)}
+			}
+			rules = append(rules, rule)
+		}
+		layers = append(layers, PolicyLayer{ID: lw.ID, Name: lw.Name, Rules: rules})
+	}
+
+	// Position 0: best-effort $PATH resolution, degrading to the raw name
+	// on lookup failure -- unlike run_shell_command, this never executes
+	// anything, so a hypothetical binary that doesn't actually exist on
+	// this machine is still a legitimate thing to ask "what would happen
+	// if..." about.
+	matchArgs := append([]string(nil), req.PositionalArgs...)
+	if resolved, err := exec.LookPath(matchArgs[0]); err == nil {
+		matchArgs[0] = resolved
+	}
+	layerID, rule := h.matchPolicy(layers, matchArgs, req.Options, req.Cwd)
+	if rule == nil {
+		return Result{Tier: "deny"}, nil
+	}
+	return Result{Tier: rule.Tier, MatchedLayerID: layerID, MatchedRuleID: rule.ID}, nil
 }

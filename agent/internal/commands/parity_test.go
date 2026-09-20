@@ -9,7 +9,7 @@ import (
 )
 
 // Cross-implementation parity: this package's own matchPolicy vs.
-// auth_service/policy.py's match_policy are two independent
+// casper_service/policy.py's match_policy are two independent
 // implementations of the same rule-matching semantics -- nothing else
 // proves they actually agree. Both this file and tests/test_policy_parity.py
 // load the exact same tests/fixtures/policy_parity.json and must reach the
@@ -109,7 +109,7 @@ func TestPolicyParityFixture(t *testing.T) {
 			}
 			layers := []PolicyLayer{{ID: 0, Rules: rules}}
 
-			matched := h.matchPolicy(layers, c.PositionalArgs, c.Options, c.Cwd)
+			_, matched := h.matchPolicy(layers, c.PositionalArgs, c.Options, c.Cwd)
 
 			tier := "deny"
 			if matched != nil {

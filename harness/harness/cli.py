@@ -48,7 +48,7 @@ try:
 except ImportError:  # Windows without pyreadline3
     readline = None
 
-app = typer.Typer(help="Casper backend test harness -- drives auth_service directly, no GUI in the loop.")
+app = typer.Typer(help="Casper backend test harness -- drives casper_service directly, no GUI in the loop.")
 
 # Split into two --help panels, per the project's own established framing
 # (see this module's own docstring): USER_PANEL is this CLI mocking the
@@ -264,9 +264,11 @@ def _load_chat_state(domain: str, username: str) -> Optional[dict]:
     return saved
 
 
-def _save_chat_state(domain: str, username: str, host: Optional[str], mock: bool, turn: dict) -> None:
+def _save_chat_state(domain: str, username: str, host: Optional[str], mock: bool, mock_tier: str, turn: dict) -> None:
     CHAT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CHAT_STATE_PATH.write_text(json.dumps({"domain": domain, "username": username, "host": host, "mock": mock, "turn": turn}))
+    CHAT_STATE_PATH.write_text(
+        json.dumps({"domain": domain, "username": username, "host": host, "mock": mock, "mock_tier": mock_tier, "turn": turn})
+    )
 
 
 def _clear_chat_state() -> None:
@@ -1032,15 +1034,18 @@ def eval(
         [], "--option", "-o", help="short=VALUE, long=VALUE, or a bare short/long with no value -- may be repeated."
     ),
     cwd: str = typer.Option("", "--cwd", help="The hypothetical call's cwd -- checked against a rule's own cwd pattern."),
+    host: Optional[str] = typer.Option(
+        None, "--host", help="Which connected host's daemon to route the eval to -- required unless exactly one is connected."
+    ),
 ):
-    """Evaluate a hypothetical call against a composed policy -- no
-    execution, no daemon involved. The fastest, most deterministic rung of
-    the testing ladder."""
+    """Evaluate a hypothetical call against a composed policy -- routes to
+    a real, connected daemon (agent/internal/commands/policy.go's own
+    matcher); no local evaluation happens anymore."""
     domain, token = _require_session()
     try:
         layer_ids = [_resolve_layer_id(domain, token, name_or_id) for name_or_id in layer]
         options = [_parse_option(o) for o in option]
-        result = client.eval_policy(domain, token, layer_ids, positional_args=list(arg), options=options, cwd=cwd)
+        result = client.eval_policy(domain, token, layer_ids, positional_args=list(arg), options=options, cwd=cwd, host=host)
     except client.ApiError as e:
         _handle_api_error(e)
     console.print(result)
@@ -1108,13 +1113,20 @@ def call_tool_cmd(
     arg: list[str] = typer.Option([], "--arg", help="key=json_value -- may be repeated, e.g. --arg positional_args='[\"npm\",\"run\"]'"),
     host: Optional[str] = typer.Option(None, "--host"),
     mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
+    mock_tier: str = typer.Option(
+        "allow",
+        "--mock-tier",
+        help="Explicit tier to simulate for a mocked run_shell_command call (allow/ask/deny) -- mocking never evaluates policy itself.",
+    ),
     approve: bool = typer.Option(False, "--approve", help="Auto-approve any resulting ask-tier pause."),
     deny: bool = typer.Option(False, "--deny", help="Auto-deny any resulting ask-tier pause."),
 ):
     """Inject a tool call directly, as if the model had already decided to
     make it -- a live (or, with --mock, daemon-free) reproduction of one
-    tool call, exercising the exact same tier-decision/dispatch/approval
-    path a real model-issued call goes through."""
+    tool call, exercising the exact same dispatch/approval path a real
+    model-issued call goes through. The daemon (or, with --mock,
+    --mock-tier) decides allow/ask/deny -- this never evaluates policy
+    itself."""
     domain, token = _require_session()
     arguments = {}
     for a in arg:
@@ -1124,7 +1136,7 @@ def call_tool_cmd(
         except json.JSONDecodeError:
             arguments[key] = raw_value
     try:
-        result = client.call_tool(domain, token, name, arguments, mock=mock, default_host=host)
+        result = client.call_tool(domain, token, name, arguments, mock=mock, mock_tier=mock_tier, default_host=host)
     except client.ApiError as e:
         _handle_api_error(e)
     _print_step_result(result)
@@ -1137,6 +1149,11 @@ def call_tool_cmd(
 def chat(
     host: Optional[str] = typer.Option(None, "--host"),
     mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
+    mock_tier: str = typer.Option(
+        "allow",
+        "--mock-tier",
+        help="Explicit tier to simulate for a mocked run_shell_command call (allow/ask/deny) -- mocking never evaluates policy itself.",
+    ),
     new: bool = typer.Option(False, "--new", help="Start a fresh conversation instead of resuming the last one."),
 ):
     """A real conversational turn -- the model decides what (if anything)
@@ -1158,6 +1175,7 @@ def chat(
             if host is None:
                 host = saved.get("host")
             mock = mock or bool(saved.get("mock", False))
+            mock_tier = saved.get("mock_tier", mock_tier)
             resumed = turn is not None
     console.print("Casper harness chat. Type 'exit' or 'quit' (or Ctrl-C) to leave, 'new' to start over.")
     if resumed:
@@ -1205,7 +1223,7 @@ def chat(
                 None,
             )
             turn = result["turn"]
-            _save_chat_state(domain, username, host, mock, turn)
+            _save_chat_state(domain, username, host, mock, mock_tier, turn)
     others = [p for p in pending_list if p["id"] != resumed_approval_id]
     if others:
         plural = "s" if len(others) != 1 else ""
@@ -1227,7 +1245,7 @@ def chat(
             console.print("[dim]Started a new conversation.[/dim]")
             continue
         try:
-            result = client.chat_step(domain, token, message=message, turn=turn, default_host=host, mock=mock)
+            result = client.chat_step(domain, token, message=message, turn=turn, default_host=host, mock=mock, mock_tier=mock_tier)
         except client.ApiError as e:
             _handle_api_error(e)
         _print_step_result(result)
@@ -1237,10 +1255,10 @@ def chat(
             # leaves chat_state.json correctly reflecting the paused turn,
             # instead of the pre-pause state that was there before this
             # message was ever sent.
-            _save_chat_state(domain, username, host, mock, result["turn"])
+            _save_chat_state(domain, username, host, mock, mock_tier, result["turn"])
             result = _resolve_pending_approval(result, domain, token, None)
         turn = result["turn"]
-        _save_chat_state(domain, username, host, mock, turn)
+        _save_chat_state(domain, username, host, mock, mock_tier, turn)
 
 
 if __name__ == "__main__":

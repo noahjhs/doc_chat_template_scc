@@ -229,3 +229,51 @@ func TestHandleShutdown_OnlySignsOutTheResolvedIdentity(t *testing.T) {
 		t.Fatalf("expected the server to still accept new identities after a sign-out, got %d", got)
 	}
 }
+
+func TestHandleCommand_TierAndMatchedIDsRoundTripUnmodified(t *testing.T) {
+	// handleCommand needs no changes for the new Tier/MatchedLayerID/
+	// MatchedRuleID Result fields -- it serializes whatever Dispatch
+	// returns verbatim. This pins that down end-to-end, through real HTTP.
+	s := newTestServer()
+	h := commands.New(t.TempDir())
+	h.SetPolicyLayers([]commands.PolicyLayer{{ID: 3, Rules: []commands.Rule{{ID: 11, Tier: "ask"}}}})
+	s.AddIdentity("key-a", h, nil, nil)
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	result := doCommand(t, ts, "key-a", commands.Request{Action: "run_shell_command", PositionalArgs: []string{"echo"}})
+	if result.Tier != "ask" || result.MatchedLayerID != 3 || result.MatchedRuleID != 11 {
+		t.Fatalf("expected Tier/MatchedLayerID/MatchedRuleID to round-trip through handleCommand unmodified, got %+v", result)
+	}
+}
+
+func TestHandleCommand_RunShellCommandIgnoresInlinePolicyLayers(t *testing.T) {
+	// Regression guard: run_shell_command must never consult a request's
+	// own PolicyLayers (eval_policy's inline field) -- only its own
+	// cached, host-attached h.PolicyLayers(). A request that (incorrectly,
+	// or maliciously) sets both must still enforce against the cached set
+	// alone.
+	s := newTestServer()
+	h := commands.New(t.TempDir())
+	h.SetPolicyLayers([]commands.PolicyLayer{{ID: 1, Rules: []commands.Rule{{ID: 1, Tier: "deny"}}}})
+	s.AddIdentity("key-a", h, nil, nil)
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	result := doCommand(t, ts, "key-a", commands.Request{
+		Action:         "run_shell_command",
+		PositionalArgs: []string{"echo"},
+		PolicyLayers: []commands.PolicyLayerWire{{
+			ID:   99,
+			Name: "inline-allow-everything",
+			Rules: []commands.RuleWire{{
+				ID:                    99,
+				PositionalConstraints: []commands.PatternWire{},
+				Tier:                  "allow",
+			}},
+		}},
+	})
+	if result.Tier != "deny" {
+		t.Fatalf("expected the cached (deny) layer to govern, not the request's own inline PolicyLayers, got %+v", result)
+	}
+}

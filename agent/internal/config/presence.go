@@ -11,13 +11,13 @@ import (
 // telling it where this daemon is currently reachable (its relay URL) and
 // its own confined directory (see commands.Handler.HomeRoot -- a single
 // fixed directory, not a dynamic set), authenticated with this
-// installation's own device_token. Letting auth_service cache this cwd is
+// installation's own device_token. Letting casper_service cache this cwd is
 // what lets its own best-effort policy preview do "." path_resolution
 // without a live round-trip on every call -- see policy.py's module
 // docstring. Returns unauthorized=true when the auth service no longer
 // recognizes that token (e.g. after a remote bulk sign-out, or an
-// auth_service restart -- its attachment tracking is in-memory, see
-// auth_service/main.py's _attached) so the caller can self-heal (clear its
+// casper_service restart -- its attachment tracking is in-memory, see
+// casper_service/main.py's _attached) so the caller can self-heal (clear its
 // local session, go idle) instead of retrying forever against a dead
 // credential. Otherwise best-effort: a network failure just means the web
 // app sees "not connected" until the next successful report.

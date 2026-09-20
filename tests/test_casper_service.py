@@ -5,9 +5,9 @@ import tempfile
 
 import pytest
 
-AUTH_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "auth_service")
+CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
 
-# Must match auth_service/models.py's own Pattern.blacklist
+# Must match casper_service/models.py's own Pattern.blacklist
 # default exactly -- a blank blacklist round-trips as this, not None.
 BLACKLIST_MATCHES_NOTHING = r"[^\s\S]"
 
@@ -17,7 +17,7 @@ def client():
     """Fresh SQLite file + freshly imported app per test, so tests don't
     leak state into each other (main.py's rate limiter and db path are
     both set at import time)."""
-    sys.path.insert(0, os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.insert(0, os.path.abspath(CASPER_SERVICE_DIR))
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
@@ -27,7 +27,7 @@ def client():
         from fastapi.testclient import TestClient
 
         yield TestClient(auth_main.app)
-    sys.path.remove(os.path.abspath(AUTH_SERVICE_DIR))
+    sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
     for mod in ("main", "db", "models"):
         sys.modules.pop(mod, None)
 
@@ -148,7 +148,7 @@ def test_pair_then_list(client):
     assert client.get("/hosts", headers=headers).json()["hosts"][0]["cwd"] == ""
 
 
-def test_pairing_survives_an_auth_service_restart(client):
+def test_pairing_survives_an_casper_service_restart(client):
     """The actual fix host_pairings exists for: a device_token issued
     before a restart must still work after one, with no re-pairing
     needed -- only the live reachability state (local_agent_url/cwd,
@@ -204,7 +204,7 @@ def test_pairing_the_same_host_to_a_second_account_succeeds_even_when_not_live(c
     """One physical daemon (routing_key) can be paired to several accounts
     at once -- confirmed here from the PERSISTED pairing state, not just a
     live in-memory one, since that's the actual mechanism (host_pairings
-    survives a restart; see test_pairing_survives_an_auth_service_restart).
+    survives a restart; see test_pairing_survives_an_casper_service_restart).
     Both pairings must coexist as independent rows, each with its own
     device_token, neither disturbing the other."""
     a = _signup(client, "howard")
@@ -1001,7 +1001,7 @@ def test_pending_approvals_are_scoped_per_user(client):
     with auth_main.get_db() as db:
         user_id_a = auth_main._resolve_user_id(db, f"Bearer {a['token']}")
     approval_id = auth_main._create_pending_approval_record(
-        user_id_a, "run `npm run build` on Erin's Mac", {"awaiting_approval": {}}, None, False
+        user_id_a, "run `npm run build` on Erin's Mac", {"awaiting_approval": {}}, None, False, "allow"
     )
 
     mine = client.get("/conversations/pending-approvals", headers=headers_a).json()["pending_approvals"]
@@ -1058,12 +1058,12 @@ def test_approval_telegram_sent_only_when_enabled_and_linked(client):
         user_id = auth_main._resolve_user_id(db, f"Bearer {signup['token']}")
 
     # Neither set -- nothing sent.
-    auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False)
+    auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False, "allow")
     assert fake.calls == []
 
     # Enabled but never linked -- still nothing.
     client.patch("/profile", json={"telegram_notifications_enabled": True}, headers=headers)
-    auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False)
+    auth_main._create_pending_approval_record(user_id, "run `ls` on my-mac", {}, None, False, "allow")
     assert fake.calls == []
 
     # Linked directly (bypassing the /start deep-link flow, which is
@@ -1071,7 +1071,7 @@ def test_approval_telegram_sent_only_when_enabled_and_linked(client):
     # Approve/Deny buttons keyed to the exact approval_id.
     with auth_main.get_db() as db:
         db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("12345", user_id))
-    approval_id = auth_main._create_pending_approval_record(user_id, "run `rm x` on my-mac", {}, None, False)
+    approval_id = auth_main._create_pending_approval_record(user_id, "run `rm x` on my-mac", {}, None, False, "allow")
     assert len(fake.calls) == 1
     assert fake.calls[0]["url"].endswith("/sendMessage")
     body = fake.calls[0]["json"]
@@ -1151,7 +1151,7 @@ def test_telegram_webhook_callback_rejects_wrong_owner(client):
         auth_main._get_or_create_profile(db, other_id)
         db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("111", owner_id))
         db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", ("222", other_id))
-    approval_id = auth_main._create_pending_approval_record(owner_id, "run `rm x` on my-mac", {}, None, False)
+    approval_id = auth_main._create_pending_approval_record(owner_id, "run `rm x` on my-mac", {}, None, False, "allow")
 
     webhook_headers = {"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"}
     # The OTHER user's chat tries to decide the owner's approval.

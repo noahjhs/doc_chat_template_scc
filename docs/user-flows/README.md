@@ -13,7 +13,7 @@ real Gatekeeper prompt, a real `casper://pair` hand-off).
 Not on every change — these are deliberate, occasional passes, not CI.
 Run a flow when:
 - something in its path changed (the download page, the pairing flow, the
-  daemon's startup/relaunch behavior, auth_service's presence/attachment
+  daemon's startup/relaunch behavior, casper_service's presence/attachment
   handling),
 - or on a regular cadence regardless, specifically because nothing else
   will catch drift here otherwise.
@@ -35,3 +35,9 @@ Steps use `- [ ]` so a real run-through can be checked off live.
   launch → sign in → pair. The one explicitly called out when this
   directory was created: automating daemon redeploy/re-pairing removes the
   only thing that was routinely exercising this path.
+- [daemon-authoritative-dispatch.md](daemon-authoritative-dispatch.md) —
+  `harness`-driven, not a real end-user path (no automated layer reaches a
+  real daemon's own matcher, a real approval-resend round trip, or a real
+  Telegram tap — see `docs/testing-strategy.md`'s Layer 4). Allow/ask/deny/
+  resend dispatch and `/policies/eval` against a real, paired daemon, plus
+  one real Telegram approve tap.

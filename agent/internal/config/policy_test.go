@@ -84,7 +84,7 @@ func TestFetchPolicyLayersDecodesPositionalAndOptionShapes(t *testing.T) {
 }
 
 func TestFetchPolicyLayersDecodesCurrentBlacklistDefault(t *testing.T) {
-	// auth_service now always sends a real blacklist string, never null --
+	// casper_service now always sends a real blacklist string, never null --
 	// a "not specified" one defaults to BLACKLIST_MATCHES_NOTHING
 	// ("[^\s\S]", a character class that can never match anything). This
 	// compiles to a real, non-nil regexp (unlike the legacy nil-blacklist

@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_user_hosts_host_id ON user_hosts(host_id);
 -- the same (routing_key, user_id) is idempotent -- replaces that one row's
 -- credentials in place (see main.py's _pair_host), never disturbs any
 -- other user's row for the same routing_key. Unlike the old in-memory-only
--- _attached dict this replaced, this survives an auth_service restart --
+-- _attached dict this replaced, this survives an casper_service restart --
 -- the actual fix for daemons needing to be manually re-paired after every
 -- routine redeploy: device_token_hash stays valid, so a daemon's own
 -- existing resumeSession()-on-startup logic (agent/cmd/casper/main.go)
@@ -142,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_command_template_hosts_host_id ON command_templat
 -- exact-match allowlist with sequential first-match-wins evaluation (see
 -- policy_layer_rules below). A "Policy" is the composition of one or more
 -- layers for a single tool (v1: shell only, by straight concatenation --
--- see auth_service's /policies/eval); a rule is only ever evaluated as
+-- see casper_service's /policies/eval); a rule is only ever evaluated as
 -- part of a policy, never a layer standalone. "Policy Layer" is
 -- deliberately not called "Toolset" -- that name is reserved for a
 -- later, broader concept spanning every tool (not just shell), once more
@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     turn TEXT NOT NULL,
     default_host TEXT,
     mock INTEGER NOT NULL DEFAULT 0,
+    mock_tier TEXT NOT NULL DEFAULT 'allow',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_user_id ON pending_approvals(user_id);
@@ -308,6 +309,23 @@ def _add_telegram_columns_to_user_profile(db):
         db.execute("ALTER TABLE user_profile ADD COLUMN telegram_notifications_enabled INTEGER NOT NULL DEFAULT 0")
 
 
+def _add_mock_tier_column_to_pending_approvals(db):
+    """One-time ALTER TABLE ADD COLUMN for pending_approvals.mock_tier --
+    the explicit tier a mocked run_shell_command call was paused under
+    (see conversations.py's DispatchContext.mock_tier), needed to resume a
+    mocked "ask" the same way it was originally simulated. Same posture as
+    the other one-time column migrations above: runs AFTER the CREATE
+    TABLE IF NOT EXISTS script, idempotent, never runs against a database
+    that doesn't have the table yet."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "pending_approvals" not in existing:
+        return
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(pending_approvals)").fetchall()}
+    if "mock_tier" in columns:
+        return
+    db.execute("ALTER TABLE pending_approvals ADD COLUMN mock_tier TEXT NOT NULL DEFAULT 'allow'")
+
+
 def init_db():
     with get_db() as db:
         _rename_legacy_rule_chain_tables(db)
@@ -315,6 +333,7 @@ def init_db():
         _add_cwd_column_to_policy_layer_rules(db)
         _add_system_prompt_column_to_user_profile(db)
         _add_telegram_columns_to_user_profile(db)
+        _add_mock_tier_column_to_pending_approvals(db)
 
 
 @contextlib.contextmanager
