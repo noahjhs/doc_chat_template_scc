@@ -25,6 +25,30 @@ jobs:
       - name: pytest
         run: pytest tests/ -v
 
+  harness-macos:
+    # macos-latest, not ubuntu -- harness's own keyring dependency uses a
+    # real macOS Keychain backend there (a no-op/different backend on
+    # Linux), and pyobjc-framework-LocalAuthentication (Touch ID gating,
+    # see harness/harness/cli.py's _authenticate_device_owner) is a
+    # platform-conditional dependency that only even installs on darwin --
+    # the ubuntu `python` job above never exercises either at all. Runs
+    # only the harness-specific test files (the rest of tests/ needs no
+    # macOS-specific behavior and already runs on the ubuntu job).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r auth_service/requirements.txt
+          pip install -e harness/
+          pip install pytest
+      - name: pytest (harness)
+        run: pytest tests/test_harness_cli.py tests/test_harness_flows.py -v
+
   go:
     # macos-latest, not ubuntu -- agent/ has Darwin-tagged build-constrained
     # files (statusicon_darwin.go, workspace_darwin.go, etc.) with no Linux
