@@ -148,6 +148,77 @@ def test_pair_then_list(client):
     assert client.get("/hosts", headers=headers).json()["hosts"][0]["cwd"] == ""
 
 
+def test_pairing_survives_an_auth_service_restart(client):
+    """The actual fix host_pairings exists for: a device_token issued
+    before a restart must still work after one, with no re-pairing
+    needed -- only the live reachability state (local_agent_url/cwd,
+    genuinely ephemeral) should reset. Simulates the restart by clearing
+    main's own in-memory `_live` dict directly (what a real process
+    restart empties) without touching the SQLite file (what actually
+    persists) -- the precise mechanism at play, not just an approximation
+    of it."""
+    import main as auth_main
+
+    signup = _signup(client, "gina2")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    pair = client.post(
+        "/hosts/pair", json={"routing_key": "rk-gina2-1", "hostname": "ginas-mac"}, headers=headers
+    ).json()
+    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
+    client.post(
+        "/hosts/presence",
+        json={"local_agent_url": "https://relay.example/agent/gina2", "cwd": "/Users/gina2"},
+        headers=device_headers,
+    )
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["connected"] is True
+
+    # Simulate the restart -- identity (host_pairings, in SQLite) survives;
+    # live reachability (in-memory) doesn't.
+    auth_main._live.clear()
+
+    # The device_token still works with zero re-pairing -- confirms
+    # verify_host doesn't 401 something a real daemon's own
+    # resumeSession()-on-startup would have relied on.
+    assert client.post("/hosts/verify", headers=device_headers).json() == {"valid": True}
+
+    # Reachability genuinely reset -- "connected" reflects live state, and
+    # a real daemon would report presence again immediately after
+    # resuming anyway.
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert hosts[0]["connected"] is False
+    assert hosts[0]["cwd"] == ""
+
+    # A fresh presence report (exactly what a real daemon does right after
+    # resuming) brings it back to fully connected, no re-pair involved.
+    client.post(
+        "/hosts/presence",
+        json={"local_agent_url": "https://relay.example/agent/gina2", "cwd": "/Users/gina2"},
+        headers=device_headers,
+    )
+    hosts = client.get("/hosts", headers=headers).json()["hosts"]
+    assert hosts[0]["connected"] is True
+    assert hosts[0]["cwd"] == "/Users/gina2"
+
+
+def test_pairing_to_an_already_paired_host_is_rejected_even_when_not_live(client):
+    """HostAlreadyAttachedError must trigger from the PERSISTED pairing,
+    not just a live in-memory one -- otherwise a routing_key that's
+    genuinely still owned by user A, but not currently connected in this
+    process's lifetime, could be silently stolen by user B. This was a
+    real gap the old in-memory-only design had (the check only ever saw
+    "currently live," not "ever paired")."""
+    a = _signup(client, "howard")
+    b = _signup(client, "iris2")
+    headers_a = {"Authorization": f"Bearer {a['token']}"}
+    headers_b = {"Authorization": f"Bearer {b['token']}"}
+
+    paired = client.post("/hosts/pair", json={"routing_key": "rk-shared-1"}, headers=headers_a)
+    assert paired.status_code == 201
+
+    stolen = client.post("/hosts/pair", json={"routing_key": "rk-shared-1"}, headers=headers_b)
+    assert stolen.status_code == 409
+
+
 def test_pair_is_idempotent_for_the_same_user(client):
     signup = _signup(client, "frank")
     headers = {"Authorization": f"Bearer {signup['token']}"}

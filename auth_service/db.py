@@ -20,9 +20,7 @@ CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
 -- (keyed by its stable, self-persisted routing_key -- see
 -- agent/internal/config/routingkey.go), never tied to a user. Multiple
 -- users can each know/use the same host over time (see user_hosts below);
--- who's *currently* attached is runtime state, deliberately not persisted
--- here -- see auth_service/main.py's _attached in-memory map and its
--- docstring for why.
+-- see host_pairings below for which one currently owns it.
 CREATE TABLE IF NOT EXISTS hosts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     routing_key TEXT NOT NULL UNIQUE,
@@ -42,6 +40,30 @@ CREATE TABLE IF NOT EXISTS user_hosts (
     PRIMARY KEY (user_id, host_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_hosts_host_id ON user_hosts(host_id);
+
+-- Which user currently OWNS a routing_key, and the live credentials that
+-- prove it -- one row per currently-paired physical host, replaced
+-- wholesale on every (re-)pairing (see main.py's _pair_host). Unlike the
+-- old in-memory-only _attached dict this replaced, this survives an
+-- auth_service restart -- the actual fix for daemons needing to be
+-- manually re-paired after every routine redeploy: device_token_hash
+-- stays valid, so a daemon's own existing resumeSession()-on-startup
+-- logic (agent/cmd/casper/main.go) just works again on its own, no
+-- `casper://pair` round trip needed unless this row is genuinely gone
+-- (a real first-time pairing, or an explicit unpair/forget/sign-out).
+-- Deliberately does NOT include local_agent_url/cwd -- those are live
+-- reachability facts a restart should legitimately forget (a daemon
+-- reports them fresh on its next presence beat regardless), not identity
+-- -- see main.py's _live in-memory dict for those.
+CREATE TABLE IF NOT EXISTS host_pairings (
+    routing_key TEXT PRIMARY KEY REFERENCES hosts(routing_key),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    device_token_hash TEXT NOT NULL UNIQUE,
+    command_key TEXT NOT NULL,
+    paired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_host_pairings_device_token_hash ON host_pairings(device_token_hash);
 
 -- User-defined named groupings of their known hosts -- which hosts are
 -- "in play" for the assistant during a given chat session.
