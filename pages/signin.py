@@ -3,7 +3,7 @@ import time
 
 import streamlit as st
 
-from utils.auth import build_pair_url, login_with_auth_service, require_app_subdomain
+from utils.auth import build_pair_url, connected_host_ids, login_with_auth_service, require_app_subdomain
 from utils.branding import page_header
 from utils.browser_nav import autofocus_input_js, click_anchor_js
 
@@ -67,4 +67,35 @@ if "_login_token" in st.session_state:
     # direct window.parent.location assignment doesn't reliably work from
     # inside st.iframe's sandbox).
     st.iframe(f"<script>{click_anchor_js(json.dumps(pair_url))}</script>", height=1)
-    st.write("Check your computer -- Casper should connect automatically. You can close this tab.")
+
+    # Closes the "no product-facing way to confirm pairing worked" gap
+    # (previously only checkable via `harness hosts list`, an internal dev
+    # tool -- see docs/user-flows/first-time-setup.md's Known Issues).
+    # Snapshots which hosts were ALREADY connected before the hand-off
+    # above, so a returning user with some other already-connected machine
+    # doesn't get a false-positive the instant this page loads -- only a
+    # host connecting AFTER the snapshot counts as confirmation this
+    # specific pairing worked. A one-shot poll (guarded by
+    # _pairing_poll_done so a later, unrelated rerun of this page doesn't
+    # re-poll or flicker the result): bounded to a few seconds since this
+    # blocks rendering, with a quiet fallback to the original generic
+    # message on timeout or any API hiccup -- pairing may well have still
+    # worked, this poll just isn't the source of truth for it (harness
+    # hosts list / GET /hosts still is).
+    if "_pairing_poll_done" not in st.session_state:
+        already_connected = connected_host_ids(auth_domain, token) or set()
+        confirmed = False
+        with st.spinner("Waiting for Casper to connect..."):
+            for _ in range(8):  # ~8 checks, 1.5s apart -- about 12s total
+                time.sleep(1.5)
+                current = connected_host_ids(auth_domain, token)
+                if current and current - already_connected:
+                    confirmed = True
+                    break
+        st.session_state["_pairing_poll_done"] = True
+        st.session_state["_pairing_confirmed"] = confirmed
+
+    if st.session_state["_pairing_confirmed"]:
+        st.success("Casper connected. You can close this tab.")
+    else:
+        st.write("Check your computer -- Casper should connect automatically. You can close this tab.")

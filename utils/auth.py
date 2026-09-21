@@ -126,6 +126,31 @@ def login_with_auth_service(auth_domain, username, password):
     return {"error": _error_detail(response, "Log in failed.")}
 
 
+def connected_host_ids(auth_domain, token):
+    """GET /hosts, returns the set of this account's currently-connected
+    host ids -- used by pages/signin.py's own post-pairing confirmation
+    poll (see its own comment) to detect a NEW connection rather than one
+    that was already live before the casper://pair hand-off fired. Returns
+    None (not an empty set) on any failure, so a caller can tell "checked,
+    found nothing yet" apart from "couldn't check at all" -- this is a
+    nicety, not the pairing itself, so a caller should degrade quietly on
+    None rather than surface a scary error over it."""
+    try:
+        response = requests.get(
+            f"{_base_url(auth_domain)}/hosts",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        return {h["host_id"] for h in response.json()["hosts"] if h.get("connected")}
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def pair_url_scheme(auth_domain: str) -> str:
     """"casper-dev" for a dev deployment (auth_domain starting with
     "dev-", this project's established dev/prod naming convention -- see

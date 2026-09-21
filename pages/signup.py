@@ -3,7 +3,7 @@ import time
 
 import streamlit as st
 
-from utils.auth import build_pair_url, require_app_subdomain, signup_with_auth_service
+from utils.auth import build_pair_url, connected_host_ids, require_app_subdomain, signup_with_auth_service
 from utils.branding import page_header
 from utils.browser_nav import autofocus_input_js, click_anchor_js
 
@@ -63,4 +63,25 @@ if "_signup_token" in st.session_state:
     # of the flow now (no more /environments to send you to), and why a
     # real anchor click is what actually fires the casper:// hand-off.
     st.iframe(f"<script>{click_anchor_js(json.dumps(pair_url))}</script>", height=1)
-    st.write("Check your computer -- Casper should connect automatically. You can close this tab.")
+
+    # See pages/signin.py's identical block for the full reasoning -- a
+    # fresh signup has no existing hosts at all, so the "already connected"
+    # snapshot here is trivially empty, but the same one-shot/bounded-poll/
+    # quiet-fallback shape still applies.
+    if "_pairing_poll_done" not in st.session_state:
+        already_connected = connected_host_ids(auth_domain, token) or set()
+        confirmed = False
+        with st.spinner("Waiting for Casper to connect..."):
+            for _ in range(8):  # ~8 checks, 1.5s apart -- about 12s total
+                time.sleep(1.5)
+                current = connected_host_ids(auth_domain, token)
+                if current and current - already_connected:
+                    confirmed = True
+                    break
+        st.session_state["_pairing_poll_done"] = True
+        st.session_state["_pairing_confirmed"] = confirmed
+
+    if st.session_state["_pairing_confirmed"]:
+        st.success("Casper connected. You can close this tab.")
+    else:
+        st.write("Check your computer -- Casper should connect automatically. You can close this tab.")

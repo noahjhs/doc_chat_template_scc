@@ -28,21 +28,25 @@ from the landing page to a paired, working daemon.
       "Getting started" list and a platform download button.
 - [ ] 3. Download the Mac build.
       **Expected:** a `Casper-macos.zip` downloads.
-- [ ] 4. Unzip it, open `Casper.app` for the first time (double-click).
-      **Expected:** per the page's own warning, macOS Gatekeeper blocks it
-      the first time ("Apple could not verify..."). Follow the documented
-      `xattr -cr` workaround, then reopen.
-      **⚠ Verify this expectation is still accurate** — the current build
-      pipeline (`build/build_go_macos.sh`) signs *and notarizes* the
-      binary (confirmed directly during the 2026-09-19 dev deploy: a real
-      `xcrun notarytool submit ... --wait` succeeded and the ticket was
-      stapled). A properly notarized, stapled app is not usually the
-      "could not verify" block at all — it's typically the milder "are you
-      sure you want to open an app downloaded from the internet?" prompt
-      with a plain **Open** button, no Terminal/`xattr` needed. If that's
-      what actually happens, the download page's warning is stale and
-      should be simplified or removed — note the actual behavior observed
-      here either way.
+- [ ] 4. Unzip it, open `Casper.app` for the first time (double-click, then
+      if that doesn't work, right-click → **Open** per the page's current
+      copy).
+      **Expected:** some first-run warning, resolved via the page's
+      instructions, no Terminal/`xattr` needed.
+      **Copy fixed 2026-09-20** (was stale since 2026-09-19's deploy) —
+      `pages/download.py` previously claimed Casper "isn't yet notarized"
+      and told users to run `xattr -cr` in Terminal; both were wrong by
+      then. Confirmed directly this time via `spctl -a -vvv --type execute`
+      (`accepted, source=Notarized Developer ID`) and `xcrun stapler
+      validate` (passed) against the actual built app — a properly
+      notarized, stapled app doesn't need the quarantine-stripping
+      workaround at all, just the standard right-click-to-open bypass.
+      Copy updated to that; `streamlit.testing.v1.AppTest` confirms the
+      page still renders with no exception. **Still not verified: an
+      actual human double/right-clicking through it** — `spctl`/`stapler`
+      confirm what Gatekeeper's verdict *would* be, not the exact dialog
+      wording/flow on a real run (which varies by macOS version) — do
+      that the next time this flow gets a real run-through.
 - [ ] 5. After it opens: confirm the 👻 status-bar icon appears, and that
       **no** workspace/folder picker appears (Phase 3 retired that — the
       daemon confines itself to the home directory automatically now).
@@ -61,18 +65,27 @@ from the landing page to a paired, working daemon.
       &lt;username&gt;." and the browser hands `Casper.app` a
       `casper://pair?token=...&username=...` URL (an OS-level hand-off,
       not a visible browser action) — the already-running app receives it
-      with no further clicks. No further page navigation happens (there's
-      no post-pairing page to send you to anymore) — the page's own text
-      says to check your computer and close the tab.
+      with no further clicks. The page then shows a "Waiting for Casper to
+      connect..." spinner (new 2026-09-20 — see step 8) rather than
+      immediately settling into its final text.
 - [ ] 8. Confirm pairing actually succeeded.
-      **Expected:** ⚠ there is currently no end-user-facing UI that shows
-      this (the authenticated Streamlit surface — Environments/hosts list
-      — was retired in favor of `harness`, and no replacement front end
-      exists yet). Verify via an operator/dev path instead: `harness login
-      <the account> --{env}` then `harness hosts list` should show the new
-      host `connected: true`. Note this gap explicitly when reporting
-      results — it means an actual end user currently has no way to know
-      pairing worked.
+      **Expected (fixed 2026-09-20 — was the "no end-user-facing UI"
+      gap tracked below):** within ~12 seconds, the page polls `GET
+      /hosts` (see `utils/auth.py`'s `connected_host_ids`) for a host that
+      became connected *after* the pairing hand-off fired (not one that
+      was already connected — matters for a returning user with other
+      machines already paired) and swaps the spinner for "Casper
+      connected. You can close this tab." If it doesn't detect a
+      connection in that window, it falls back to the original generic
+      "Check your computer..." message rather than claiming failure —
+      pairing may still have worked, this poll just isn't authoritative
+      (`harness hosts list` still is, if this needs double-checking).
+      **Still needs a real run-through** — verified so far only via
+      `streamlit.testing.v1.AppTest` (renders with no exception) and a
+      direct call to `connected_host_ids` against a real, already-paired
+      account (correctly returned its connected host's id); the actual
+      12-second polling loop, against a *fresh* pairing, timed live in a
+      browser, hasn't been observed yet.
 
 ## Pass/fail
 
@@ -101,11 +114,18 @@ doc's Known Issues below and its step text).
   the full page (form submit → `casper://pair` Apple Event → a real
   daemon receiving it)** — that needs a human at a real browser; step 6/7
   above should get a real run-through next time this flow runs.
-- **No end-user-facing pairing confirmation** (found 2026-09-19, still
-  open). Step 8 requires `harness` (an internal dev tool) to verify
-  success; there's no product-facing way for a real user to see "yes, my
-  machine is connected." Not necessarily a bug (the front end doesn't
-  exist yet), but worth tracking as a known gap in this flow specifically.
-- **Gatekeeper warning copy may be stale** (flagged 2026-09-19, still
-  unverified — see step 4). Confirm actual behavior with a real notarized
-  build before editing the copy either way.
+- ~~**No end-user-facing pairing confirmation**~~ **Fixed 2026-09-20**
+  (found 2026-09-19 — see step 8). `pages/signin.py`/`signup.py` now poll
+  `GET /hosts` for up to ~12s after firing the `casper://pair` hand-off
+  and show a real "Casper connected" confirmation once a NEW host shows
+  connected (new `utils/auth.py` helper, `connected_host_ids`) — falling
+  back quietly to the original generic message on timeout, never claiming
+  failure. Not yet confirmed against a real, live pairing in a browser —
+  see step 8's own note.
+- ~~**Gatekeeper warning copy may be stale**~~ **Fixed 2026-09-20** (flagged
+  2026-09-19 — see step 4). It was worse than stale copy: `pages/
+  download.py` actively told users Casper wasn't notarized and to run
+  `xattr -cr` in Terminal, both wrong since 2026-09-19's deploy. Replaced
+  with the standard right-click-to-open instructions, confirmed accurate
+  via `spctl`/`stapler` against the real built app (not yet via an actual
+  human click-through — see step 4's own note).
