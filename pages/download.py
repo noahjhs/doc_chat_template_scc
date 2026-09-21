@@ -38,14 +38,9 @@ st.markdown(
 )
 
 st.warning(
-    f"**macOS may warn you the first time you open {NAME}**, since it's a fresh "
-    "download from the internet. If double-clicking doesn't work:\n"
-    "1. In Finder, **right-click** (or Control-click) `Casper.app` and choose "
-    "**Open** from the menu — this shows a confirmation dialog double-clicking "
-    "doesn't.\n"
-    "2. Click **Open** in that dialog.\n"
-    f"3. Open {NAME} again from now on however you'd like; this first-run check "
-    "only happens once."
+    f"**macOS will confirm the first time you open {NAME}**, since it's a fresh "
+    'download from the internet — just click **Open** on the dialog. This '
+    "first-run check only happens once."
 )
 
 for label, path in DOWNLOADS.items():
