@@ -1111,7 +1111,11 @@ def _resolve_pending_approval(result: dict, domain: str, token: str, auto: Optio
 def call_tool_cmd(
     name: str,
     arg: list[str] = typer.Option([], "--arg", help="key=json_value -- may be repeated, e.g. --arg positional_args='[\"npm\",\"run\"]'"),
-    host: Optional[str] = typer.Option(None, "--host"),
+    host: Optional[str] = typer.Option(
+        None,
+        "--host",
+        help="Which host this call targets -- an EXACT override (like eval's own --host), not a fallback: since call-tool injects an already-fully-decided call, this is honored even when only one host is connected, or a different one entirely. Overrides any host= in --arg.",
+    ),
     mock: bool = typer.Option(False, "--mock", help="Skip the real daemon/storage dispatch, return a canned result."),
     mock_tier: str = typer.Option(
         "allow",
@@ -1135,8 +1139,16 @@ def call_tool_cmd(
             arguments[key] = json.loads(raw_value)
         except json.JSONDecodeError:
             arguments[key] = raw_value
+    if host is not None:
+        # An exact override, not conversations.py's own default_host
+        # fallback -- setting the tool call's own `host` argument directly
+        # is what makes call-tool's --host behave like eval's (always
+        # honored), rather than being silently ignored whenever there's
+        # only one connected host, which was the whole point of --host in
+        # the first place and a real gotcha before this fix.
+        arguments["host"] = host
     try:
-        result = client.call_tool(domain, token, name, arguments, mock=mock, mock_tier=mock_tier, default_host=host)
+        result = client.call_tool(domain, token, name, arguments, mock=mock, mock_tier=mock_tier)
     except client.ApiError as e:
         _handle_api_error(e)
     _print_step_result(result)
