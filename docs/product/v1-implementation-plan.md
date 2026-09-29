@@ -1,6 +1,13 @@
 # v1 implementation plan: peer backup
 
 Drafted 2026-09-28. Builds [scenarios/peer-backup.md](scenarios/peer-backup.md).
+
+**Status (2026-09-28):** all phases built; the scenario passed live on dev
+with real daemons on two machines ([docs/user-flows/peer-backup.md](../user-flows/peer-backup.md)).
+Still to confirm live: Claude Code itself as the client, and Telegram taps
+on the new approval kinds. The Keychain spike landed on the planned
+fallback: iCloud sync was refused, so keys are stored locally and the
+passphrase export is the recovery path.
 Each phase ends in something testable. Phases run in order; the Principal
 signs off on the plan once, not phase by phase.
 

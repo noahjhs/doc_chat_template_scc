@@ -41,3 +41,7 @@ Steps use `- [ ]` so a real run-through can be checked off live.
   Telegram tap — see `docs/testing-strategy.md`'s Layer 4). Allow/ask/deny/
   resend dispatch and `/policies/eval` against a real, paired daemon, plus
   one real Telegram approve tap.
+- [peer-backup.md](peer-backup.md) -- the v1 bar: an agent, through Casper's
+  MCP server, backs up a folder from one person's machine to a friend's
+  (encrypted, approved by the friend) and restores it. Real daemons on two
+  machines.

@@ -1,6 +1,7 @@
 # Scenario: peer backup (v1)
 
-**Status:** draft, revised 2026-09-28. Ready to implement. This models the
+**Status:** built and passed live on dev 2026-09-28 (see
+[docs/user-flows/peer-backup.md](../../user-flows/peer-backup.md)). This models the
 workflow; it is not a test flow (those live in `docs/user-flows/`). Once
 built, it gets a matching user flow there.
 
@@ -63,7 +64,9 @@ usage. Sam never sees file names or contents.
 
 ### 4. Riley connects their agent
 
-Riley adds Casper as an MCP server in their agent and signs in (OAuth).
+Riley creates an agent token (`harness agent token create claude`) and
+adds Casper as an MCP server in their agent with it (Claude Code accepts a
+bearer header; OAuth for other clients comes after v1).
 → the agent acts **on behalf of** Riley, with permissions at most Riley's.
 In v1, grants apply to the Riley-and-agent pair as one unit.
 
