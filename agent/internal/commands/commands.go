@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"casper-agent/internal/backup"
 )
 
 // Request mirrors casper_tool.py's CommandRequest Pydantic model -- trimmed
@@ -81,6 +83,18 @@ type Request struct {
 	// run_shell_command in particular NEVER consults this field, only its
 	// own cached h.PolicyLayers().
 	PolicyLayers []PolicyLayerWire `json:"policy_layers,omitempty"`
+
+	// Peer backup (see backup_actions.go and internal/backup). Grantee is
+	// the OTHER account a peer-side action is on behalf of (asserted by
+	// casper_service; the grant itself is never taken on faith -- see
+	// backup.Store's own grant fetch). Content (above) carries a chunk.
+	Grantee    string `json:"grantee,omitempty"`
+	BackupID   string `json:"backup_id,omitempty"`
+	Index      int    `json:"index,omitempty"`
+	TotalBytes int64  `json:"total_bytes,omitempty"`
+	Manifest   string `json:"manifest,omitempty"`
+	Signature  string `json:"signature,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
 }
 
 // RequestOption is one model-supplied option entry for run_shell_command --
@@ -144,6 +158,7 @@ type Handler struct {
 	homeRoot              string
 	policyLayers          []PolicyLayer // see policy.go -- the daemon's own cached copy of policy layers attached to this host, fetched from casper_service
 	refreshPolicyLayersFn func()        // see policy.go's SetRefreshPolicyLayersFunc
+	backup                *backup.Store // see backup_actions.go; nil until the daemon sets one up
 }
 
 func New(homeRoot string) *Handler {
@@ -380,6 +395,9 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 	case "eval_policy":
 		return h.runEvalPolicy(req)
 	default:
+		if strings.HasPrefix(req.Action, "backup_") || req.Action == "refresh_grants" {
+			return h.dispatchBackup(req)
+		}
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}
 }

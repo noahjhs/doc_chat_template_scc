@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"casper-agent/internal/activate"
+	"casper-agent/internal/backup"
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
 	"casper-agent/internal/server"
@@ -157,6 +160,9 @@ func (d *daemonState) addOrReplaceIdentity(username, deviceToken, commandKey str
 			d.refreshPolicyLayers(dt, handler)
 		}
 	})
+	if old == nil {
+		d.setUpBackups(username, handler)
+	}
 
 	if old != nil && old.commandKey != commandKey {
 		d.srv.RemoveIdentity(old.commandKey)
@@ -170,6 +176,61 @@ func (d *daemonState) addOrReplaceIdentity(username, deviceToken, commandKey str
 		d.logf("casper:// pair: couldn't save session: %s", err)
 	}
 	go d.refreshPolicyLayers(deviceToken, handler)
+	go d.registerBackupKey(username, handler)
+}
+
+// setUpBackups gives one identity its own peer-backup store, rooted in its
+// own directory (backups/<username>) so two accounts paired to this same
+// machine never see each other's backups, either as owner or as peer.
+// Grants are fetched with whatever device token this identity currently
+// holds, so a re-pair's rotated token is picked up automatically.
+func (d *daemonState) setUpBackups(username string, handler *commands.Handler) {
+	dir, err := config.AppConfigDir()
+	if err != nil {
+		d.logf("backups: no config dir: %s", err)
+		return
+	}
+	store := backup.NewStore(
+		filepath.Join(dir, "backups", username),
+		backup.MacKeychain{},
+		d.authDomain+"/"+username,
+		func() ([]backup.Grant, error) {
+			dt := d.deviceTokenFor(username)
+			if dt == "" {
+				return nil, fmt.Errorf("%s isn't paired", username)
+			}
+			return config.FetchGrants(d.authDomain, dt)
+		},
+	)
+	handler.SetBackupStore(store)
+}
+
+// registerBackupKey loads (creating on first run) this identity's backup
+// keys and registers the public signing key with casper_service, so peers
+// can verify this identity's backups. Best-effort; retried on every launch.
+func (d *daemonState) registerBackupKey(username string, handler *commands.Handler) {
+	res, err := handler.Dispatch(&commands.Request{Action: "backup_key_info"})
+	if err != nil || !res.Success {
+		d.logf("backups: couldn't load keys for %s: %v %s", username, err, res.Stderr)
+		return
+	}
+	var info struct {
+		SigningPublicKey string `json:"signing_public_key"`
+		CreatedStorage   string `json:"created_storage"`
+	}
+	if err := json.Unmarshal([]byte(res.Stdout), &info); err != nil {
+		return
+	}
+	if info.CreatedStorage != "" {
+		d.logf("backups: created keys for %s (stored: %s)", username, info.CreatedStorage)
+	}
+	dt := d.deviceTokenFor(username)
+	if dt == "" {
+		return
+	}
+	if err := config.RegisterBackupKey(d.authDomain, dt, info.SigningPublicKey, info.CreatedStorage); err != nil {
+		d.logf("backups: couldn't register key for %s: %s", username, err)
+	}
 }
 
 // removeSessionFromDisk is the synchronous half of signing out one identity
