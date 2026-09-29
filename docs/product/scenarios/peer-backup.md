@@ -138,11 +138,13 @@ Either side can end the arrangement at any time.
 
 ## Keys (v1)
 
-Riley's daemon generates the backup key and stores it in the **macOS
-Keychain as a synchronizable item**. iCloud Keychain copies it, end-to-end
-encrypted, to Riley's other Apple devices, so losing the laptop doesn't
-lose the key. A passphrase-wrapped key export is the fallback for people
-without iCloud Keychain.
+Riley's daemon generates the backup key and tries to store it in the
+**macOS Keychain as a synchronizable item**, which iCloud Keychain would copy
+to Riley's other Apple devices. **As built (2026-09-28), macOS refuses that
+for this Developer-ID build**, so the key lands in the local login keychain
+(the agreed fallback). The passphrase-wrapped export
+(`harness backup export-key`) is therefore the recovery path for now:
+without it, losing the laptop loses the key.
 
 This makes recovery depend on Apple, which is in tension with goal 2. That
 is accepted for the alpha. The long-term answer is splitting the key among
