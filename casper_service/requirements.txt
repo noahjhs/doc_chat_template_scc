@@ -5,3 +5,4 @@ bcrypt
 requests
 google-re2
 openai
+mcp>=2.2,<3

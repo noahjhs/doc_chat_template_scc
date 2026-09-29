@@ -98,3 +98,292 @@ def test_notify_sends_buttons_only_to_linked_opted_in_users(app_env, monkeypatch
     assert sent == [
         {"chat_id": "42", "text": "hello", "reply_markup": {"inline_keyboard": [[{"text": "Yes", "callback_data": "approve:x"}]]}}
     ]
+
+
+# --- Shared helpers for the scenario tests ---------------------------------------
+import json  # noqa: E402
+
+from fake_daemon import FakeDaemon  # noqa: E402
+
+MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json", "mcp-protocol-version": "2025-06-18"}
+
+
+def _pair(client, headers, routing_key, hostname, url):
+    pair = client.post("/hosts/pair", json={"routing_key": routing_key, "hostname": hostname}, headers=headers).json()
+    device = {"Authorization": f"Bearer {pair['device_token']}"}
+    client.post("/hosts/presence", json={"local_agent_url": url, "cwd": "/Users/x"}, headers=device)
+    return device
+
+
+def _host_id(client, headers, label):
+    return next(h["host_id"] for h in client.get("/hosts", headers=headers).json()["hosts"] if h["label"] == label)
+
+
+def _agent_token(client, headers):
+    return client.post("/agent-tokens", json={"name": "claude"}, headers=headers).json()["token"]
+
+
+def _mcp(client, agent_token, tool, **arguments):
+    r = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}},
+        headers={**MCP_HEADERS, "Authorization": f"Bearer {agent_token}"},
+    )
+    assert r.status_code == 200, r.text
+    result = r.json()["result"]
+    assert not result.get("isError"), result
+    if "structuredContent" in result and "result" in result["structuredContent"]:
+        return result["structuredContent"]["result"]
+    return "\n".join(c.get("text", "") for c in result["content"])
+
+
+def _approvals(client, headers):
+    return client.get("/conversations/pending-approvals", headers=headers).json()["pending_approvals"]
+
+
+def _decide(client, headers, approval_id, decision="allow"):
+    r = client.post(f"/conversations/pending-approvals/{approval_id}/decide", json={"decision": decision}, headers=headers)
+    assert r.status_code == 200, r.text
+    return r.json()["message"]
+
+
+def _ok(**data):
+    return 200, {"success": True, "cwd": "/Users/x", "stdout": json.dumps(data), "stderr": ""}
+
+
+def _befriend(client, a_headers, b_headers, b_name):
+    client.post("/friends/requests", json={"username": b_name}, headers=a_headers)
+    [req] = [p for p in _approvals(client, b_headers) if p["kind"] == "friend_request"]
+    _decide(client, b_headers, req["id"])
+
+
+# --- Phase 1: agent tokens + MCP ------------------------------------------------------
+def test_mcp_rejects_missing_and_revoked_agent_tokens(app_env):
+    main, client = app_env
+    with client:
+        _, headers = _signup(client, "riley")
+        r = client.post("/mcp", json={}, headers=MCP_HEADERS)
+        assert r.status_code == 401
+        created = client.post("/agent-tokens", json={"name": "claude"}, headers=headers).json()
+        # A session token is not an agent token.
+        assert client.post("/mcp", json={}, headers={**MCP_HEADERS, **headers}).status_code == 401
+        assert _mcp(client, created["token"], "list_hosts") == []
+        client.delete(f"/agent-tokens/{created['id']}", headers=headers)
+        assert client.post("/mcp", json={}, headers={**MCP_HEADERS, "Authorization": f"Bearer {created['token']}"}).status_code == 401
+        assert client.get("/agent-tokens", headers=headers).json()["agent_tokens"][0]["revoked"] is True
+
+
+def test_mcp_run_shell_command_allow_and_ask(app_env):
+    main, client = app_env
+
+    def respond(body):
+        if body["positional_args"][0] == "uptime":
+            return 200, {"success": True, "cwd": "/", "stdout": "up 3 days", "stderr": "", "exit_code": 0, "tier": "allow"}
+        if body.get("approved"):
+            return 200, {"success": True, "cwd": "/", "stdout": "restarted", "stderr": "", "exit_code": 0, "tier": "ask"}
+        return 200, {"success": False, "cwd": "/", "stdout": "", "stderr": "", "tier": "ask"}
+
+    with client, FakeDaemon(respond_with=respond) as daemon:
+        _, headers = _signup(client, "sam")
+        _pair(client, headers, "rk-mini", "sam-mini", daemon.url)
+        token = _agent_token(client, headers)
+
+        assert _mcp(client, token, "list_hosts") == [{"host": "sam-mini", "role": "owner", "connected": True}]
+        assert _mcp(client, token, "run_shell_command", host="sam-mini", positional_args=["uptime"]) == "up 3 days"
+
+        out = _mcp(client, token, "run_shell_command", host="sam-mini", positional_args=["brew", "services", "restart"])
+        assert "needs the owner's approval" in out
+        [approval] = _approvals(client, headers)
+        assert approval["kind"] == "shell_command"
+        assert _decide(client, headers, approval["id"]) == "restarted"
+        # The resend carried approved=true; the daemon re-decided it.
+        assert daemon.requests[-1]["approved"] is True
+
+
+# --- Phase 2: trust framework ------------------------------------------------------------
+def test_friendship_is_mutual_and_consensual(app_env):
+    main, client = app_env
+    _, riley = _signup(client, "riley")
+    _, sam = _signup(client, "sam")
+    assert client.post("/friends/requests", json={"username": "nobody"}, headers=riley).status_code == 404
+    assert client.post("/friends/requests", json={"username": "riley"}, headers=riley).status_code == 400
+    client.post("/friends/requests", json={"username": "sam"}, headers=riley)
+    assert client.post("/friends/requests", json={"username": "riley"}, headers=sam).status_code == 409  # already pending
+    assert client.get("/friends", headers=riley).json() == {"friends": [], "incoming": [], "outgoing": [{"id": 1, "username": "sam"}]}
+    [req] = _approvals(client, sam)
+    assert req["requester"] == "riley"
+    _decide(client, sam, req["id"], "deny")
+    assert client.get("/friends", headers=sam).json()["friends"] == []
+
+    _befriend(client, riley, sam, "sam")
+    assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]
+    assert client.get("/friends", headers=sam).json()["friends"] == ["riley"]
+
+
+def test_offerings_are_friends_only_and_requests_are_bounded(app_env):
+    main, client = app_env
+    with FakeDaemon(queue=[]) as daemon:
+        _, sam = _signup(client, "sam")
+        _, riley = _signup(client, "riley")
+        _, eve = _signup(client, "eve")
+        _pair(client, sam, "rk-mini", "sam-mini", daemon.url)
+        host_id = _host_id(client, sam, "sam-mini")
+        # Can't offer someone else's host.
+        assert client.post("/offerings", json={"host_id": host_id, "max_quota_gb": 20}, headers=riley).status_code == 404
+        offering_id = client.post("/offerings", json={"host_id": host_id, "max_quota_gb": 20, "write_tier": "ask"}, headers=sam).json()["id"]
+        _befriend(client, riley, sam, "sam")
+
+        assert client.get("/offerings", headers=eve).json()["friends"] == []  # not a friend: can't see it
+        assert client.post(f"/offerings/{offering_id}/requests", json={"quota_gb": 5}, headers=eve).status_code == 403
+        assert client.post(f"/offerings/{offering_id}/requests", json={"quota_gb": 50}, headers=riley).status_code == 400
+
+        [offer] = client.get("/offerings", headers=riley).json()["friends"]
+        assert (offer["owner"], offer["host"], offer["max_quota_gb"], offer["yours"]) == ("sam", "sam-mini", 20.0, None)
+
+
+def test_scenario_peer_backup_end_to_end(app_env):
+    """docs/product/scenarios/peer-backup.md, steps 1-10, with both daemons
+    faked: the fakes script verdicts; they never decide anything."""
+    main, client = app_env
+    import backups
+
+    notes = []
+    backups._deps.run_async = lambda fn: fn()
+    main.notify = lambda user_id, text, buttons=None: notes.append((user_id, text))
+
+    def riley_daemon(body):
+        a = body["action"]
+        if a == "backup_prepare":
+            assert body["path"] == "~/Documents/taxes"
+            return _ok(backup_id=body["backup_id"], plaintext_bytes=1_200_000, name="taxes")
+        if a == "backup_prepare_status":
+            return _ok(state="ready", manifest="TUFO", signature="U0lH", total_bytes=1_300_000, chunk_count=2)
+        if a == "backup_read_chunk":
+            return _ok(content=f"chunk{body['index']}")
+        if a in ("backup_cleanup", "backup_restore_begin", "backup_restore_chunk"):
+            return _ok()
+        if a == "backup_unpack":
+            return _ok(restored_to="/Users/riley/Casper Restores/taxes-20260928-120000")
+        raise AssertionError(a)
+
+    def sam_daemon(body):
+        a = body["action"]
+        assert body.get("grantee", "riley") == "riley"
+        if a == "backup_authorize":
+            return 200, {"success": False, "cwd": "", "stdout": json.dumps({"reason": ""}), "stderr": "", "tier": "ask"}
+        if a == "backup_write_chunk":
+            tier = "ask"
+            return 200, {"success": bool(body.get("approved")), "cwd": "", "stdout": json.dumps({"reason": "", "complete": body["index"] == 1}), "stderr": "", "tier": tier}
+        if a == "backup_get_manifest":
+            return _ok(manifest="TUFO", signature="U0lH", chunk_count=2)
+        if a == "backup_get_chunk":
+            return _ok(content=f"chunk{body['index']}")
+        if a in ("refresh_grants", "backup_delete"):
+            return _ok()
+        raise AssertionError(a)
+
+    with client, FakeDaemon(respond_with=riley_daemon) as rd, FakeDaemon(respond_with=sam_daemon) as sd:
+        _, sam = _signup(client, "sam")
+        _, riley = _signup(client, "riley")
+        sam_device = _pair(client, sam, "rk-mini", "sam-mini", sd.url)
+        riley_device = _pair(client, riley, "rk-laptop", "riley-laptop", rd.url)
+        client.post("/hosts/backup-key", json={"signing_public_key": "RILEYKEY", "key_storage": "local"}, headers=riley_device)
+
+        # 1. Friends.  2. Sam offers space.  3. Riley's agent requests it; Sam grants.
+        _befriend(client, riley, sam, "sam")
+        client.post("/offerings", json={"host_id": _host_id(client, sam, "sam-mini"), "max_quota_gb": 20, "write_tier": "ask"}, headers=sam)
+        agent = _agent_token(client, riley)
+        [offer] = _mcp(client, agent, "list_offerings")
+        assert "Requested 10 GB" in _mcp(client, agent, "request_access", offering_id=offer["id"], quota_gb=10)
+        [req] = [p for p in _approvals(client, sam) if p["kind"] == "access_request"]
+        assert "10 GB of backup space on sam-mini" in req["description"]
+        _decide(client, sam, req["id"])
+        assert any("granted you 10.0 GB" in t for _, t in notes)
+
+        # Sam's daemon sees the grant, with Riley's registered signing key.
+        [grant] = client.get("/hosts/grants", headers=sam_device).json()["grants"]
+        assert grant == {"grantee": "riley", "signing_keys": ["RILEYKEY"], "quota_bytes": 10 * 1024**3, "write_tier": "ask", "revoked_at": None}
+        hosts = _mcp(client, agent, "list_hosts")
+        assert {"host": "sam/sam-mini", "role": "backup_peer", "approval_needed_to_write": True}.items() <= next(h for h in hosts if h["host"] == "sam/sam-mini").items()
+
+        # 5-7. Push: nothing moves until Sam approves; the agent gets a plain answer.
+        out = _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/Documents/taxes", dest_host="sam/sam-mini")
+        assert "waiting for sam to approve" in out
+        assert not any(r["action"] == "backup_write_chunk" for r in sd.requests)
+        [ask] = [p for p in _approvals(client, sam) if p["kind"] == "backup_write"]
+        assert ask["requester"] == "riley" and "taxes" not in ask["description"]  # Sam never sees names
+
+        # 8. Sam approves; every chunk goes out with approved=true, manifest on chunk 0.
+        _decide(client, sam, ask["id"])
+        writes = [r for r in sd.requests if r["action"] == "backup_write_chunk"]
+        assert [(w["index"], w["approved"], "manifest" in w) for w in writes] == [(0, True, True), (1, True, False)]
+        assert any("Backed up taxes to sam/sam-mini" in t for _, t in notes)
+        backup_id = json.loads(_mcp(client, agent, "backup_status"))[0]["backup_id"]
+        assert json.loads(_mcp(client, agent, "backup_status", backup_id=backup_id))["status"] == "complete"
+
+        # 9. Restore to Riley's own host.
+        assert "Restoring taxes" in _mcp(client, agent, "backup_restore", backup_id=backup_id, dest_host="riley-laptop")
+        assert [r["action"] for r in rd.requests[-4:]] == ["backup_restore_begin", "backup_restore_chunk", "backup_restore_chunk", "backup_unpack"]
+        assert any("Casper Restores/taxes-" in t for _, t in notes)
+
+        # Fail fast when the destination is offline.
+        client.delete("/hosts/presence", headers=sam_device)
+        assert "sam/sam-mini is offline" in _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/x", dest_host="sam/sam-mini")
+        client.post("/hosts/presence", json={"local_agent_url": sd.url, "cwd": "/"}, headers=sam_device)
+
+        # 10. Sam revokes: Riley is told, the daemon is told to refresh, the grant shows revoked.
+        grant_id = client.get("/grants", headers=sam).json()["given"][0]["id"]
+        assert client.delete(f"/grants/{grant_id}", headers=sam).status_code == 200
+        assert any("revoked your backup space" in t for _, t in notes)
+        [revoked] = client.get("/hosts/grants", headers=sam_device).json()["grants"]
+        assert revoked["revoked_at"] is not None
+        assert not any(h["host"] == "sam/sam-mini" for h in _mcp(client, agent, "list_hosts"))
+        assert "don't have backup space" in _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/x", dest_host="sam/sam-mini")
+
+
+def test_backup_denied_by_daemon_quota(app_env):
+    main, client = app_env
+    import backups
+
+    backups._deps.run_async = lambda fn: fn()
+    main.notify = lambda *a, **k: None
+
+    def riley_daemon(body):
+        if body["action"] == "backup_prepare":
+            return _ok(plaintext_bytes=5, name="big")
+        return _ok()
+
+    def sam_daemon(body):
+        if body["action"] == "backup_authorize":
+            return 200, {"success": False, "cwd": "", "stdout": json.dumps({"reason": "over quota: 9 GB used"}), "stderr": "", "tier": "deny"}
+        return _ok()
+
+    with client, FakeDaemon(respond_with=riley_daemon) as rd, FakeDaemon(respond_with=sam_daemon) as sd:
+        _, sam = _signup(client, "sam")
+        _, riley = _signup(client, "riley")
+        _pair(client, sam, "rk-mini", "sam-mini", sd.url)
+        _pair(client, riley, "rk-laptop", "riley-laptop", rd.url)
+        _befriend(client, riley, sam, "sam")
+        oid = client.post("/offerings", json={"host_id": _host_id(client, sam, "sam-mini"), "max_quota_gb": 20, "write_tier": "allow"}, headers=sam).json()["id"]
+        client.post(f"/offerings/{oid}/requests", json={"quota_gb": 10}, headers=riley)
+        _decide(client, sam, _approvals(client, sam)[0]["id"])
+        agent = _agent_token(client, riley)
+        out = _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/big", dest_host="sam/sam-mini")
+        assert out == "sam/sam-mini refused the backup: over quota: 9 GB used."
+        assert rd.requests[-1]["action"] == "backup_cleanup"
+
+
+def test_unfriending_revokes_grants(app_env):
+    main, client = app_env
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        _, sam = _signup(client, "sam")
+        _, riley = _signup(client, "riley")
+        _pair(client, sam, "rk-mini", "sam-mini", sd.url)
+        _befriend(client, riley, sam, "sam")
+        oid = client.post("/offerings", json={"host_id": _host_id(client, sam, "sam-mini"), "max_quota_gb": 20}, headers=sam).json()["id"]
+        client.post(f"/offerings/{oid}/requests", json={"quota_gb": 10}, headers=riley)
+        _decide(client, sam, _approvals(client, sam)[0]["id"])
+        assert len(client.get("/grants", headers=riley).json()["held"]) == 1
+        assert client.delete("/friends/sam", headers=riley).status_code == 200
+        assert client.get("/grants", headers=riley).json()["held"] == []
+        assert client.get("/friends", headers=sam).json()["friends"] == []

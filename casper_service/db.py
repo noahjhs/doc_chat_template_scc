@@ -224,6 +224,104 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_user_id ON pending_approvals(user_id);
+
+-- Tokens an agent (any MCP client) presents to /mcp -- each acts on behalf
+-- of user_id, with at most that user's permissions (docs/product/
+-- trust-framework.md's "Agents as subjects", v1). Separate from the
+-- browser/harness session token on users, so an agent can be revoked on
+-- its own and audited as its own subject.
+CREATE TABLE IF NOT EXISTS agent_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tokens_user_id ON agent_tokens(user_id);
+
+-- The trust framework's single ReBAC-shaped store (docs/product/
+-- trust-framework.md): (subject, relation, object) tuples, everything else
+-- derived from them. v1 relations: 'friend' (user -> user, one tuple per
+-- direction) and 'backup_peer' (user -> host, attrs: owner_user_id,
+-- quota_bytes, write_tier, offering_id). Revocation sets revoked_at rather
+-- than deleting, since a revoked backup_peer grant still matters for its
+-- grace period (and for the audit trail).
+CREATE TABLE IF NOT EXISTS relation_tuples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL,
+    subject_id INTEGER NOT NULL,
+    relation TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id INTEGER NOT NULL,
+    attrs TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_relation_tuples_subject ON relation_tuples(subject_type, subject_id, relation);
+CREATE INDEX IF NOT EXISTS idx_relation_tuples_object ON relation_tuples(object_type, object_id, relation);
+
+-- A pending/decided friend request. Decided through the ordinary approvals
+-- queue (kind 'friend_request', approver = the recipient), so a Telegram
+-- tap works the same as for every other decision.
+CREATE TABLE IF NOT EXISTS friend_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_user_id INTEGER NOT NULL REFERENCES users(id),
+    to_user_id INTEGER NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'accepted' | 'declined'
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_at TEXT
+);
+
+-- What an owner is willing to share, visible to their friends (docs/
+-- product/trust-framework.md's "Offers, requests and grants"). v1 kind:
+-- 'backup_space' only. write_tier is the Backup Peer role's write tier on
+-- the resulting grant ('allow' | 'ask').
+CREATE TABLE IF NOT EXISTS offerings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    host_id INTEGER NOT NULL REFERENCES hosts(id),
+    kind TEXT NOT NULL,
+    audience TEXT NOT NULL DEFAULT 'friends',
+    max_quota_bytes INTEGER NOT NULL,
+    write_tier TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    withdrawn_at TEXT
+);
+
+-- A request for an offering; approving it (approvals kind
+-- 'access_request', approver = the offering's owner) writes the grant.
+CREATE TABLE IF NOT EXISTS access_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    offering_id INTEGER NOT NULL REFERENCES offerings(id),
+    requester_user_id INTEGER NOT NULL REFERENCES users(id),
+    quota_bytes INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'granted' | 'declined'
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_at TEXT
+);
+
+-- One peer backup, as its owner (and casper_service) tracks it. The name
+-- is known here (the owner's agent named the folder), never on the peer.
+CREATE TABLE IF NOT EXISTS backups (
+    id TEXT PRIMARY KEY,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    source_host_id INTEGER NOT NULL REFERENCES hosts(id),
+    dest_host_id INTEGER NOT NULL REFERENCES hosts(id),
+    dest_owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL,   -- awaiting_approval | transferring | complete | denied | failed | deleted
+    plaintext_bytes INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    chunks_done INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    restore_status TEXT NOT NULL DEFAULT '',
+    restore_detail TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backups_owner ON backups(owner_user_id);
 """
 
 
@@ -348,6 +446,19 @@ def _add_kind_columns_to_pending_approvals(db):
         db.execute("ALTER TABLE pending_approvals ADD COLUMN requester_user_id INTEGER REFERENCES users(id)")
 
 
+def _add_backup_key_columns_to_host_pairings(db):
+    """One-time ALTER TABLE ADD COLUMNs: each pairing's backup signing
+    public key (registered by the daemon -- POST /hosts/backup-key) and
+    where its private keys live ('icloud' | 'local'), per the plan's Phase
+    3. Per pairing, not per user: each of a user's machines has its own
+    keys, and a peer trusts any of them."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(host_pairings)").fetchall()}
+    if "backup_signing_key" not in columns:
+        db.execute("ALTER TABLE host_pairings ADD COLUMN backup_signing_key TEXT")
+    if "backup_key_storage" not in columns:
+        db.execute("ALTER TABLE host_pairings ADD COLUMN backup_key_storage TEXT NOT NULL DEFAULT ''")
+
+
 def init_db():
     with get_db() as db:
         _rename_legacy_rule_chain_tables(db)
@@ -357,6 +468,7 @@ def init_db():
         _add_telegram_columns_to_user_profile(db)
         _add_mock_tier_column_to_pending_approvals(db)
         _add_kind_columns_to_pending_approvals(db)
+        _add_backup_key_columns_to_host_pairings(db)
 
 
 @contextlib.contextmanager

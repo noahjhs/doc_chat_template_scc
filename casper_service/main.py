@@ -1,6 +1,7 @@
 import base64
 import binascii
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -16,8 +17,19 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+import backups
 import conversations
+import mcp_server
+import trust
 from models import (
+    AccessRequestCreate,
+    AgentTokenCreateRequest,
+    AgentTokenCreateResponse,
+    AgentTokenInfo,
+    AgentTokenListResponse,
+    BackupKeyReport,
+    FriendRequestCreate,
+    OfferingCreateRequest,
     AuthResponse,
     ConversationPendingApproval,
     ConversationStepRequest,
@@ -64,7 +76,15 @@ from models import (
     VerifyResponse,
 )
 
-app = FastAPI()
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    # The MCP transport's session manager needs a running task group (see
+    # the MCP section at the bottom of this module).
+    async with _mcp.session_manager.run():
+        yield
+
+
+app = FastAPI(lifespan=_lifespan)
 init_db()
 
 _openai_client = None
@@ -1709,3 +1729,411 @@ def update_profile(body: ProfileUpdateRequest, authorization: str = Header(defau
                 (*updates.values(), user_id),
             )
         return _get_or_create_profile(db, user_id)
+
+
+# =============================================================================
+# v1 platform (docs/product/v1-implementation-plan.md): agent tokens, the
+# trust framework (friends, offerings, access requests, grants), daemon-side
+# backup support, peer-backup orchestration, and the MCP server.
+# =============================================================================
+def _require_user(db, authorization: str) -> int:
+    user_id = _resolve_user_id(db, authorization)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    return user_id
+
+
+@contextlib.contextmanager
+def _trust_errors():
+    try:
+        yield
+    except trust.TrustError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from e
+
+
+def _host_config(owner_id: int, host_id: int) -> dict | None:
+    """The live connection to one identity's pairing on one host, if it's
+    connected right now -- how casper_service reaches a daemon AS that
+    identity (its command_key), e.g. Sam's pairing on sam-mini when storing
+    Riley's backup there."""
+    with get_db() as db:
+        configs = _connected_host_configs(db, owner_id)
+    for label, c in configs.items():
+        if c["host_id"] == host_id:
+            return {**c, "label": label}
+    return None
+
+
+def _own_configs(user_id: int) -> dict:
+    with get_db() as db:
+        return _connected_host_configs(db, user_id)
+
+
+def _refresh_daemon_grants(owner_id: int, host_id: int):
+    """Best-effort nudge so a grant change takes effect on the daemon now,
+    rather than when its cached grant list next expires (<= 60s)."""
+    config = _host_config(owner_id, host_id)
+    if config is not None:
+        threading.Thread(target=lambda: backups.daemon_call(config, "refresh_grants"), daemon=True).start()
+
+
+# --- Agent tokens -------------------------------------------------------------
+@app.post("/agent-tokens", response_model=AgentTokenCreateResponse, status_code=201)
+def create_agent_token(body: AgentTokenCreateRequest, authorization: str = Header(default="")):
+    token = "cas_" + secrets.token_urlsafe(32)
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        cur = db.execute(
+            "INSERT INTO agent_tokens (user_id, name, token_hash) VALUES (?, ?, ?)", (user_id, body.name, hash_token(token))
+        )
+        row = db.execute("SELECT * FROM agent_tokens WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return AgentTokenCreateResponse(id=row["id"], name=row["name"], created_at=row["created_at"], revoked=False, token=token)
+
+
+@app.get("/agent-tokens", response_model=AgentTokenListResponse)
+def list_agent_tokens(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        rows = db.execute("SELECT * FROM agent_tokens WHERE user_id = ? ORDER BY id", (user_id,)).fetchall()
+    return AgentTokenListResponse(
+        agent_tokens=[
+            AgentTokenInfo(id=r["id"], name=r["name"], created_at=r["created_at"], revoked=r["revoked_at"] is not None)
+            for r in rows
+        ]
+    )
+
+
+@app.delete("/agent-tokens/{token_id}", response_model=RevokeResponse)
+def revoke_agent_token(token_id: int, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        cur = db.execute(
+            "UPDATE agent_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+            (trust.now_iso(), token_id, user_id),
+        )
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="No such active agent token.")
+    return RevokeResponse(revoked=True)
+
+
+def _resolve_agent(authorization: str) -> dict | None:
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return None
+    with get_db() as db:
+        row = db.execute(
+            "SELECT id, user_id, name FROM agent_tokens WHERE token_hash = ? AND revoked_at IS NULL", (hash_token(token),)
+        ).fetchone()
+    return {"agent_token_id": row["id"], "user_id": row["user_id"], "name": row["name"]} if row else None
+
+
+# --- Friends ---------------------------------------------------------------------
+@app.post("/friends/requests", status_code=201)
+def create_friend_request(body: FriendRequestCreate, authorization: str = Header(default="")):
+    with get_db() as db, _trust_errors():
+        user_id = _require_user(db, authorization)
+        request_id, to_id = trust.create_friend_request(db, user_id, body.username)
+        me = trust.username(db, user_id)
+    create_approval(to_id, user_id, "friend_request", f"{me} wants to be friends on Casper. Accept?", {"request_id": request_id})
+    return {"id": request_id, "status": "pending"}
+
+
+def _decide_friend_request(row, decision: str) -> str:
+    request_id = json.loads(row["payload"])["request_id"]
+    with get_db() as db:
+        fr = trust.decide_friend_request(db, request_id, decision == "allow")
+        if fr is None:
+            return "That friend request is no longer pending."
+        me, them = trust.username(db, fr["to_user_id"]), trust.username(db, fr["from_user_id"])
+    if decision == "allow":
+        notify(fr["from_user_id"], f"{me} accepted your friend request.")
+        return f"You and {them} are now friends."
+    return f"Declined {them}'s friend request."
+
+
+@app.get("/friends")
+def list_friends(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        friends = sorted(trust.username(db, f) for f in trust.friends_of(db, user_id))
+        return {"friends": friends, **trust.pending_friend_requests(db, user_id)}
+
+
+@app.delete("/friends/{username}", response_model=RevokeResponse)
+def remove_friend(username: str, authorization: str = Header(default="")):
+    with get_db() as db, _trust_errors():
+        user_id = _require_user(db, authorization)
+        revoked = trust.remove_friend(db, user_id, username)
+    for g in revoked:
+        _refresh_daemon_grants(g["owner_user_id"], g["host_id"])
+        notify(g["grantee_user_id"], f"Your backup space on {g['owner']}/{g['host']} was revoked (friendship ended). Stored backups stay restorable for 7 days.")
+    return RevokeResponse(revoked=True)
+
+
+# --- Offerings, access requests, grants ---------------------------------------
+@app.post("/offerings", status_code=201)
+def publish_offering(body: OfferingCreateRequest, authorization: str = Header(default="")):
+    with get_db() as db, _trust_errors():
+        user_id = _require_user(db, authorization)
+        offering_id = trust.publish_offering(db, user_id, body.host_id, int(body.max_quota_gb * trust.GB), body.write_tier)
+    return {"id": offering_id}
+
+
+@app.get("/offerings")
+def list_offerings(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        return trust.list_offerings(db, user_id)
+
+
+@app.delete("/offerings/{offering_id}", response_model=RevokeResponse)
+def withdraw_offering(offering_id: int, authorization: str = Header(default="")):
+    with get_db() as db, _trust_errors():
+        user_id = _require_user(db, authorization)
+        trust.withdraw_offering(db, user_id, offering_id)
+    return RevokeResponse(revoked=True)
+
+
+def _request_access(user_id: int, offering_id: int, quota_gb: float) -> dict:
+    with get_db() as db:
+        request_id, offering = trust.create_access_request(db, user_id, offering_id, int(quota_gb * trust.GB))
+        me = trust.username(db, user_id)
+        label = trust.host_label(db, offering["owner_user_id"], offering["host_id"])
+    create_approval(
+        offering["owner_user_id"], user_id, "access_request",
+        f"{me} is asking for {quota_gb:g} GB of backup space on {label}. Grant it?",
+        {"request_id": request_id},
+    )
+    return {"id": request_id, "status": "pending"}
+
+
+@app.post("/offerings/{offering_id}/requests", status_code=201)
+def request_access(offering_id: int, body: AccessRequestCreate, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    with _trust_errors():
+        out = _request_access(user_id, offering_id, body.quota_gb)
+    return {"id": out["id"], "status": "pending"}
+
+
+def _decide_access_request(row, decision: str) -> str:
+    request_id = json.loads(row["payload"])["request_id"]
+    with get_db() as db:
+        ar = trust.decide_access_request(db, request_id, decision == "allow")
+        if ar is None:
+            return "That request is no longer pending."
+        owner, requester = trust.username(db, ar["owner_user_id"]), trust.username(db, ar["requester_user_id"])
+        label = trust.host_label(db, ar["owner_user_id"], ar["host_id"])
+    size = backups.human(ar["quota_bytes"])
+    if decision == "allow":
+        _refresh_daemon_grants(ar["owner_user_id"], ar["host_id"])
+        notify(ar["requester_user_id"], f"{owner} granted you {size} of backup space on {label}. Back up to it as {owner}/{label}.")
+        return f"Granted {requester} {size} on {label}."
+    notify(ar["requester_user_id"], f"{owner} declined your request for backup space on {label}.")
+    return f"Declined {requester}'s request."
+
+
+@app.get("/grants")
+def list_grants(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        return {"given": trust.grants_given(db, user_id), "held": trust.grants_held(db, user_id)}
+
+
+@app.delete("/grants/{grant_id}", response_model=RevokeResponse)
+def revoke_grant(grant_id: int, authorization: str = Header(default="")):
+    """Either side ends it (docs/product/scenarios/peer-backup.md, step
+    10). Writes stop at once; the grantee can still restore/delete what's
+    stored for 7 days, then the host's daemon purges it."""
+    with get_db() as db, _trust_errors():
+        user_id = _require_user(db, authorization)
+        g = trust.revoke_grant(db, user_id, grant_id)
+    _refresh_daemon_grants(g["owner_user_id"], g["host_id"])
+    if user_id == g["owner_user_id"]:
+        notify(g["grantee_user_id"], f"{g['owner']} revoked your backup space on {g['host']}. Your stored backups stay restorable for 7 days.")
+    else:
+        notify(g["owner_user_id"], f"{g['grantee']} gave up their backup space on {g['host']}.")
+    return RevokeResponse(revoked=True)
+
+
+# --- Daemon-facing (device-token-gated) backup support --------------------------
+@app.get("/hosts/grants")
+def host_grants(authorization: str = Header(default="")):
+    """Every Backup Peer grant this daemon identity gave on this host --
+    what the daemon decides every peer-side request from (see
+    agent/internal/config/grants.go)."""
+    with get_db() as db:
+        attached = _resolve_attached(db, authorization)
+        if attached is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+        return {"grants": trust.grants_on_host_for_daemon(db, attached["user_id"], attached["host_id"])}
+
+
+@app.post("/hosts/backup-key")
+def report_backup_key(body: BackupKeyReport, authorization: str = Header(default="")):
+    with get_db() as db:
+        attached = _resolve_attached(db, authorization)
+        if attached is None:
+            raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+        db.execute(
+            "UPDATE host_pairings SET backup_signing_key = ? WHERE routing_key = ? AND user_id = ?",
+            (body.signing_public_key, attached["routing_key"], attached["user_id"]),
+        )
+        if body.key_storage:
+            db.execute(
+                "UPDATE host_pairings SET backup_key_storage = ? WHERE routing_key = ? AND user_id = ?",
+                (body.key_storage, attached["routing_key"], attached["user_id"]),
+            )
+    return {"ok": True}
+
+
+# --- Backup key export (owner's own session only) --------------------------------
+@app.post("/hosts/{host_id}/backup-key/export")
+def export_backup_key(host_id: int, body: dict, authorization: str = Header(default="")):
+    """The recovery fallback for keys that live only in this machine's local
+    Keychain: returns them encrypted to a passphrase. Only ever to the
+    host's own paired owner."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    config = _host_config(user_id, host_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="That host isn't one of yours, or it's offline.")
+    r = backups.daemon_call(config, "backup_export_key", passphrase=str(body.get("passphrase", "")))
+    if not r.get("success"):
+        raise HTTPException(status_code=400, detail=r.get("stderr") or "Export failed.")
+    return json.loads(r["stdout"])
+
+
+# --- Approval handlers ------------------------------------------------------------
+def _decide_shell_command(row, decision: str) -> str:
+    """An MCP run_shell_command the owner approved (or not): re-sends the
+    identical call with approved=true -- the daemon re-matches it fresh --
+    and tells the requester what happened."""
+    payload = json.loads(row["payload"])
+    requester = row["requester_user_id"] or row["user_id"]
+    if decision != "allow":
+        notify(requester, f"Denied: {row['description']}.")
+        return "Denied."
+    configs = _own_configs(row["user_id"])
+    tier, output, _ = conversations._dispatch_shell_command(configs, payload["args"], payload["host"], None, False, "allow", approved=True)
+    text = _shell_output_text(tier, output)
+    notify(requester, f"Approved and ran on {payload['host']}:\n{text[:3500]}")
+    return text
+
+
+_APPROVAL_HANDLERS.update(
+    {
+        "shell_command": _decide_shell_command,
+        "friend_request": _decide_friend_request,
+        "access_request": _decide_access_request,
+        "backup_write": backups.decide_write,
+    }
+)
+
+
+# --- MCP tool implementations --------------------------------------------------------
+def _shell_output_text(tier: str, output: str) -> str:
+    if tier != "allow":
+        return output
+    try:
+        result = json.loads(output)
+    except ValueError:
+        return output
+    parts = []
+    if result.get("stdout"):
+        parts.append(result["stdout"])
+    if result.get("stderr"):
+        parts.append(f"[stderr]\n{result['stderr']}")
+    if result.get("exit_code") not in (None, 0):
+        parts.append(f"[exit code {result['exit_code']}]")
+    return "\n".join(parts) or "(no output)"
+
+
+def _mcp_list_hosts(user_id: int) -> list[dict]:
+    with get_db() as db:
+        own = db.execute(
+            """
+            SELECT h.id, uh.label FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
+            JOIN host_pairings hp ON hp.routing_key = h.routing_key AND hp.user_id = uh.user_id
+            WHERE uh.user_id = ? ORDER BY uh.label COLLATE NOCASE
+            """,
+            (user_id,),
+        ).fetchall()
+        held = trust.grants_held(db, user_id)
+        used_by_host = {
+            r["dest_host_id"]: r["used"]
+            for r in db.execute(
+                "SELECT dest_host_id, SUM(total_bytes) AS used FROM backups WHERE owner_user_id = ? AND status = 'complete' GROUP BY dest_host_id",
+                (user_id,),
+            ).fetchall()
+        }
+    connected = {c["host_id"] for c in _own_configs(user_id).values()}
+    out = [{"host": r["label"], "role": "owner", "connected": r["id"] in connected} for r in own]
+    for g in held:
+        out.append(
+            {
+                "host": f"{g['owner']}/{g['host']}",
+                "owner": g["owner"],
+                "role": "backup_peer",
+                "quota": backups.human(g["quota_bytes"]),
+                "used": backups.human(used_by_host.get(g["host_id"]) or 0),
+                "approval_needed_to_write": g["write_tier"] == "ask",
+                "connected": _host_config(g["owner_user_id"], g["host_id"]) is not None,
+            }
+        )
+    return out
+
+
+def _mcp_run_shell_command(user_id: int, host: str, positional_args: list, options: list, path: str | None) -> str:
+    configs = _own_configs(user_id)
+    if host not in configs:
+        return f"{host} isn't one of your connected hosts. Connected: {', '.join(configs) or 'none'}."
+    args = {"positional_args": positional_args, "options": options, "path": path}
+    tier, output, resolved = conversations._dispatch_shell_command(configs, args, host, None, False, "allow", approved=False)
+    if tier == "ask":
+        command = " ".join([positional_args[0] if positional_args else "", conversations._describe_call_args(positional_args, options)]).strip()
+        create_approval(user_id, user_id, "shell_command", f"Run `{command}` on {resolved}?", {"host": resolved, "args": args})
+        return f"`{command}` on {resolved} needs the owner's approval first. They've been notified; the result will be sent to them once it runs."
+    return _shell_output_text(tier, output)
+
+
+def _mcp_list_offerings(user_id: int) -> list[dict]:
+    with get_db() as db:
+        offerings = trust.list_offerings(db, user_id)
+    return offerings["friends"] + [{**o, "yours": "you offer this"} for o in offerings["mine"]]
+
+
+def _mcp_request_access(user_id: int, offering_id: int, quota_gb: float) -> str:
+    try:
+        _request_access(user_id, offering_id, quota_gb)
+    except trust.TrustError as e:
+        return f"Can't request that: {e.message}"
+    return f"Requested {quota_gb:g} GB. The owner has been notified and decides; you'll be told when they do."
+
+
+backups.configure(
+    backups.Deps(
+        host_config=_host_config,
+        own_configs=_own_configs,
+        # Late-bound, so a test (or anything else) replacing main.notify /
+        # main.create_approval affects backups too.
+        notify=lambda *a, **k: notify(*a, **k),
+        create_approval=lambda *a, **k: create_approval(*a, **k),
+        run_async=backups.default_run_async(),
+    )
+)
+
+_mcp_services = mcp_server.Services(
+    resolve_agent=_resolve_agent,
+    list_hosts=_mcp_list_hosts,
+    run_shell_command=_mcp_run_shell_command,
+    list_offerings=_mcp_list_offerings,
+    request_access=_mcp_request_access,
+    backup_push=backups.push,
+    backup_status=backups.status,
+    backup_list=backups.list_backups,
+    backup_restore=backups.restore,
+    backup_delete=backups.delete,
+)
+_mcp = mcp_server.build(_mcp_services)
+app.router.add_route("/mcp", mcp_server.asgi_app(_mcp, _mcp_services), methods=["GET", "POST", "DELETE"], include_in_schema=False)

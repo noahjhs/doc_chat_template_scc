@@ -471,3 +471,63 @@ def chat_step(
         mock=mock,
         mock_tier=mock_tier,
     )
+
+
+# --- v1 platform: agent tokens, friends, offerings, grants, backup keys -------
+def mcp_url(domain: str) -> str:
+    return _url(domain, "/mcp")
+
+
+def create_agent_token(domain: str, token: str, name: str) -> dict:
+    return _request(domain, "POST", "/agent-tokens", token=token, json={"name": name})
+
+
+def list_agent_tokens(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/agent-tokens", token=token)
+
+
+def revoke_agent_token(domain: str, token: str, token_id: int) -> dict:
+    return _request(domain, "DELETE", f"/agent-tokens/{token_id}", token=token)
+
+
+def request_friend(domain: str, token: str, username: str) -> dict:
+    return _request(domain, "POST", "/friends/requests", token=token, json={"username": username})
+
+
+def list_friends(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/friends", token=token)
+
+
+def remove_friend(domain: str, token: str, username: str) -> dict:
+    return _request(domain, "DELETE", f"/friends/{quote(username)}", token=token)
+
+
+def publish_offering(domain: str, token: str, host_id: int, max_quota_gb: float, write_tier: str) -> dict:
+    return _request(
+        domain, "POST", "/offerings", token=token,
+        json={"host_id": host_id, "max_quota_gb": max_quota_gb, "write_tier": write_tier},
+    )
+
+
+def list_offerings(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/offerings", token=token)
+
+
+def withdraw_offering(domain: str, token: str, offering_id: int) -> dict:
+    return _request(domain, "DELETE", f"/offerings/{offering_id}", token=token)
+
+
+def request_access(domain: str, token: str, offering_id: int, quota_gb: float) -> dict:
+    return _request(domain, "POST", f"/offerings/{offering_id}/requests", token=token, json={"quota_gb": quota_gb})
+
+
+def list_grants(domain: str, token: str) -> dict:
+    return _request(domain, "GET", "/grants", token=token)
+
+
+def revoke_grant(domain: str, token: str, grant_id: int) -> dict:
+    return _request(domain, "DELETE", f"/grants/{grant_id}", token=token)
+
+
+def export_backup_key(domain: str, token: str, host_id: int, passphrase: str) -> dict:
+    return _request(domain, "POST", f"/hosts/{host_id}/backup-key/export", token=token, json={"passphrase": passphrase})

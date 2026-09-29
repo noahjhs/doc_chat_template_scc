@@ -21,14 +21,14 @@ def client():
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
-        for mod in ("main", "db", "models"):
+        for mod in ("main", "db", "models", "mcp_server", "trust", "backups"):
             sys.modules.pop(mod, None)
         import main as auth_main
         from fastapi.testclient import TestClient
 
         yield TestClient(auth_main.app)
     sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
-    for mod in ("main", "db", "models"):
+    for mod in ("main", "db", "models", "mcp_server", "trust", "backups"):
         sys.modules.pop(mod, None)
 
 

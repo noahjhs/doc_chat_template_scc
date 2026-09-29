@@ -63,7 +63,7 @@ def harness_env():
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["AUTH_DB_PATH"] = os.path.join(tmp, "users.db")
         os.environ["STORAGE_ROOT"] = os.path.join(tmp, "storage")
-        for mod in ("main", "db", "models", "policy", "conversations"):
+        for mod in ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups"):
             sys.modules.pop(mod, None)
         import main as auth_main
         from fastapi.testclient import TestClient
@@ -76,7 +76,7 @@ def harness_env():
         finally:
             hc.set_client(None)
     sys.path.remove(os.path.abspath(CASPER_SERVICE_DIR))
-    for mod in ("main", "db", "models", "policy", "conversations"):
+    for mod in ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups"):
         sys.modules.pop(mod, None)
 
 

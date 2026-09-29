@@ -530,3 +530,42 @@ class TelegramLinkResponse(BaseModel):
     linking. See main.py's telegram_link/telegram_webhook."""
 
     link_url: str
+
+
+# --- v1 platform: agent tokens, trust framework, daemon backup support ------
+class AgentTokenCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class AgentTokenInfo(BaseModel):
+    id: int
+    name: str
+    created_at: str
+    revoked: bool
+
+
+class AgentTokenCreateResponse(AgentTokenInfo):
+    token: str  # shown once; only its hash is stored
+
+
+class AgentTokenListResponse(BaseModel):
+    agent_tokens: list[AgentTokenInfo]
+
+
+class FriendRequestCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+
+
+class OfferingCreateRequest(BaseModel):
+    host_id: int
+    max_quota_gb: float = Field(gt=0, le=10_000)
+    write_tier: Literal["allow", "ask"] = "ask"
+
+
+class AccessRequestCreate(BaseModel):
+    quota_gb: float = Field(gt=0)
+
+
+class BackupKeyReport(BaseModel):
+    signing_public_key: str = Field(min_length=1, max_length=200)
+    key_storage: str = ""

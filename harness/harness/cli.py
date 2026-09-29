@@ -74,8 +74,20 @@ environment_app = typer.Typer(help="Manage Environments.")
 app.add_typer(environment_app, name="environment", rich_help_panel=USER_PANEL)
 profile_app = typer.Typer(help="Manage account profile/notification/permission preferences.")
 app.add_typer(profile_app, name="profile", rich_help_panel=USER_PANEL)
-approvals_app = typer.Typer(help="Check and answer pending 'ask'-tier approvals from any session.")
+approvals_app = typer.Typer(help="Check and answer pending approvals (ask-tier calls, friend and access requests, backups) from any session.")
 app.add_typer(approvals_app, name="approvals", rich_help_panel=USER_PANEL)
+agent_app = typer.Typer(help="Connect your own agent (any MCP client, e.g. Claude Code) to Casper.")
+app.add_typer(agent_app, name="agent", rich_help_panel=USER_PANEL)
+agent_token_app = typer.Typer(help="Agent tokens -- what an agent presents to Casper's MCP server.")
+agent_app.add_typer(agent_token_app, name="token")
+friends_app = typer.Typer(help="Friends -- the relationship every kind of sharing starts from.")
+app.add_typer(friends_app, name="friends", rich_help_panel=USER_PANEL)
+offerings_app = typer.Typer(help="What you offer your friends (backup space), and what they offer you.")
+app.add_typer(offerings_app, name="offerings", rich_help_panel=USER_PANEL)
+grants_app = typer.Typer(help="Access you've given and been given; either side can revoke.")
+app.add_typer(grants_app, name="grants", rich_help_panel=USER_PANEL)
+backup_app = typer.Typer(help="Peer backup keys (backups themselves are driven by your agent).")
+app.add_typer(backup_app, name="backup", rich_help_panel=USER_PANEL)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -742,9 +754,9 @@ def approvals_list():
     if not pending:
         console.print("No pending approvals.")
         return
-    table = Table("id", "description", "created_at")
+    table = Table("id", "kind", "from", "description", "created_at")
     for p in pending:
-        table.add_row(p["id"], p["description"], p["created_at"])
+        table.add_row(p["id"], p.get("kind", "conversation"), p.get("requester") or "you", p["description"], p["created_at"])
     console.print(table)
 
 
@@ -1066,7 +1078,7 @@ def _parse_option(spec: str) -> dict:
 def _print_step_result(result: dict):
     if result["status"] == "done":
         console.print(f"[bold cyan]assistant:[/bold cyan] {result['message']}")
-        for entry in result["turn"]["aggregate"].get("shell_command_calls", []):
+        for entry in result["turn"].get("aggregate", {}).get("shell_command_calls", []):
             console.print(f"  [dim]$ {entry['args'].get('positional_args')} -> {entry['output']}[/dim]")
     else:
         pending = result["pending_approval"]
@@ -1275,3 +1287,146 @@ def chat(
 
 if __name__ == "__main__":
     app()
+
+
+# --- v1 platform: agents, friends, offerings, grants, backup keys ----------------
+def _call(fn, *args):
+    domain, token = _require_session()
+    try:
+        return domain, fn(domain, token, *args)
+    except client.ApiError as e:
+        _handle_api_error(e)
+
+
+@agent_token_app.command("create", no_args_is_help=True)
+def agent_token_create(name: str):
+    """Create a token for one agent, and print how to connect it. The token
+    is shown once; the agent acts on your behalf, with at most your own
+    permissions. Revoke it any time with `agent token revoke`."""
+    domain, result = _call(client.create_agent_token, name)
+    console.print(f"Agent token for [bold]{name}[/bold] (shown once):\n\n  {result['token']}\n")
+    console.print("Connect Claude Code to Casper with:\n")
+    console.print(
+        f"  claude mcp add --transport http casper {client.mcp_url(domain)} "
+        f"--header 'Authorization: Bearer {result['token']}'",
+        soft_wrap=True,
+    )
+
+
+@agent_token_app.command("list")
+def agent_token_list():
+    """List your agent tokens."""
+    _, result = _call(client.list_agent_tokens)
+    table = Table("id", "name", "created_at", "revoked")
+    for t in result["agent_tokens"]:
+        table.add_row(str(t["id"]), t["name"], t["created_at"], str(t["revoked"]))
+    console.print(table)
+
+
+@agent_token_app.command("revoke", no_args_is_help=True)
+def agent_token_revoke(token_id: int):
+    """Revoke one agent token; that agent loses access immediately."""
+    _call(client.revoke_agent_token, token_id)
+    console.print("Revoked.")
+
+
+@friends_app.command("add", no_args_is_help=True)
+def friends_add(username: str):
+    """Send a friend request. They decide (in Telegram, or `approvals`)."""
+    _call(client.request_friend, username)
+    console.print(f"Friend request sent to {username}.")
+
+
+@friends_app.command("list")
+def friends_list():
+    """Your friends, and friend requests waiting either way."""
+    _, result = _call(client.list_friends)
+    console.print("Friends: " + (", ".join(result["friends"]) or "none yet"))
+    for r in result["incoming"]:
+        console.print(f"  [yellow]{r['username']}[/yellow] wants to be friends -- answer with `harness approvals list`/`respond`.")
+    for r in result["outgoing"]:
+        console.print(f"  waiting on {r['username']} to accept.")
+
+
+@friends_app.command("remove", no_args_is_help=True)
+def friends_remove(username: str):
+    """End a friendship. Any backup space either of you gave the other is
+    revoked too (stored backups stay restorable for 7 days)."""
+    _call(client.remove_friend, username)
+    console.print(f"No longer friends with {username}.")
+
+
+@offerings_app.command("publish", no_args_is_help=True)
+def offerings_publish(
+    host: str = typer.Option(..., "--host", help="Your host to offer space on (label or id)."),
+    max_gb: float = typer.Option(..., "--max-gb", help="The most any one friend can ask for."),
+    tier: str = typer.Option("ask", "--tier", help="'ask': approve each backup; 'allow': any backup within quota."),
+):
+    """Offer backup space on one of your hosts to your friends."""
+    domain, token = _require_session()
+    host_id = _resolve_host_id(domain, token, host)
+    _, result = _call(client.publish_offering, host_id, max_gb, tier)
+    console.print(f"Published offering {result['id']}: up to {max_gb:g} GB on {host}, writes: {tier}.")
+
+
+@offerings_app.command("list")
+def offerings_list():
+    """Your offerings, and your friends'."""
+    _, result = _call(client.list_offerings)
+    table = Table("id", "owner", "host", "max GB", "writes", "yours")
+    for o in result["mine"]:
+        table.add_row(str(o["id"]), "you", o["host"], f"{o['max_quota_gb']:g}", o["write_tier"], "")
+    for o in result["friends"]:
+        table.add_row(str(o["id"]), o["owner"], o["host"], f"{o['max_quota_gb']:g}", o["write_tier"], o.get("yours") or "")
+    console.print(table)
+
+
+@offerings_app.command("withdraw", no_args_is_help=True)
+def offerings_withdraw(offering_id: int):
+    """Stop offering it. Grants already given stay until revoked (`grants`)."""
+    _call(client.withdraw_offering, offering_id)
+    console.print("Withdrawn.")
+
+
+@offerings_app.command("request", no_args_is_help=True)
+def offerings_request(offering_id: int, gb: float = typer.Option(..., "--gb", help="How much space to ask for.")):
+    """Ask a friend for one of their offerings. They decide."""
+    _call(client.request_access, offering_id, gb)
+    console.print(f"Requested {gb:g} GB -- waiting on the owner.")
+
+
+@grants_app.command("list")
+def grants_list():
+    """Backup space you've given friends, and space friends have given you."""
+    _, result = _call(client.list_grants)
+    table = Table("id", "direction", "who", "host", "quota", "writes")
+    for g in result["given"]:
+        table.add_row(str(g["id"]), "given", g["grantee"], g["host"], f"{g['quota_bytes'] / 1024**3:g} GB", g["write_tier"])
+    for g in result["held"]:
+        table.add_row(str(g["id"]), "held", g["owner"], f"{g['owner']}/{g['host']}", f"{g['quota_bytes'] / 1024**3:g} GB", g["write_tier"])
+    console.print(table)
+
+
+@grants_app.command("revoke", no_args_is_help=True)
+def grants_revoke(grant_id: int):
+    """End a grant, from either side. Writes stop at once; stored backups
+    stay restorable/deletable by their owner for 7 days, then are purged."""
+    _call(client.revoke_grant, grant_id)
+    console.print("Revoked.")
+
+
+@backup_app.command("export-key", no_args_is_help=True)
+def backup_export_key(
+    host: str = typer.Option(..., "--host", help="The host whose backup keys to export (label or id)."),
+    out: Path = typer.Option(..., "--out", help="File to write the passphrase-encrypted keys to."),
+):
+    """Export a host's backup keys, encrypted to a passphrase. Do this if
+    the host reported its keys as stored 'local' (not synced by iCloud
+    Keychain): without it, losing that machine loses every backup it made."""
+    domain, token = _require_session()
+    host_id = _resolve_host_id(domain, token, host)
+    passphrase = typer.prompt("Passphrase (12+ characters)", hide_input=True, confirmation_prompt=True)
+    _, result = _call(client.export_backup_key, host_id, passphrase)
+    out.write_text(result["exported_key"])
+    out.chmod(0o600)
+    console.print(f"Wrote {out}. Keep it and the passphrase somewhere safe, apart from this machine.")

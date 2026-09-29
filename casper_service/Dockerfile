@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ("from db import ...") relying on the process's cwd, same as the existing
 # "cd casper_service && uvicorn main:app" invocation. WORKDIR /app reproduces
 # that, so main.py/db.py/models.py need zero changes for this to work.
-COPY main.py db.py models.py policy.py conversations.py ./
+COPY main.py db.py models.py policy.py conversations.py trust.py backups.py mcp_server.py ./
 
 COPY docker-entrypoint.sh /usr/local/bin/auth-entrypoint.sh
 RUN chmod +x /usr/local/bin/auth-entrypoint.sh
