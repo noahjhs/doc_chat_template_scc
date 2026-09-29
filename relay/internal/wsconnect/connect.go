@@ -8,6 +8,7 @@ import (
 	"github.com/coder/websocket"
 
 	"casper-relay/internal/registry"
+	"casper-relay/internal/wire"
 )
 
 func Handler(reg *registry.Registry, logger *log.Logger) http.HandlerFunc {
@@ -23,6 +24,7 @@ func Handler(reg *registry.Registry, logger *log.Logger) http.HandlerFunc {
 			logger.Printf("connect: accept failed for key=%s: %s", key, err)
 			return
 		}
+		c.SetReadLimit(wire.MaxFrameBytes)
 
 		conn := reg.NewConn(key, c)
 		reg.Register(key, conn)

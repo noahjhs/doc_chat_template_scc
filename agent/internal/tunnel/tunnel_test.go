@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -149,5 +150,37 @@ func TestJitter_StaysWithinBounds(t *testing.T) {
 		if j < 8*time.Second || j > 12*time.Second {
 			t.Fatalf("jitter(%v) = %v, expected within +/-20%%", d, j)
 		}
+	}
+}
+
+// A 5MB request body -- well past coder/websocket's 32KB default read
+// limit, which connectOnce must raise (see maxFrameBytes) for the request
+// frame to arrive at all.
+func TestConnectOnce_AcceptsLargeRequests(t *testing.T) {
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(strconv.Itoa(len(body))))
+	}))
+	defer agentServer.Close()
+	port, err := strconv.Atoi(strings.Split(agentServer.URL, ":")[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	big := strings.Repeat("x", 5<<20)
+	relayAddr, response := fakeRelay(t, Frame{ID: "7", Method: "POST", Path: "/api/command", Body: base64.StdEncoding.EncodeToString([]byte(big))})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = connectOnce(ctx, relayAddr, "test-routing-key", port) }()
+
+	select {
+	case resp := <-response:
+		decoded, _ := base64.StdEncoding.DecodeString(resp.Body)
+		if string(decoded) != strconv.Itoa(len(big)) {
+			t.Fatalf("expected the daemon to receive %d bytes, got response %q (error=%q)", len(big), decoded, resp.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out -- the large request frame was likely rejected by the read limit")
 	}
 }

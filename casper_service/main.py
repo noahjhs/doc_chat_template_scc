@@ -1379,41 +1379,70 @@ def _create_pending_approval_record(
 
 
 def _send_approval_telegram(user_id: int, description: str, approval_id: str):
-    """Best-effort -- a Telegram failure (not configured for this
-    deployment, an API error, an unlinked chat) must never break the
-    conversation step that triggered it. No-ops unless the user has BOTH
+    """Sends an approval request to user_id with inline Approve/Deny
+    buttons keyed to this exact approval_id -- a tap posts straight back
+    as a callback_query with that id, so there's no "which pending
+    approval does a bare yes mean" ambiguity to resolve, unlike a plain
+    text reply channel. Best-effort and opt-in, like every notification
+    (see notify below) -- the same session, or `harness approvals`, still
+    works regardless."""
+    notify(
+        user_id,
+        description,
+        buttons=[("✅ Approve", f"approve:{approval_id}"), ("❌ Deny", f"deny:{approval_id}")],
+    )
+
+
+def notify(user_id: int, text: str, buttons: list[tuple[str, str]] | None = None):
+    """The one place casper_service tells a person something out of band
+    -- an approval request (with buttons, see _send_approval_telegram
+    above) or an outcome (a friend's backup finished, an access request was
+    granted...). Best-effort: a Telegram failure (not configured for this
+    deployment, an API error, an unlinked chat) must never break whatever
+    triggered it. No-ops unless the user has BOTH
     telegram_notifications_enabled and a linked telegram_chat_id (see
     models.py's ProfileInfo, and /telegram/link below for how linking
-    happens) -- this is an opt-in notification, not a requirement to
-    answer this way (the same session, or `harness approvals`, still
-    works regardless). Sends inline Approve/Deny buttons keyed to this
-    exact approval_id -- a tap posts straight back as a callback_query
-    with that id, so there's no "which pending approval does a bare yes
-    mean" ambiguity to resolve, unlike a plain text reply channel."""
+    happens). Telegram is the only channel in v1."""
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     with get_db() as db:
         profile = _get_or_create_profile(db, user_id)
     if not bot_token or not profile.telegram_notifications_enabled or not profile.telegram_chat_id:
         return
+    message: dict = {"chat_id": profile.telegram_chat_id, "text": text}
+    if buttons:
+        message["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in buttons]]}
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={
-                "chat_id": profile.telegram_chat_id,
-                "text": description,
-                "reply_markup": {
-                    "inline_keyboard": [
-                        [
-                            {"text": "✅ Approve", "callback_data": f"approve:{approval_id}"},
-                            {"text": "❌ Deny", "callback_data": f"deny:{approval_id}"},
-                        ]
-                    ]
-                },
-            },
-            timeout=10,
-        )
+        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=message, timeout=10)
     except requests.RequestException as e:
-        print(f"Couldn't send approval Telegram message to user {user_id}: {e}")
+        print(f"Couldn't send Telegram message to user {user_id}: {e}")
+
+
+def create_approval(approver_id: int, requester_id: int, kind: str, description: str, payload: dict) -> str:
+    """Records a non-conversation pending approval (see
+    _APPROVAL_HANDLERS below for what each kind does once decided) and
+    notifies the approver. requester_id is who asked -- the approver
+    themselves for their own agent's ask-tier call, or someone else
+    entirely (a friend's backup onto the approver's host)."""
+    approval_id = secrets.token_urlsafe(12)
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO pending_approvals (id, user_id, description, turn, kind, payload, requester_user_id)
+            VALUES (?, ?, ?, '{}', ?, ?, ?)
+            """,
+            (approval_id, approver_id, description, kind, json.dumps(payload), requester_id),
+        )
+    _send_approval_telegram(approver_id, description, approval_id)
+    return approval_id
+
+
+# kind -> handler(row, decision) -> a short, human-readable outcome. Each
+# handler is responsible for acting on the decision (re-dispatching to a
+# daemon, writing a grant, ...) and for notifying the requester, since
+# that's the person who's actually waiting on it. Filled in by the
+# features that create each kind (MCP shell calls, access requests,
+# backups) further down this module.
+_APPROVAL_HANDLERS: dict = {}
 
 
 def _resume_pending_approval(row, decision: str) -> ConversationStepResponse:
@@ -1424,6 +1453,12 @@ def _resume_pending_approval(row, decision: str) -> ConversationStepResponse:
     they do with the result. Deletes the row so the same approval can't be
     resolved twice; a follow-up ask-tier pause, if any, creates its own
     fresh row through the normal create_pending_approval path."""
+    if row["kind"] != "conversation":
+        with get_db() as db:
+            db.execute("DELETE FROM pending_approvals WHERE id = ?", (row["id"],))
+        handler = _APPROVAL_HANDLERS.get(row["kind"])
+        message = handler(row, decision) if handler else f"Unknown approval kind {row['kind']!r}."
+        return ConversationStepResponse(turn={}, status="done", message=message)
     user_id = row["user_id"]
     with get_db() as db:
         configs = _connected_host_configs(db, user_id)
@@ -1453,11 +1488,23 @@ def list_pending_approvals(authorization: str = Header(default="")):
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         rows = db.execute(
-            "SELECT * FROM pending_approvals WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
+            """
+            SELECT pa.*, u.username AS requester_username
+            FROM pending_approvals pa LEFT JOIN users u ON u.id = pa.requester_user_id
+            WHERE pa.user_id = ? ORDER BY pa.created_at DESC
+            """,
+            (user_id,),
         ).fetchall()
     return PendingApprovalListResponse(
         pending_approvals=[
-            PendingApprovalInfo(id=r["id"], description=r["description"], created_at=r["created_at"]) for r in rows
+            PendingApprovalInfo(
+                id=r["id"],
+                description=r["description"],
+                created_at=r["created_at"],
+                kind=r["kind"],
+                requester=r["requester_username"] if r["requester_user_id"] not in (None, user_id) else None,
+            )
+            for r in rows
         ]
     )
 

@@ -326,6 +326,28 @@ def _add_mock_tier_column_to_pending_approvals(db):
     db.execute("ALTER TABLE pending_approvals ADD COLUMN mock_tier TEXT NOT NULL DEFAULT 'allow'")
 
 
+def _add_kind_columns_to_pending_approvals(db):
+    """One-time ALTER TABLE ADD COLUMNs generalizing pending_approvals
+    beyond paused conversation turns (added 2026-09-28 for the MCP/peer-
+    backup work -- see docs/product/v1-implementation-plan.md's Phase 0):
+    kind names what kind of paused thing a row resumes ('conversation' --
+    every pre-existing row, whose state lives in `turn` -- or one of
+    main.py's _APPROVAL_HANDLERS kinds, whose state lives in `payload`);
+    requester_user_id is who ASKED, since the approver (user_id) is no
+    longer always the same person -- e.g. Sam approving Riley's backup
+    onto Sam's host. NULL requester_user_id means "same as user_id"."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "pending_approvals" not in existing:
+        return
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(pending_approvals)").fetchall()}
+    if "kind" not in columns:
+        db.execute("ALTER TABLE pending_approvals ADD COLUMN kind TEXT NOT NULL DEFAULT 'conversation'")
+    if "payload" not in columns:
+        db.execute("ALTER TABLE pending_approvals ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'")
+    if "requester_user_id" not in columns:
+        db.execute("ALTER TABLE pending_approvals ADD COLUMN requester_user_id INTEGER REFERENCES users(id)")
+
+
 def init_db():
     with get_db() as db:
         _rename_legacy_rule_chain_tables(db)
@@ -334,6 +356,7 @@ def init_db():
         _add_system_prompt_column_to_user_profile(db)
         _add_telegram_columns_to_user_profile(db)
         _add_mock_tier_column_to_pending_approvals(db)
+        _add_kind_columns_to_pending_approvals(db)
 
 
 @contextlib.contextmanager

@@ -38,6 +38,10 @@ type Frame struct {
 	Error   string            `json:"error,omitempty"`
 }
 
+// maxFrameBytes mirrors relay/internal/wire.MaxFrameBytes -- see there for
+// why coder/websocket's 32KB default read limit had to be raised.
+const maxFrameBytes = 16 << 20
+
 func timeoutFor(path string) time.Duration {
 	if path == "/api/command" {
 		return 15 * time.Second
@@ -148,6 +152,7 @@ func connectOnce(parentCtx context.Context, relayDomain, routingKey string, port
 		return err
 	}
 	defer conn.CloseNow()
+	conn.SetReadLimit(maxFrameBytes)
 
 	outbound := make(chan Frame, 16)
 

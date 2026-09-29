@@ -20,6 +20,14 @@ type Frame struct {
 	Error   string            `json:"error,omitempty"`
 }
 
+// MaxFrameBytes is the largest single WebSocket message either end will
+// read -- coder/websocket's own default is only 32KB, which silently broke
+// any tunneled request/response bigger than that (large command output, and
+// every backup chunk: 4MB of ciphertext is ~7.1MB once base64'd into the
+// request's JSON body and then again into Frame.Body). Mirrored by
+// agent/internal/tunnel's own maxFrameBytes.
+const MaxFrameBytes = 16 << 20
+
 // TimeoutFor returns how long the relay should wait for an agent's response
 // to a given request path before giving up -- matches pages/chat.py's exact
 // existing client-side timeouts (call_local_agent's 15s for /api/command,

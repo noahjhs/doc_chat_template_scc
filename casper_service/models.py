@@ -398,6 +398,11 @@ class PendingApprovalInfo(BaseModel):
     id: str
     description: str
     created_at: str
+    kind: str = "conversation"
+    # Who asked, when that's someone other than the approver (e.g. a
+    # friend's backup landing on the approver's host) -- None when the
+    # approver is approving their own call.
+    requester: str | None = None
 
 
 class PendingApprovalListResponse(BaseModel):
