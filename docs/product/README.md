@@ -40,6 +40,8 @@ more than one host, and it is the simplest concrete form of goals 2 and 3.
   delegation, and the platform/app split.
 - [risk-model.md](risk-model.md): abuse and failure categories and how each
   is addressed.
+- [v1-implementation-plan.md](v1-implementation-plan.md): the phased
+  build plan for the peer-backup scenario.
 - [scenarios/](scenarios/): step-by-step workflow models, written before
   building each workflow.
   - [peer-backup.md](scenarios/peer-backup.md): the v1 scenario.
