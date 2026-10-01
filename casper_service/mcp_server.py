@@ -115,10 +115,12 @@ def build(svc: Services) -> MCPServer:
         description=(
             "Back up a folder from one of your own hosts to a host where you hold backup space (see list_hosts). "
             "The folder is encrypted on your own machine first; the destination can never read it. "
+            "Ask the person which folder first -- never pick one for them. Call with preview=true (the default), show the "
+            "person the plan, and only call again with preview=false once they agree. "
             "May pause for the destination owner's approval -- you'll be notified when it finishes."
         )
     )
-    def backup_push(ctx: Context, source_host: str, path: str, dest_host: str, preview: bool = False) -> str:
+    def backup_push(ctx: Context, source_host: str, path: str, dest_host: str, preview: bool = True) -> str:
         return svc.backup_push(_caller(svc, ctx), source_host, path, dest_host, preview)
 
     @server.tool(description="Show the status of one backup (by id), or of your recent backups if no id is given.")

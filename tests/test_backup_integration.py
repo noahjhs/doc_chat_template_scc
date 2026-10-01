@@ -143,7 +143,7 @@ def test_peer_backup_real_daemons(world):
     _mcp(base, agent, "request_access", offering_id=offer["id"], quota_gb=0.5)
     _approve_only(base, sam["headers"], "access_request")
 
-    out = _mcp(base, agent, "backup_push", source_host="riley-laptop", path="taxes", dest_host="sam/sam-mini")
+    out = _mcp(base, agent, "backup_push", source_host="riley-laptop", path="taxes", dest_host="sam/sam-mini", preview=False)
     assert "waiting for sam to approve" in out, out
     ask = _approve_only(base, sam["headers"], "backup_write")
     assert "taxes" not in ask["description"]
@@ -176,4 +176,4 @@ def test_peer_backup_real_daemons(world):
     # Revocation: writes stop at once.
     grant_id = requests.get(base + "/grants", headers=sam["headers"]).json()["given"][0]["id"]
     requests.delete(base + f"/grants/{grant_id}", headers=sam["headers"])
-    assert "don't have backup space" in _mcp(base, agent, "backup_push", source_host="riley-laptop", path="taxes", dest_host="sam/sam-mini")
+    assert "don't have backup space" in _mcp(base, agent, "backup_push", source_host="riley-laptop", path="taxes", dest_host="sam/sam-mini", preview=False)

@@ -102,6 +102,48 @@ Two notes on this run:
   because an SSH session can't reach the login Keychain. A person typing in
   Terminal on the mini is in that session already.
 
+**2026-10-01 Hermes + GLM 5.2 run (Nous Portal), on the Mac mini: works,
+but consent is not reliable.**
+- **Riley:** Hermes, starting from an empty folder via the **URL route**
+  ("Set me up with Casper using …/agents.md — my invite code is …").
+- **Sam:** set up on the MacBook as fixture, not under test.
+- Riley's agent was driven twice:
+  1. in one-shot mode (`hermes -z`);
+  2. in interactive mode, over ACP: the protocol editors and the desktop
+     app use, where Hermes can ask questions.
+
+**What worked:**
+- Install, account, pairing, invite, backup and a restore that was
+  byte-identical (SHA-256), all through the URL route.
+- Hermes masks secrets in its terminal output, so the token
+  `setup agent --client other` printed came through redacted. GLM found
+  `--json`, then wrote the MCP server into `~/.hermes/config.yaml` itself.
+- In interactive mode it asked for the username (with a suggestion) and
+  showed the invite preview before redeeming.
+
+**What didn't:**
+- **One-shot mode answers every "ask the user" with "pick a default and
+  proceed".** That's Hermes' design. GLM chose the username itself and
+  redeemed, picked a folder and backed it up, all unasked.
+- **Even in interactive mode**, after Riley agreed to *redeem*, it went
+  straight on to back up a folder Riley never chose, with no preview and
+  no question.
+  - It took the folder from a file my harness had left from the one-shot
+    run: test contamination, since cleaned up.
+  - But it called `backup_push` without a preview, and `backup_push`
+    defaulted to `preview=false`, unlike every other sharing tool. Fixed:
+    it now defaults to `true`, and its description says to ask which
+    folder.
+- It **skipped the recovery kit** in both modes.
+- When challenged it apologised, explained, and deleted the unwanted
+  backup.
+
+**Takeaway:** a less capable or more autonomous agent will treat
+preview → confirm as optional. Instructions and defaults narrow that gap
+but can't close it. Consent for a person's own consequential actions (their
+first backup of a folder, redeeming an invite) needs a check the agent
+can't satisfy alone. See the design question in the next round.
+
 ## Found and fixed during the runs
 
 - **`setup account create` signed up before checking the Keychain**
@@ -138,5 +180,10 @@ Two notes on this run:
   redeemed the invite and ran the backup without previewing the backup
   separately. The person explicitly asked for both, so this is reasonable,
   but the skill could say that a backup's preview should still be shown.
+- **`setup agent` has no Hermes mode.** Agents that mask secrets (Hermes)
+  get a redacted token from the plain output; `--client hermes` should
+  write Hermes' config directly.
+- **Cloudflare blocks Python's default `urllib` user agent** (403) on the
+  dev domain; `curl` works. Agents scripting in Python could hit this.
 - **`HEAD` on the download returns 405** (GET only). It's harmless for
   agents, but some download tools probe with `HEAD`.

@@ -307,7 +307,7 @@ def test_scenario_peer_backup_end_to_end(app_env):
         assert {"host": "sam/sam-mini", "role": "backup_peer", "approval_needed_to_write": True}.items() <= next(h for h in hosts if h["host"] == "sam/sam-mini").items()
 
         # 5-7. Push: nothing moves until Sam approves; the agent gets a plain answer.
-        out = _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/Documents/taxes", dest_host="sam/sam-mini")
+        out = _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/Documents/taxes", dest_host="sam/sam-mini", preview=False)
         assert "waiting for sam to approve" in out
         assert not any(r["action"] == "backup_write_chunk" for r in sd.requests)
         [ask] = [p for p in _approvals(client, sam) if p["kind"] == "backup_write"]
@@ -328,7 +328,7 @@ def test_scenario_peer_backup_end_to_end(app_env):
 
         # Fail fast when the destination is offline.
         client.delete("/hosts/presence", headers=sam_device)
-        assert "sam/sam-mini is offline" in _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/x", dest_host="sam/sam-mini")
+        assert "sam/sam-mini is offline" in _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/x", dest_host="sam/sam-mini", preview=False)
         client.post("/hosts/presence", json={"local_agent_url": sd.url, "cwd": "/"}, headers=sam_device)
 
         # 10. Sam revokes: Riley is told, the daemon is told to refresh, the grant shows revoked.
@@ -338,7 +338,7 @@ def test_scenario_peer_backup_end_to_end(app_env):
         [revoked] = client.get("/hosts/grants", headers=sam_device).json()["grants"]
         assert revoked["revoked_at"] is not None
         assert not any(h["host"] == "sam/sam-mini" for h in _mcp(client, agent, "list_hosts"))
-        assert "don't have backup space" in _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/x", dest_host="sam/sam-mini")
+        assert "don't have backup space" in _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/x", dest_host="sam/sam-mini", preview=False)
 
 
 def test_backup_denied_by_daemon_quota(app_env):
@@ -368,7 +368,7 @@ def test_backup_denied_by_daemon_quota(app_env):
         client.post(f"/offerings/{oid}/requests", json={"quota_gb": 10}, headers=riley)
         _decide(client, sam, _approvals(client, sam)[0]["id"])
         agent = _agent_token(client, riley)
-        out = _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/big", dest_host="sam/sam-mini")
+        out = _mcp(client, agent, "backup_push", source_host="riley-laptop", path="~/big", dest_host="sam/sam-mini", preview=False)
         assert out == "sam/sam-mini refused the backup: over quota: 9 GB used."
         assert rd.requests[-1]["action"] == "backup_cleanup"
 
