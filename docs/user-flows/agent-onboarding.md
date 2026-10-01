@@ -57,7 +57,7 @@ isn't installed on the mini). Cross-machine transfer was already proven
   - Riley: 7, including one explaining the one-Mac test setup and one after
     a bug fix (below);
   - the restart for each, and typing the passphrase once.
-- **Agent cost:** about $0.55 across all sessions.
+- **Agent usage:** about $0.55 across all sessions *at pay-as-you-go API prices*, as estimated by Claude Code's `total_cost_usd`. On a Pro/Max subscription that is usage against plan limits, not a charge.
 - **The backup:** a 9 MB test folder backed up and restored byte-identical
   (SHA-256 checked). The agent also compared the restore with the original
   itself, unprompted.
