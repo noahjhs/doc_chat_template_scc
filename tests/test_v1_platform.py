@@ -493,7 +493,7 @@ def test_onboarding_files_are_served_with_this_deployments_url(app_env):
     main, client = app_env
     md = client.get("/agents.md", headers={"host": "dev-auth.casperagent.dev", "x-forwarded-proto": "https"})
     assert md.status_code == 200
-    assert "https://dev-auth.casperagent.dev/download/casper-macos.zip" in md.text and "{{" not in md.text
+    assert "https://dev-auth.casperagent.dev/download/casper/macos" in md.text and "{{" not in md.text
     skill = client.get("/onboarding/skills/casper-back-up.md")
     assert skill.status_code == 200 and "recovery-kit" in skill.text
     assert client.get("/onboarding/skills/..%2Fsecrets.md").status_code == 404
@@ -512,5 +512,8 @@ def test_app_download(app_env, tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DIST_DIR", str(tmp_path))
     assert client.get("/download/casper-macos.zip").status_code == 404
     (tmp_path / "Casper-macos.zip").write_bytes(b"PK zip")
-    r = client.get("/download/casper-macos.zip")
-    assert r.status_code == 200 and r.content == b"PK zip"
+    for path in ("/download/casper/macos", "/download/casper-macos.zip"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.content == b"PK zip"
+        assert r.headers["cache-control"] == "no-store"
+    assert client.get("/agents.md").headers["cache-control"] == "no-store"

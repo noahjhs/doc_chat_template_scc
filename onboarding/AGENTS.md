@@ -42,7 +42,7 @@ If it isn't installed, install it. This downloads the notarized app from
 Casper and opens it; there's no installer:
 
 ```sh
-curl -fsSL {{CASPER_URL}}/download/casper-macos.zip -o /tmp/casper-macos.zip \
+curl -fsSL {{CASPER_URL}}/download/casper/macos -o /tmp/casper-macos.zip \
   && unzip -oq /tmp/casper-macos.zip -d /Applications \
   && open /Applications/CasperGo/Casper.app
 ```

@@ -2394,6 +2394,9 @@ def _mcp_backup_push(user_id: int, source_host: str, path: str, dest_host: str, 
 
 
 # --- Public onboarding files and downloads -----------------------------------------
+# Onboarding files and the app change with every deploy; never let a CDN
+# edge (Cloudflare, in front of every deployment) serve a stale copy.
+_NO_STORE = {"Cache-Control": "no-store"}
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ONBOARDING_DIR = os.environ.get("ONBOARDING_DIR", os.path.join(_REPO_ROOT, "onboarding"))
 DIST_DIR = os.environ.get("DIST_DIR", os.path.join(_REPO_ROOT, "dist"))
@@ -2440,7 +2443,7 @@ def onboarding_agents_md(request: Request):
     from fastapi.responses import PlainTextResponse
 
     with open(os.path.join(ONBOARDING_DIR, "AGENTS.md")) as f:
-        return PlainTextResponse(_render_onboarding(f.read(), request), media_type="text/markdown")
+        return PlainTextResponse(_render_onboarding(f.read(), request), media_type="text/markdown", headers=_NO_STORE)
 
 
 @app.get("/onboarding/skills/{name}.md", include_in_schema=False)
@@ -2451,7 +2454,7 @@ def onboarding_skill(name: str, request: Request):
     if not name.replace("-", "").isalnum() or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="No such skill.")
     with open(path) as f:
-        return PlainTextResponse(_render_onboarding(f.read(), request), media_type="text/markdown")
+        return PlainTextResponse(_render_onboarding(f.read(), request), media_type="text/markdown", headers=_NO_STORE)
 
 
 @app.get("/onboarding.zip", include_in_schema=False)
@@ -2466,17 +2469,22 @@ def onboarding_zip(request: Request):
         for rel, full in _onboarding_files():
             with open(full) as f:
                 z.writestr(os.path.join("casper", rel), _render_onboarding(f.read(), request))
-    return Response(buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="casper-onboarding.zip"'})
+    return Response(buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="casper-onboarding.zip"', **_NO_STORE})
 
 
+@app.get("/download/casper/macos", include_in_schema=False)
 @app.get("/download/casper-macos.zip", include_in_schema=False)
 def download_app():
+    """The extensionless path is the one to publish: Cloudflare caches
+    ".zip" URLs at its edge by default, which served a stale build after a
+    release (found in the 2026-09-30 onboarding run). no-store keeps the
+    edge from caching either path from now on."""
     from fastapi.responses import FileResponse
 
     path = os.path.join(DIST_DIR, "Casper-macos.zip")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="No macOS build is published on this deployment.")
-    return FileResponse(path, media_type="application/zip", filename="Casper-macos.zip")
+    return FileResponse(path, media_type="application/zip", filename="Casper-macos.zip", headers=_NO_STORE)
 
 
 for _name, _fn in {

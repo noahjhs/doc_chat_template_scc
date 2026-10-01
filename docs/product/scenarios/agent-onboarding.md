@@ -68,7 +68,7 @@ Every command is safe to re-run, prints plain text by default or JSON with
 | `recovery-kit` | Asks for a passphrase **in a macOS dialog** and saves this machine's backup keys, encrypted, to `~/Documents/Casper Recovery Kit (<user>).txt`. The agent never sees the passphrase |
 
 Installing is the one plain-shell step: `curl` the zip from
-`https://<casper>/download/casper-macos.zip`, unzip it into `/Applications`,
+`https://<casper>/download/casper/macos`, unzip it into `/Applications`,
 and open it once. A command-line download isn't quarantined, so there's no
 "downloaded from the internet" prompt. The first launch asks once about
 login items, which is the person's choice.
