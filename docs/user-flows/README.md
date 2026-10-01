@@ -45,3 +45,5 @@ Steps use `- [ ]` so a real run-through can be checked off live.
   MCP server, backs up a folder from one person's machine to a friend's
   (encrypted, approved by the friend) and restores it. Real daemons on two
   machines.
+- [agent-onboarding.md](agent-onboarding.md) -- a fresh agent, pointed at
+  Casper with "go", sets up both sides of peer backup for its person.

@@ -1,6 +1,6 @@
 # Scenario: agents onboard people (v1)
 
-**Status:** design, 2026-09-30. Applies [agent-first-ux.md](../agent-first-ux.md).
+**Status:** built, and passed live on dev 2026-09-30 ([run record](../../user-flows/agent-onboarding.md)). Applies [agent-first-ux.md](../agent-first-ux.md).
 It replaces the `harness` steps in [peer-backup.md](peer-backup.md) with
 something a person can actually do: point their agent at Casper and say
 "go".
