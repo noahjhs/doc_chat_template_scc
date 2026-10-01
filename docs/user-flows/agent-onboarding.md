@@ -72,7 +72,45 @@ isn't installed on the mini). Cross-machine transfer was already proven
   - It carried the invite code through the restart in the sentence it gave
     the person.
 
-## Found and fixed during the run
+**2026-09-30 cross-host run: pass.**
+- **Sam:** a fresh Claude Code on the **Mac mini** (installed that day and
+  signed in to the Principal's subscription with `claude setup-token`).
+- **Riley:** a fresh Claude Code on the **MacBook**.
+- Both started with Casper uninstalled; each agent installed it from the
+  public download.
+
+What happened:
+- Sam's agent offered 20 GB per friend (sized to the mini's 160 GB free)
+  and invited Riley with 5 GB.
+- Riley's agent redeemed the invite and backed up a 9 MB folder **from the
+  laptop to the mini**. The mini's disk held only 3 chunks and a manifest;
+  grepping for the folder, file names and contents found nothing.
+- The restore **back to the laptop** was byte-identical.
+- Afterwards, Sam's agent answered "what have I shared?" on the mini:
+  Riley, 5 GB, using 9 MB.
+
+Human side:
+- Sam: 6 short messages, including one after the fix below, and a restart.
+- Riley: 4 messages and a restart.
+
+Two notes on this run:
+- **The recovery-kit dialog went unanswered** (nobody was at the screen).
+  It gave up after 3 minutes, and the agent explained and offered to
+  retry: a graceful failure. The dialog itself was proven in the first run.
+- **The harness, not Casper, had to adapt for the mini.** Sam's turns were
+  run inside the mini's logged-in session via a one-shot launchd job,
+  because an SSH session can't reach the login Keychain. A person typing in
+  Terminal on the mini is in that session already.
+
+## Found and fixed during the runs
+
+- **`setup account create` signed up before checking the Keychain**
+  (cross-host run). Over SSH, the Keychain refused the password after the
+  account already existed, leaving an account nobody could sign in to.
+  Fixed: it now checks the Keychain first and creates nothing if that
+  fails. The fix shipped mid-run, so the mini kept the build its agent had
+  installed earlier. Account creation succeeded once run inside the
+  logged-in session.
 
 - **`setup status` said "Account: none" when a Mac had two accounts.** It
   swallowed the "which account?" error. Riley's agent rightly stopped,
@@ -95,7 +133,10 @@ isn't installed on the mini). Cross-machine transfer was already proven
   (827 MB). That's within limits and a reasonable default, but a first
   backup might be better suggested small, so the person sees it work
   quickly.
-- **Not yet run across two machines.** Claude Code needs installing on the
-  mini, with one login by you. The script for Sam's side is the same.
+- **An agent may treat one "yes, and do X" as consent to two steps.**
+  Riley said "Yes. And let's back up ~/casper-live-test", and the agent
+  redeemed the invite and ran the backup without previewing the backup
+  separately. The person explicitly asked for both, so this is reasonable,
+  but the skill could say that a backup's preview should still be shown.
 - **`HEAD` on the download returns 405** (GET only). It's harmless for
   agents, but some download tools probe with `HEAD`.
