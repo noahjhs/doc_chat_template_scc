@@ -76,7 +76,11 @@ func (c *cli) status() error {
 	}
 
 	acct, err := c.currentAccount()
-	if err != nil {
+	if names := loadIndex(); err != nil && len(names) > 1 && c.account == "" {
+		// Several people's accounts on one Mac: never guess whose this is.
+		lines = append(lines, "Accounts on this Mac: "+strings.Join(names, ", ")+" (all still set up)")
+		set("Ask which account is the person's (or whether they need a new one), then add --account <name> to every setup command")
+	} else if err != nil {
 		lines = append(lines, "Account: none on this Mac")
 		set("Create an account: `setup account create --username <name>` (ask the person what name their friends should know them by)")
 	} else {
@@ -193,7 +197,11 @@ func (c *cli) accountCreate(username string) error {
 	if err := saveAccount(c.authDomain, &storedAccount{Username: username, Password: password, Token: resp.Token}); err != nil {
 		return err
 	}
-	c.emit(fmt.Sprintf("Created Casper account %s. Its password is in this Mac's Keychain (\"Casper Account\"); nobody needs to type it.", username),
+	extra := ""
+	if len(loadIndex()) > 1 {
+		extra = fmt.Sprintf(" This Mac now has more than one Casper account, so add --account %s to the setup commands that follow.", username)
+	}
+	c.emit(fmt.Sprintf("Created Casper account %s. Its password is in this Mac's Keychain (\"Casper Account\"); nobody needs to type it.%s", username, extra),
 		map[string]any{"ok": true, "username": username, "created": true})
 	return nil
 }
