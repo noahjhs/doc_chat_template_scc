@@ -55,6 +55,16 @@ class Services:
     backup_list: Callable[..., str]
     backup_restore: Callable[..., str]
     backup_delete: Callable[..., str]
+    # Onboarding (docs/product/scenarios/agent-onboarding.md); filled in by
+    # main.py after construction.
+    my_casper: Callable[..., str] | None = None
+    add_friend: Callable[..., str] | None = None
+    publish_offering: Callable[..., str] | None = None
+    create_invite: Callable[..., str] | None = None
+    redeem_invite: Callable[..., str] | None = None
+    list_approvals: Callable[..., str] | None = None
+    decide_approval: Callable[..., str] | None = None
+    revoke: Callable[..., str] | None = None
 
 
 class _Unauthorized(Exception):
@@ -108,8 +118,8 @@ def build(svc: Services) -> MCPServer:
             "May pause for the destination owner's approval -- you'll be notified when it finishes."
         )
     )
-    def backup_push(ctx: Context, source_host: str, path: str, dest_host: str) -> str:
-        return svc.backup_push(_caller(svc, ctx), source_host, path, dest_host)
+    def backup_push(ctx: Context, source_host: str, path: str, dest_host: str, preview: bool = False) -> str:
+        return svc.backup_push(_caller(svc, ctx), source_host, path, dest_host, preview)
 
     @server.tool(description="Show the status of one backup (by id), or of your recent backups if no id is given.")
     def backup_status(ctx: Context, backup_id: str | None = None) -> str:
@@ -131,6 +141,56 @@ def build(svc: Services) -> MCPServer:
     @server.tool(description="Delete one of your backups (by id) from the host storing it.")
     def backup_delete(ctx: Context, backup_id: str) -> str:
         return svc.backup_delete(_caller(svc, ctx), backup_id)
+
+    # --- Onboarding and the ledger -------------------------------------------
+    @server.tool(description="The person's whole Casper picture in plain words: their machines, friends, what they offer, open invites, space given and held, backups, and anything waiting on a decision. Use it to answer \"what have I shared?\" and to check state before acting.")
+    def my_casper(ctx: Context) -> str:
+        return svc.my_casper(_caller(svc, ctx))
+
+    @server.tool(description="Send a friend request by username. The other person must accept. (To set someone up who isn't on Casper yet, use create_invite instead.)")
+    def add_friend(ctx: Context, username: str) -> str:
+        return svc.add_friend(_caller(svc, ctx), username)
+
+    @server.tool(
+        description=(
+            "Offer backup space on one of the person's own machines to their friends. max_gb is the most any one friend can get. "
+            "approve_each_backup=false (usual) stores any backup within a friend's share without asking; true asks the person each time. "
+            "Call with preview=true first, show the person the plan, and only call again with preview=false once they agree."
+        )
+    )
+    def publish_offering(ctx: Context, host: str, max_gb: float, approve_each_backup: bool = False, preview: bool = True) -> str:
+        return svc.publish_offering(_caller(svc, ctx), host, max_gb, approve_each_backup, preview)
+
+    @server.tool(
+        description=(
+            "Create a single-use invite to the person's offering for one friend, with quota_gb of space. Returns the code and a ready-to-send "
+            "message for the person to pass on however they normally talk. for_whom is the friend's name, for the person's own records. "
+            "Call with preview=true first and confirm with the person."
+        )
+    )
+    def create_invite(ctx: Context, quota_gb: float, for_whom: str = "", offering_id: int | None = None, preview: bool = True) -> str:
+        return svc.create_invite(_caller(svc, ctx), quota_gb, offering_id, for_whom, preview)
+
+    @server.tool(
+        description=(
+            "Use an invite code a friend sent: become their friend on Casper and receive the backup space it offers. "
+            "Call with preview=true first, show the person what it means, and redeem (preview=false) once they agree."
+        )
+    )
+    def redeem_invite(ctx: Context, code: str, preview: bool = True) -> str:
+        return svc.redeem_invite(_caller(svc, ctx), code, preview)
+
+    @server.tool(description="Requests from OTHER people waiting for the person's decision (friend requests, requests for space, a friend's backup needing approval). Ask the person; never decide for them.")
+    def list_approvals(ctx: Context) -> str:
+        return svc.list_approvals(_caller(svc, ctx))
+
+    @server.tool(description="Record the person's own decision on one request from list_approvals -- only after they've told you what they want. The person's own requests can't be approved here.")
+    def decide_approval(ctx: Context, approval_id: str, approve: bool) -> str:
+        return svc.decide_approval(_caller(svc, ctx), approval_id, approve)
+
+    @server.tool(description="Undo: kind='grant' (end backup space given or held, by grant id), 'invite' (cancel an unused invite), 'offering' (withdraw an offering), or 'friend' (by username; also ends space between you). Ids are in my_casper. Confirm with the person first.")
+    def revoke(ctx: Context, kind: str, id_or_name: str) -> str:
+        return svc.revoke(_caller(svc, ctx), kind, id_or_name)
 
     return server
 

@@ -23,6 +23,7 @@ import (
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/server"
+	"casper-agent/internal/setup"
 	"casper-agent/internal/urlscheme"
 
 	"github.com/getlantern/systray"
@@ -52,6 +53,12 @@ func fatal(format string, args ...any) {
 }
 
 func main() {
+	// `Casper setup <command>` is the onboarding CLI (internal/setup) -- a
+	// one-shot command an agent runs on the person's behalf, never the
+	// daemon: it returns before any URL handler, menu bar or server starts.
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		os.Exit(setup.Main(os.Args[2:]))
+	}
 	flag.Parse()
 	if *clearPreferences {
 		config.ClearEnabled()

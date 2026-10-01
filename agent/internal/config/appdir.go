@@ -48,3 +48,14 @@ func AppConfigDir() (string, error) {
 	}
 	return dir, nil
 }
+
+// PairURLScheme is the custom URL scheme this build's Casper.app registers
+// for pairing hand-offs -- "casper-dev" for a dev build, "casper" for prod
+// (see build/build_go_macos.sh's URL_SCHEME, derived from the same dev-
+// prefix convention as appConfigSubdir).
+func PairURLScheme() string {
+	if appConfigSubdir() == "Casper-dev" {
+		return "casper-dev"
+	}
+	return "casper"
+}

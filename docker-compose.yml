@@ -22,8 +22,15 @@ services:
     container_name: casper-auth
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Agent onboarding (docs/product/scenarios/agent-onboarding.md): the
+      # instructions served at /agents.md and the app at /download/...
+      ONBOARDING_DIR: /app/onboarding
+      DIST_DIR: /app/dist
     volumes:
       - auth_db:/data
+      - ./onboarding:/app/onboarding:ro
+      - ./dist:/app/dist:ro
     ports:
       - "127.0.0.1:8100:8100"   # local-only, for debugging
     networks:

@@ -322,6 +322,24 @@ CREATE TABLE IF NOT EXISTS backups (
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_backups_owner ON backups(owner_user_id);
+
+-- Single-use invites to an offering (docs/product/scenarios/
+-- agent-onboarding.md, "Why invite codes"): the inviter consents by creating
+-- one for a specific amount; redeeming it makes the redeemer their friend
+-- and grants the space in one step. Only the code's hash is stored.
+CREATE TABLE IF NOT EXISTS invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code_hash TEXT NOT NULL UNIQUE,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    offering_id INTEGER NOT NULL REFERENCES offerings(id),
+    quota_bytes INTEGER NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT NOT NULL,
+    used_by_user_id INTEGER REFERENCES users(id),
+    used_at TEXT,
+    cancelled_at TEXT
+);
 """
 
 

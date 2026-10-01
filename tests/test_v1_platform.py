@@ -387,3 +387,130 @@ def test_unfriending_revokes_grants(app_env):
         assert client.delete("/friends/sam", headers=riley).status_code == 200
         assert client.get("/grants", headers=riley).json()["held"] == []
         assert client.get("/friends", headers=sam).json()["friends"] == []
+
+
+# --- Agent onboarding (docs/product/scenarios/agent-onboarding.md) -------------------
+import re  # noqa: E402
+
+
+def _onboard_two(client, sd_url):
+    _, sam = _signup(client, "sam")
+    _, riley = _signup(client, "riley")
+    _pair(client, sam, "rk-mini", "sam-mini", sd_url)
+    return sam, riley, _agent_token(client, sam), _agent_token(client, riley)
+
+
+def test_onboarding_invite_flow_previews_then_acts(app_env):
+    main, client = app_env
+    notes = []
+    main.notify = lambda user_id, text, buttons=None: notes.append(text)
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+
+        # Previews change nothing.
+        plan = _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20)
+        assert plan.startswith("PREVIEW") and "can never read it" in plan
+        assert client.get("/offerings", headers=sam).json()["mine"] == []
+        assert "Done (offering" in _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
+        assert _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley").startswith("PREVIEW")
+
+        out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", preview=False)
+        code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
+        assert "agents.md" in out and code in out.split("Message for the person")[1]  # ready-to-send message carries both
+
+        assert "you and sam become friends" in _mcp(client, riley_agent, "redeem_invite", code=code)
+        assert client.get("/friends", headers=riley).json()["friends"] == []  # still just a preview
+        done = _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        assert "Back up to it as sam/sam-mini" in done
+        assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]
+        assert any("riley used your Casper invite" in t for t in notes)
+        assert "already been used" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+
+        ledger = _mcp(client, sam_agent, "my_casper")
+        assert "Friends: riley" in ledger and "riley: 10.0 GB on sam-mini" in ledger
+        assert "10.0 GB on sam/sam-mini" in _mcp(client, riley_agent, "my_casper")
+
+        # Undo: cancelled invites stop working; ending space is one call.
+        out2 = _mcp(client, sam_agent, "create_invite", quota_gb=5, preview=False)
+        code2 = re.search(r"CASPER-[A-Z2-9-]{14}", out2).group(0)
+        invite_id = re.search(r"\[invite (\d+)\]", _mcp(client, sam_agent, "my_casper")).group(1)
+        assert "Cancelled" in _mcp(client, sam_agent, "revoke", kind="invite", id_or_name=invite_id)
+        assert "cancelled" in _mcp(client, riley_agent, "redeem_invite", code=code2)
+        grant_id = re.search(r"\[grant (\d+)\]", _mcp(client, sam_agent, "my_casper")).group(1)
+        assert "Ended riley's backup space" in _mcp(client, sam_agent, "revoke", kind="grant", id_or_name=grant_id)
+        assert client.get("/grants", headers=riley).json()["held"] == []
+
+
+def test_invites_reject_bad_quota_self_use_and_typos(app_env):
+    main, client = app_env
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=5, preview=False)
+        assert "Can't" in _mcp(client, sam_agent, "create_invite", quota_gb=50, preview=False)
+        out = _mcp(client, sam_agent, "create_invite", quota_gb=1, preview=False)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", out).group(0)
+        assert "your own invite" in _mcp(client, sam_agent, "redeem_invite", code=code, preview=False)
+        assert "isn't valid" in _mcp(client, riley_agent, "redeem_invite", code="CASPER-AAAA-BBBB-CCCC")
+        # Codes are forgiving of case and spacing when read aloud or retyped.
+        assert "PREVIEW" in _mcp(client, riley_agent, "redeem_invite", code=" " + code.lower() + " ")
+
+
+def test_agent_relays_decisions_on_others_requests_but_never_its_own(app_env):
+    main, client = app_env
+
+    def respond(body):
+        return 200, {"success": False, "cwd": "/", "stdout": "", "stderr": "", "tier": "ask"}
+
+    with client, FakeDaemon(respond_with=respond) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _mcp(client, riley_agent, "add_friend", username="sam")
+        _mcp(client, sam_agent, "run_shell_command", host="sam-mini", positional_args=["brew", "upgrade"])
+
+        listing = _mcp(client, sam_agent, "list_approvals")
+        assert "from riley" in listing and "1 of the person's own requests" in listing
+        own_id = next(p["id"] for p in _approvals(client, sam) if p["kind"] == "shell_command")
+        friend_id = next(p["id"] for p in _approvals(client, sam) if p["kind"] == "friend_request")
+
+        assert "can't be approved from their agent" in _mcp(client, sam_agent, "decide_approval", approval_id=own_id, approve=True)
+        assert any(p["id"] == own_id for p in _approvals(client, sam))  # untouched
+        assert "now friends" in _mcp(client, sam_agent, "decide_approval", approval_id=friend_id, approve=True)
+
+
+def test_backup_push_preview_states_the_plan(app_env):
+    main, client = app_env
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd, FakeDaemon(respond_with=lambda b: _ok()) as rd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _pair(client, riley, "rk-laptop", "riley-laptop", rd.url)
+        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", quota_gb=10, preview=False)).group(0)
+        _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        out = _mcp(client, riley_agent, "backup_push", source_host="riley-laptop", path="~/Documents", dest_host="sam/sam-mini", preview=True)
+        assert out.startswith("PREVIEW") and "sam can never read it" in out
+        assert rd.requests == []  # nothing prepared
+
+
+def test_onboarding_files_are_served_with_this_deployments_url(app_env):
+    main, client = app_env
+    md = client.get("/agents.md", headers={"host": "dev-auth.casperagent.dev", "x-forwarded-proto": "https"})
+    assert md.status_code == 200
+    assert "https://dev-auth.casperagent.dev/download/casper-macos.zip" in md.text and "{{" not in md.text
+    skill = client.get("/onboarding/skills/casper-back-up.md")
+    assert skill.status_code == 200 and "recovery-kit" in skill.text
+    assert client.get("/onboarding/skills/..%2Fsecrets.md").status_code == 404
+
+    import io
+    import zipfile
+
+    z = zipfile.ZipFile(io.BytesIO(client.get("/onboarding.zip").content))
+    names = set(z.namelist())
+    assert {"casper/AGENTS.md", "casper/CLAUDE.md", "casper/.claude/skills/casper-setup/SKILL.md"} <= names
+    assert "{{" not in z.read("casper/AGENTS.md").decode()
+
+
+def test_app_download(app_env, tmp_path, monkeypatch):
+    main, client = app_env
+    monkeypatch.setattr(main, "DIST_DIR", str(tmp_path))
+    assert client.get("/download/casper-macos.zip").status_code == 404
+    (tmp_path / "Casper-macos.zip").write_bytes(b"PK zip")
+    r = client.get("/download/casper-macos.zip")
+    assert r.status_code == 200 and r.content == b"PK zip"

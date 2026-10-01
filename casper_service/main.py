@@ -2137,3 +2137,357 @@ _mcp_services = mcp_server.Services(
 )
 _mcp = mcp_server.build(_mcp_services)
 app.router.add_route("/mcp", mcp_server.asgi_app(_mcp, _mcp_services), methods=["GET", "POST", "DELETE"], include_in_schema=False)
+
+
+# =============================================================================
+# Agent onboarding (docs/product/scenarios/agent-onboarding.md): the ledger,
+# offerings/invites/approvals as MCP tools with plain-language previews, the
+# approvals-relay rule, undo, and the files/downloads an agent fetches.
+# =============================================================================
+def _gb(n: int) -> str:
+    return backups.human(n)
+
+
+def _mcp_my_casper(user_id: int) -> str:
+    """The ledger (agent-first-ux.md, principle 3): everything this person
+    has shared or been given, and anything waiting on them, in plain words."""
+    with get_db() as db:
+        me = trust.username(db, user_id)
+        friends = sorted(trust.username(db, f) for f in trust.friends_of(db, user_id))
+        offerings = trust.list_offerings(db, user_id)["mine"]
+        invites = trust.open_invites(db, user_id)
+        given = trust.grants_given(db, user_id)
+        held = trust.grants_held(db, user_id)
+        pending = db.execute(
+            "SELECT requester_user_id FROM pending_approvals WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        stored_by_friend = {
+            r["owner_user_id"]: r["used"]
+            for r in db.execute(
+                "SELECT owner_user_id, SUM(total_bytes) AS used FROM backups WHERE dest_owner_user_id = ? AND status = 'complete' GROUP BY owner_user_id",
+                (user_id,),
+            ).fetchall()
+        }
+        my_backups = db.execute(
+            "SELECT * FROM backups WHERE owner_user_id = ? AND status = 'complete' ORDER BY created_at DESC", (user_id,)
+        ).fetchall()
+    hosts = [h for h in _mcp_list_hosts(user_id) if h["role"] == "owner"]
+    lines = [f"Casper account: {me}"]
+    lines.append("Your machines: " + (", ".join(f"{h['host']} ({'online' if h['connected'] else 'offline'})" for h in hosts) or "none paired"))
+    lines.append("Friends: " + (", ".join(friends) or "none yet"))
+    if offerings:
+        lines.append("You offer:")
+        for o in offerings:
+            each = "you approve each backup" if o["write_tier"] == "ask" else "any backup within a friend's share is allowed"
+            lines.append(f"  - up to {o['max_quota_gb']:g} GB per friend on {o['host']} ({each}) [offering {o['id']}]")
+    if invites:
+        lines.append("Open invites (single-use, not yet redeemed):")
+        for i in invites:
+            lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}, expires {i['expires_at'][:10]} [invite {i['id']}]")
+    if given:
+        lines.append("Space you've given (they can store encrypted backups; they and you can't read each other's files):")
+        for g in given:
+            lines.append(f"  - {g['grantee']}: {_gb(g['quota_bytes'])} on {g['host']}, using {_gb(stored_by_friend.get(g['grantee_user_id'], 0))} [grant {g['id']}]")
+    if held:
+        lines.append("Space friends have given you:")
+        for g in held:
+            lines.append(f"  - {_gb(g['quota_bytes'])} on {g['owner']}/{g['host']} [grant {g['id']}]")
+    if my_backups:
+        lines.append("Your backups:")
+        for b in my_backups:
+            with get_db() as db:
+                dest = f"{trust.username(db, b['dest_owner_user_id'])}/{trust.host_label(db, b['dest_owner_user_id'], b['dest_host_id'])}"
+            lines.append(f"  - {b['name']} ({_gb(b['total_bytes'])}) on {dest}, {b['completed_at'][:10] if b['completed_at'] else ''} [backup {b['id']}]")
+    others = [p for p in pending if p["requester_user_id"] not in (None, user_id)]
+    own = len(pending) - len(others)
+    if others:
+        lines.append(f"Waiting for your decision: {len(others)} request(s) from friends (list_approvals).")
+    if own:
+        lines.append(f"Waiting for your own approval outside this agent: {own} (Telegram or `harness approvals`).")
+    return "\n".join(lines)
+
+
+def _own_host_id(user_id: int, label: str) -> int | None:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT h.id FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
+            JOIN host_pairings hp ON hp.routing_key = h.routing_key AND hp.user_id = uh.user_id
+            WHERE uh.user_id = ? AND uh.label = ?
+            """,
+            (user_id, label),
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def _mcp_add_friend(user_id: int, username: str) -> str:
+    try:
+        with get_db() as db:
+            request_id, to_id = trust.create_friend_request(db, user_id, username)
+            me = trust.username(db, user_id)
+    except trust.TrustError as e:
+        return f"Can't: {e.message}"
+    create_approval(to_id, user_id, "friend_request", f"{me} wants to be friends on Casper. Accept?", {"request_id": request_id})
+    return f"Sent {username} a friend request. They'll be asked to accept."
+
+
+def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_backup: bool, preview: bool) -> str:
+    host_id = _own_host_id(user_id, host)
+    if host_id is None:
+        return f"{host} isn't one of your paired machines (see list_hosts)."
+    each = (
+        "you'll be asked to approve each backup before it's stored"
+        if approve_each_backup
+        else "any backup that fits within a friend's share is stored without asking you"
+    )
+    plan = (
+        f"Offer backup space on {host}: friends you invite (or who ask) can each get up to {max_gb:g} GB. "
+        f"What they store is encrypted on their own machine first -- you can never read it, and they can't read anything of yours. "
+        f"{each[0].upper() + each[1:]}. Casper must be running on {host} for them to use it. You can withdraw this or revoke anyone's space at any time."
+    )
+    if preview:
+        return "PREVIEW (nothing changed yet): " + plan
+    try:
+        with get_db() as db:
+            offering_id = trust.publish_offering(db, user_id, host_id, int(max_gb * trust.GB), "ask" if approve_each_backup else "allow")
+    except trust.TrustError as e:
+        return f"Can't: {e.message}"
+    return f"Done (offering {offering_id}). {plan}"
+
+
+def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, for_whom: str, preview: bool) -> str:
+    with get_db() as db:
+        mine = trust.list_offerings(db, user_id)["mine"]
+    if offering_id is None:
+        if len(mine) != 1:
+            return "Say which offering (offering_id) -- " + ("you have none yet; publish_offering first." if not mine else f"you have {len(mine)}.")
+        offering_id = mine[0]["id"]
+    offering = next((o for o in mine if o["id"] == offering_id), None)
+    if offering is None:
+        return "No such offering of yours."
+    who = for_whom or "the friend you send it to"
+    plan = (
+        f"Create a single-use invite giving {who} {quota_gb:g} GB of backup space on {offering['host']}. "
+        f"Whoever redeems it becomes your friend on Casper and gets that space; it expires in {trust.INVITE_TTL_DAYS} days and you can cancel it until then."
+    )
+    if preview:
+        return "PREVIEW (nothing changed yet): " + plan
+    try:
+        with get_db() as db:
+            code, _ = trust.create_invite(db, user_id, offering_id, int(quota_gb * trust.GB), for_whom)
+            me = trust.username(db, user_id)
+    except trust.TrustError as e:
+        return f"Can't: {e.message}"
+    url = f"{_public_base_url()}/agents.md"
+    message = (
+        f"I've set aside {quota_gb:g} GB of backup space for you on my computer with Casper -- your files get encrypted "
+        f"before they leave your machine, so I can't read them. To use it, tell your AI agent (e.g. Claude Code): "
+        f"\"Set me up with Casper using {url} -- my invite code is {code}\". (From {me}; the code works once and expires in {trust.INVITE_TTL_DAYS} days.)"
+    )
+    return f"Invite created: {code}\n\nMessage for the person to send {who}:\n{message}"
+
+
+def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
+    try:
+        with get_db() as db:
+            inv = trust.find_invite(db, code)
+            owner = trust.username(db, inv["owner_user_id"])
+            label = trust.host_label(db, inv["owner_user_id"], inv["host_id"])
+            already = trust.are_friends(db, user_id, inv["owner_user_id"])
+    except trust.TrustError as e:
+        return f"Can't use that invite: {e.message}"
+    each = "they'll approve each backup before it's stored" if inv["write_tier"] == "ask" else "backups within your share are stored without waiting for them"
+    plan = (
+        f"Use {owner}'s invite: {'' if already else f'you and {owner} become friends on Casper, and '}you get {_gb(inv['quota_bytes'])} of backup space "
+        f"on {owner}'s machine ({owner}/{label}); {each}. Your files are encrypted on your own machine before they're sent, so {owner} can never read them. "
+        f"Either of you can end this at any time."
+    )
+    if preview:
+        return "PREVIEW (nothing changed yet): " + plan
+    try:
+        with get_db() as db:
+            trust.redeem_invite(db, user_id, code)
+            me = trust.username(db, user_id)
+    except trust.TrustError as e:
+        return f"Can't use that invite: {e.message}"
+    _refresh_daemon_grants(inv["owner_user_id"], inv["host_id"])
+    notify(inv["owner_user_id"], f"{me} used your Casper invite: they now have {_gb(inv['quota_bytes'])} of backup space on {label}.")
+    return f"Done. {plan} Back up to it as {owner}/{label}."
+
+
+def _mcp_list_approvals(user_id: int) -> str:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT pa.*, u.username AS requester_username FROM pending_approvals pa
+            LEFT JOIN users u ON u.id = pa.requester_user_id
+            WHERE pa.user_id = ? ORDER BY pa.created_at
+            """,
+            (user_id,),
+        ).fetchall()
+    others = [r for r in rows if r["requester_user_id"] not in (None, user_id)]
+    own = len(rows) - len(others)
+    if not others:
+        text = "Nothing from friends is waiting for a decision."
+    else:
+        text = "Waiting for the person's decision (ask them; record exactly what they say with decide_approval):\n" + "\n".join(
+            f"  - [{r['id']}] from {r['requester_username']}: {r['description']}" for r in others
+        )
+    if own:
+        text += f"\n({own} of the person's own requests also wait for approval; those can only be decided outside this agent, in Telegram or `harness approvals`.)"
+    return text
+
+
+def _mcp_decide_approval(user_id: int, approval_id: str, approve: bool) -> str:
+    """Rule of Two (agent-first-ux.md, principle 4): an agent may record its
+    person's decision on OTHER people's requests, never approve its own
+    person's -- those stay outside the agent."""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM pending_approvals WHERE id = ? AND user_id = ?", (approval_id, user_id)).fetchone()
+    if row is None:
+        return "No such pending request."
+    if row["requester_user_id"] in (None, user_id):
+        return "That's the person's own request; it can't be approved from their agent. They can decide it in Telegram or with `harness approvals`."
+    return _resume_pending_approval(row, "allow" if approve else "deny").message or "Done."
+
+
+def _mcp_revoke(user_id: int, kind: str, id_or_name: str) -> str:
+    try:
+        with get_db() as db:
+            if kind == "grant":
+                g = trust.revoke_grant(db, user_id, int(id_or_name))
+            elif kind == "invite":
+                trust.cancel_invite(db, user_id, int(id_or_name))
+                return "Cancelled the invite; the code no longer works."
+            elif kind == "offering":
+                trust.withdraw_offering(db, user_id, int(id_or_name))
+                return "Withdrew the offering: no new invites or requests. Space already given stays until you revoke it (kind='grant')."
+            elif kind == "friend":
+                revoked = trust.remove_friend(db, user_id, id_or_name)
+                for g in revoked:
+                    _refresh_daemon_grants(g["owner_user_id"], g["host_id"])
+                return f"No longer friends with {id_or_name}" + (f"; also ended {len(revoked)} backup-space arrangement(s) between you." if revoked else ".")
+            else:
+                return "kind must be one of: grant, invite, offering, friend."
+    except (trust.TrustError, ValueError) as e:
+        return f"Can't: {getattr(e, 'message', str(e))}"
+    _refresh_daemon_grants(g["owner_user_id"], g["host_id"])
+    other = g["grantee_user_id"] if user_id == g["owner_user_id"] else g["owner_user_id"]
+    notify(other, f"Backup space on {g['owner']}/{g['host']} was ended. Stored backups stay restorable for 7 days.")
+    return f"Ended {g['grantee']}'s backup space on {g['host']}. New backups stop now; what's stored stays restorable by its owner for 7 days, then it's deleted."
+
+
+def _mcp_backup_push(user_id: int, source_host: str, path: str, dest_host: str, preview: bool = False) -> str:
+    if not preview:
+        return backups.push(user_id, source_host, path, dest_host)
+    try:
+        backups.resolve_own(user_id, source_host)
+        grant, _ = backups.resolve_dest(user_id, dest_host)
+    except backups.BackupError as e:
+        return f"Can't back up: {e}"
+    return (
+        f"PREVIEW (nothing changed yet): encrypt {path} on {source_host} with a key only this machine holds, then store the "
+        f"encrypted copy on {dest_host} (your share there: {_gb(grant['quota_bytes'])}"
+        + ("; its owner approves each backup" if grant["write_tier"] == "ask" else "")
+        + f"). {grant['owner']} can never read it. You'll be told when it's done."
+    )
+
+
+# --- Public onboarding files and downloads -----------------------------------------
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ONBOARDING_DIR = os.environ.get("ONBOARDING_DIR", os.path.join(_REPO_ROOT, "onboarding"))
+DIST_DIR = os.environ.get("DIST_DIR", os.path.join(_REPO_ROOT, "dist"))
+_public_base: dict = {}
+
+
+def _public_base_url() -> str:
+    if os.environ.get("PUBLIC_DOMAIN"):
+        return "https://" + os.environ["PUBLIC_DOMAIN"]
+    return _public_base.get("url") or "http://localhost:8100"
+
+
+@app.middleware("http")
+async def _remember_public_base(request: Request, call_next):
+    """Onboarding text names this deployment's own URL; learn it from how
+    we're actually reached (Cloudflare Tunnel sets X-Forwarded-Proto)."""
+    host = request.headers.get("host", "")
+    if host and "url" not in _public_base and not host.startswith(("localhost", "127.0.0.1", "testserver")):
+        proto = request.headers.get("x-forwarded-proto", "https")
+        _public_base["url"] = f"{proto}://{host}"
+    return await call_next(request)
+
+
+def _render_onboarding(text: str, request: Request) -> str:
+    host = request.headers.get("host", "localhost:8100")
+    proto = request.headers.get("x-forwarded-proto") or ("http" if host.startswith(("localhost", "127.0.0.1", "testserver")) else "https")
+    return text.replace("{{CASPER_URL}}", f"{proto}://{host}")
+
+
+def _onboarding_files() -> list[tuple[str, str]]:
+    """(relative path, absolute path) for every onboarding file."""
+    out = []
+    for root, _dirs, files in os.walk(ONBOARDING_DIR):
+        for f in sorted(files):
+            if f.startswith(".DS_Store"):
+                continue
+            full = os.path.join(root, f)
+            out.append((os.path.relpath(full, ONBOARDING_DIR), full))
+    return out
+
+
+@app.get("/agents.md", include_in_schema=False)
+def onboarding_agents_md(request: Request):
+    from fastapi.responses import PlainTextResponse
+
+    with open(os.path.join(ONBOARDING_DIR, "AGENTS.md")) as f:
+        return PlainTextResponse(_render_onboarding(f.read(), request), media_type="text/markdown")
+
+
+@app.get("/onboarding/skills/{name}.md", include_in_schema=False)
+def onboarding_skill(name: str, request: Request):
+    from fastapi.responses import PlainTextResponse
+
+    path = os.path.join(ONBOARDING_DIR, ".claude", "skills", name, "SKILL.md")
+    if not name.replace("-", "").isalnum() or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No such skill.")
+    with open(path) as f:
+        return PlainTextResponse(_render_onboarding(f.read(), request), media_type="text/markdown")
+
+
+@app.get("/onboarding.zip", include_in_schema=False)
+def onboarding_zip(request: Request):
+    import io
+    import zipfile
+
+    from fastapi.responses import Response
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for rel, full in _onboarding_files():
+            with open(full) as f:
+                z.writestr(os.path.join("casper", rel), _render_onboarding(f.read(), request))
+    return Response(buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="casper-onboarding.zip"'})
+
+
+@app.get("/download/casper-macos.zip", include_in_schema=False)
+def download_app():
+    from fastapi.responses import FileResponse
+
+    path = os.path.join(DIST_DIR, "Casper-macos.zip")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No macOS build is published on this deployment.")
+    return FileResponse(path, media_type="application/zip", filename="Casper-macos.zip")
+
+
+for _name, _fn in {
+    "my_casper": _mcp_my_casper,
+    "add_friend": _mcp_add_friend,
+    "publish_offering": _mcp_publish_offering,
+    "create_invite": _mcp_create_invite,
+    "redeem_invite": _mcp_redeem_invite,
+    "list_approvals": _mcp_list_approvals,
+    "decide_approval": _mcp_decide_approval,
+    "revoke": _mcp_revoke,
+    "backup_push": _mcp_backup_push,
+}.items():
+    setattr(_mcp_services, _name, _fn)

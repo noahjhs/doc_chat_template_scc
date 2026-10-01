@@ -370,3 +370,102 @@ def revoke_grant(db, actor_id: int, grant_id: int) -> dict:
         raise TrustError("No such active grant of yours.", 404)
     revoke_grant_row(db, grant_id)
     return rows[0]
+
+
+# --- Invites -------------------------------------------------------------------
+INVITE_TTL_DAYS = 7
+_INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I: read aloud, typed by hand
+
+
+def _invite_hash(code: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(code.strip().upper().replace(" ", "").encode()).hexdigest()
+
+
+def new_invite_code() -> str:
+    import secrets
+
+    raw = "".join(secrets.choice(_INVITE_ALPHABET) for _ in range(12))
+    return f"CASPER-{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+
+
+def create_invite(db, owner_id: int, offering_id: int, quota_bytes: int, note: str = "") -> tuple[str, dict]:
+    """Returns (code, offering). The code itself is shown once; only its
+    hash is kept."""
+    from datetime import timedelta
+
+    offering = db.execute(
+        "SELECT * FROM offerings WHERE id = ? AND owner_user_id = ? AND withdrawn_at IS NULL", (offering_id, owner_id)
+    ).fetchone()
+    if offering is None:
+        raise TrustError("No such offering of yours.", 404)
+    if quota_bytes <= 0 or quota_bytes > offering["max_quota_bytes"]:
+        raise TrustError(f"Invite for between 0 and {offering['max_quota_bytes'] / GB:g} GB (the offering's limit).")
+    code = new_invite_code()
+    expires = (datetime.now(timezone.utc) + timedelta(days=INVITE_TTL_DAYS)).isoformat(timespec="seconds")
+    db.execute(
+        "INSERT INTO invites (code_hash, owner_user_id, offering_id, quota_bytes, note, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (_invite_hash(code), owner_id, offering_id, quota_bytes, note, expires),
+    )
+    return code, dict(offering)
+
+
+def find_invite(db, code: str) -> dict:
+    row = db.execute(
+        """
+        SELECT i.*, o.host_id, o.write_tier, o.withdrawn_at AS offering_withdrawn
+        FROM invites i JOIN offerings o ON o.id = i.offering_id WHERE i.code_hash = ?
+        """,
+        (_invite_hash(code),),
+    ).fetchone()
+    if row is None:
+        raise TrustError("That invite code isn't valid -- check it was copied exactly.", 404)
+    if row["cancelled_at"] or row["offering_withdrawn"]:
+        raise TrustError("That invite was cancelled by the person who sent it.", 410)
+    if row["used_at"]:
+        raise TrustError("That invite has already been used (invites are single-use) -- ask for a new one.", 410)
+    if row["expires_at"] < now_iso():
+        raise TrustError("That invite has expired -- ask for a new one.", 410)
+    return dict(row)
+
+
+def redeem_invite(db, user_id: int, code: str) -> dict:
+    """Friendship (if not already) plus the grant, in one step -- the
+    inviter consented when creating the invite; the redeemer consents now."""
+    inv = find_invite(db, code)
+    owner_id = inv["owner_user_id"]
+    if owner_id == user_id:
+        raise TrustError("That's your own invite -- send it to the friend it's for.")
+    if active_grant(db, user_id, inv["host_id"], owner_id):
+        raise TrustError("You already have backup space there.", 409)
+    if not are_friends(db, user_id, owner_id):
+        for a, b in ((user_id, owner_id), (owner_id, user_id)):
+            db.execute(
+                "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id) VALUES ('user', ?, 'friend', 'user', ?)",
+                (a, b),
+            )
+    attrs = {"owner_user_id": owner_id, "quota_bytes": inv["quota_bytes"], "write_tier": inv["write_tier"], "offering_id": inv["offering_id"], "invite_id": inv["id"]}
+    db.execute(
+        "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, 'backup_peer', 'host', ?, ?)",
+        (user_id, inv["host_id"], json.dumps(attrs)),
+    )
+    db.execute("UPDATE invites SET used_by_user_id = ?, used_at = ? WHERE id = ?", (user_id, now_iso(), inv["id"]))
+    return inv
+
+
+def cancel_invite(db, owner_id: int, invite_id: int):
+    cur = db.execute(
+        "UPDATE invites SET cancelled_at = ? WHERE id = ? AND owner_user_id = ? AND used_at IS NULL AND cancelled_at IS NULL",
+        (now_iso(), invite_id, owner_id),
+    )
+    if cur.rowcount == 0:
+        raise TrustError("No such open invite of yours.", 404)
+
+
+def open_invites(db, owner_id: int) -> list[dict]:
+    rows = db.execute(
+        "SELECT * FROM invites WHERE owner_user_id = ? AND used_at IS NULL AND cancelled_at IS NULL AND expires_at > ? ORDER BY id",
+        (owner_id, now_iso()),
+    ).fetchall()
+    return [dict(r) for r in rows]
