@@ -184,6 +184,12 @@ func (c *cli) accountCreate(username string) error {
 		})
 	}
 	password := randomPassword()
+	// Make sure the Keychain will take the password BEFORE signing up --
+	// otherwise a refused save (e.g. the login keychain is unreachable from
+	// an SSH session) leaves a real account nobody can ever sign in to.
+	if err := keychainSave(c.authDomain+"/"+username, []byte(`{"pending":true}`)); err != nil {
+		return fmt.Errorf("can't save to this Mac's Keychain (%v) -- if this is an SSH session, run setup in Terminal on the Mac itself, where the login keychain is available; nothing was created", err)
+	}
 	var resp struct {
 		Token string `json:"token"`
 	}
