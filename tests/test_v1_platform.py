@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
-_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups")
+_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide")
 
 
 @pytest.fixture()
@@ -540,3 +540,73 @@ def test_catcher_on_a_mirrors_machine_is_refused(app_env):
         assert "already one of the mirrors" in out
         ok = _mcp(client, riley_agent, "mirror_folder", source_host="riley-laptop", path="Documents", mirrors=["sam/sam-mini"], preview=True)
         assert ok.startswith("PREVIEW") and "wait on this Mac" in ok
+
+
+# --- Casper's guide ---------------------------------------------------------------------
+class _ScriptedModel:
+    """An OpenAI-compatible client whose replies are scripted: each entry is
+    either ("tool", name, args) or ("say", text)."""
+
+    def __init__(self, script):
+        from types import SimpleNamespace as NS
+
+        self.NS = NS
+        self.script = list(script)
+        self.chat = self
+        self.completions = self
+        self.seen = []
+
+    def create(self, **kw):
+        self.seen.append(kw["messages"])
+        step = self.script.pop(0)
+        NS = self.NS
+        if step[0] == "tool":
+            call = NS(id=f"c{len(self.script)}", function=NS(name=step[1], arguments=json.dumps(step[2])))
+            msg = NS(content="", tool_calls=[call])
+        else:
+            msg = NS(content=step[1], tool_calls=None)
+        return NS(choices=[NS(message=msg)], usage=None)
+
+
+def test_guide_runs_tools_and_keeps_one_conversation(app_env, monkeypatch):
+    main, client = app_env
+    import guide
+
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", quota_gb=10, preview=False)).group(0)
+
+        model = _ScriptedModel([("tool", "redeem_invite", {"code": code, "preview": True}), ("say", "That gives you 10 GB on Sam's Mac. Use it?")])
+        monkeypatch.setenv("NOUS_API_KEY", "test")
+        monkeypatch.setattr(guide, "client_from_env", lambda: model)
+        r = client.post("/guide/message", json={"text": f"My invite is {code}"}, headers=riley)
+        assert r.json()["reply"] == "That gives you 10 GB on Sam's Mac. Use it?"
+        # The tool really ran, as a preview: nothing redeemed yet.
+        tool_result = model.seen[1][-1]["content"]
+        assert tool_result.startswith("PREVIEW") and client.get("/friends", headers=riley).json()["friends"] == []
+
+        # The person sees only the conversation, not tool plumbing.
+        hist = client.get("/guide/history", headers=riley).json()["messages"]
+        assert [m["role"] for m in hist] == ["user", "assistant"] and hist[1]["text"].endswith("Use it?")
+
+        # Telegram continues the same conversation.
+        sent = []
+        main.notify = lambda *a, **k: None
+        monkeypatch.setattr(main, "_telegram_send_text", lambda chat, text: sent.append((chat, text)))
+        monkeypatch.setattr(main, "_guide_via_telegram", lambda chat, uid, text: sent.append((chat, main._guide_reply(uid, text)[0])))
+        monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "s")
+        with main.get_db() as db:
+            db.execute("INSERT OR IGNORE INTO user_profile (user_id) VALUES (?)", (_user_id(main, "riley"),))
+            db.execute("UPDATE user_profile SET telegram_chat_id = '77' WHERE user_id = ?", (_user_id(main, "riley"),))
+        model.script = [("say", "Done -- you're friends with Sam now.")]
+        r = client.post("/telegram/webhook", json={"message": {"chat": {"id": 77}, "text": "yes"}}, headers={"X-Telegram-Bot-Api-Secret-Token": "s"})
+        assert r.status_code == 200 and sent == [("77", "Done -- you're friends with Sam now.")]
+        assert len(client.get("/guide/history", headers=riley).json()["messages"]) == 4
+
+
+def test_guide_unavailable_without_a_key(app_env, monkeypatch):
+    main, client = app_env
+    _, riley = _signup(client, "riley")
+    monkeypatch.delenv("NOUS_API_KEY", raising=False)
+    assert "isn't available" in client.post("/guide/message", json={"text": "hi"}, headers=riley).json()["reply"]

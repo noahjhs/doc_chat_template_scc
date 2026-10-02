@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Casper — Direction B: Night Shift</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#120d0a;--bg2:#1b1410;--line:#33261d;--ink:#f1e4d3;--muted:#a48c77;--copper:#d9894e;--amber:#f0b46a;--green:#8fbf7a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 "Space Grotesk",system-ui,sans-serif;
+background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:64px 64px;background-position:-1px -1px}
+body:before{content:"";position:fixed;inset:0;background:radial-gradient(900px 500px at 70% 10%,rgba(217,137,78,.22),transparent 60%),radial-gradient(700px 500px at 0% 90%,rgba(240,180,106,.10),transparent 60%),linear-gradient(transparent,var(--bg) 85%);pointer-events:none}
+.wrap{position:relative;max-width:1120px;margin:0 auto;padding:0 32px}
+nav{display:flex;justify-content:space-between;align-items:center;padding:26px 0;font-family:"JetBrains Mono",monospace;font-size:13px}
+.logo{display:flex;gap:10px;align-items:center;font-size:15px;letter-spacing:.08em}.logo b{color:var(--copper)}
+nav .links{display:flex;gap:26px;color:var(--muted)}nav a{color:inherit;text-decoration:none}
+.btn{border:1px solid var(--copper);color:var(--amber);padding:8px 14px;border-radius:6px}
+.hero{padding:110px 0 80px}
+.badge{display:inline-flex;gap:10px;align-items:center;font:500 12px "JetBrains Mono";color:var(--amber);border:1px solid var(--line);background:rgba(27,20,16,.8);padding:6px 12px;border-radius:999px;margin-bottom:34px}
+.badge i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+h1{font-weight:500;font-size:84px;line-height:.98;letter-spacing:-.035em;margin:0 0 30px;max-width:900px}
+h1 span{background:linear-gradient(90deg,var(--amber),var(--copper));-webkit-background-clip:text;color:transparent}
+.lede{font-size:20px;color:var(--muted);max-width:620px;margin:0 0 44px}
+.term{max-width:720px;border:1px solid var(--line);background:rgba(18,13,10,.9);border-radius:12px;overflow:hidden;box-shadow:0 0 0 1px rgba(217,137,78,.08),0 30px 80px rgba(0,0,0,.5)}
+.term .bar{display:flex;gap:7px;padding:12px 14px;border-bottom:1px solid var(--line)}.term .bar i{width:11px;height:11px;border-radius:50%;background:#3b2c22}
+.term pre{margin:0;padding:20px 22px;font:14px/1.75 "JetBrains Mono",monospace;color:var(--ink);white-space:pre-wrap}
+.c{color:var(--muted)}.p{color:var(--copper)}.ok{color:var(--green)}.a{color:var(--amber)}
+.under{margin-top:18px;font-size:15px;color:var(--muted)}.under a{color:var(--amber);text-decoration:none}
+section{padding:80px 0;border-top:1px solid var(--line)}
+.k{font:500 12px "JetBrains Mono";letter-spacing:.16em;color:var(--copper);text-transform:uppercase}
+h2{font-weight:500;font-size:48px;letter-spacing:-.025em;line-height:1.05;margin:14px 0 44px;max-width:780px}
+.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.cols div{background:var(--bg2);padding:28px}.cols h3{margin:10px 0 8px;font-weight:500;font-size:20px}.cols p{margin:0;color:var(--muted);font-size:15px}
+.cols code{font:12px "JetBrains Mono";color:var(--amber)}
+.vision{margin:80px 0;padding:56px;border:1px solid var(--copper);border-radius:14px;background:linear-gradient(135deg,rgba(217,137,78,.12),rgba(18,13,10,.4))}
+.vision p{font-size:20px;color:var(--ink);max-width:700px;margin:0}.vision em{font-style:normal;color:var(--amber)}
+footer{padding:36px 0 64px;display:flex;justify-content:space-between;font:13px "JetBrains Mono";color:var(--muted);border-top:1px solid var(--line)}
+.tag{position:fixed;bottom:16px;right:16px;background:var(--copper);color:var(--bg);font:500 12px "JetBrains Mono";padding:6px 12px;border-radius:999px}
+</style></head><body>
+<div class="wrap">
+<nav><div class="logo">◗ <span>CASPER</span><b>_</b></div><div class="links"><a href="#">/how</a><a href="#">/trust</a><a href="#">/vision</a><a class="btn" href="#">sign in</a></div></nav>
+<div class="hero"><div class="badge"><i></i> alpha · mirroring live on macOS</div>
+<h1>Your files, kept safe <span>by your friends.</span></h1>
+<p class="lede">Encrypted mirrors of your important folders on the computers of people you trust. Continuous. Versioned for a month. Set up by your agent in one conversation.</p>
+<div class="term"><div class="bar"><i></i><i></i><i></i></div><pre><span class="c"># paste into your agent</span>
+<span class="p">›</span> Set me up with Casper using casperagent.dev/agents.md
+
+<span class="c">agent</span>  installing Casper… <span class="ok">done</span>
+<span class="c">agent</span>  mirror ~/Documents to sam/mac-mini? <span class="a">[preview]</span>
+<span class="c">you</span>    <span class="a">Allow</span>  <span class="c">← in Casper's own dialog, not the agent's</span>
+<span class="c">casper</span> Documents protected · 2,431 files · history 30d <span class="ok">●</span></pre></div>
+<div class="under">No agent yet? <a href="#">Talk to our guide →</a></div></div>
+
+<section><div class="k">// how it works</div><h2>One conversation. Then it's plumbing.</h2>
+<div class="cols"><div><code>01</code><h3>Point your agent</h3><p>It installs Casper, asks a couple of questions, and connects itself.</p></div>
+<div><code>02</code><h3>Invite your people</h3><p>Friends give space. Always-on machines can catch changes while laptops sleep.</p></div>
+<div><code>03</code><h3>You confirm once</h3><p>In a dialog your agent can't click. Every change after that is mirrored in seconds.</p></div></div></section>
+
+<section><div class="k">// trust model</div><h2>Hold each other's data. Never read it.</h2>
+<div class="cols"><div><code>e2e</code><h3>Sealed on your Mac</h3><p>Names, structure, contents. Peers store ciphertext. So do we, if we ever catch for you.</p></div>
+<div><code>consent</code><h3>Agents propose, you decide</h3><p>Your own consequential actions need you, outside the agent. Always.</p></div>
+<div><code>undo</code><h3>History, not just sync</h3><p>Every version for 7 days, then daily for 30. Deletions don't spread.</p></div></div></section>
+
+<div class="vision"><div class="k">// next</div><h2 style="margin:12px 0 18px">Mirroring is the first thing friends can share.</h2>
+<p>Casper is the trust layer for people who look after each other's machines — and each other's agents. Give space. Be known for it. <em>Default to generosity.</em></p></div>
+<footer><span>casper — your friendly ghost</span><span>early alpha · macOS</span></footer></div>
+<div class="tag">Direction B · Night Shift</div></body></html>

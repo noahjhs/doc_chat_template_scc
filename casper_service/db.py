@@ -374,6 +374,17 @@ CREATE TABLE IF NOT EXISTS mirror_status (
     nudged_at TEXT
 );
 
+-- Casper's guide (casper_service/guide.py): one conversation per person,
+-- shared by the web chat and Telegram. OpenAI-format messages, including
+-- tool calls and results.
+CREATE TABLE IF NOT EXISTS guide_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_guide_messages_user ON guide_messages(user_id, id);
+
 -- Single-use invites to an offering (docs/product/scenarios/
 -- agent-onboarding.md, "Why invite codes"): the inviter consents by creating
 -- one for a specific amount; redeeming it makes the redeemer their friend

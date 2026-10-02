@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Casper — Direction C: Soft Gradient</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#fdfbf8;--ink:#1d1611;--muted:#6e6259;--line:#ece4da;--brown:#7a4a2a;--sand:#e9cfae;--clay:#c08457}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1160px;margin:0 auto;padding:0 32px}
+nav{display:flex;justify-content:space-between;align-items:center;padding:22px 0}.logo{display:flex;gap:9px;align-items:center;font-weight:600;font-size:18px;letter-spacing:-.01em}
+.logo i{width:26px;height:26px;border-radius:9px;background:conic-gradient(from 200deg,var(--brown),var(--clay),var(--sand),var(--brown));display:inline-block}
+nav .links{display:flex;gap:6px}nav a{color:var(--muted);text-decoration:none;font-size:15px;padding:8px 14px;border-radius:999px}nav a.solid{background:var(--ink);color:#fff}
+.hero{position:relative;text-align:center;padding:120px 0 90px;overflow:hidden}
+.orb{position:absolute;left:50%;top:40px;width:900px;height:520px;transform:translateX(-50%);background:radial-gradient(closest-side,rgba(192,132,87,.55),rgba(233,207,174,.45) 45%,rgba(253,251,248,0) 75%);filter:blur(30px);z-index:0}
+.hero>*{position:relative;z-index:1}
+h1{font-weight:600;font-size:72px;letter-spacing:-.04em;line-height:1.02;margin:0 auto 24px;max-width:860px}
+.lede{font-size:21px;color:var(--muted);max-width:640px;margin:0 auto 40px}
+.box{display:inline-flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 8px 8px 22px;box-shadow:0 10px 40px rgba(122,74,42,.12);font-size:15px}
+.box b{font-weight:500}.box button{border:0;border-radius:999px;background:var(--ink);color:#fff;padding:11px 18px;font:500 14px Inter;cursor:pointer}
+.sub{margin-top:18px;font-size:15px;color:var(--muted)}.sub a{color:var(--brown);font-weight:500;text-decoration:none}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin:30px 0 90px}
+.cardx{background:#fff;border:1px solid var(--line);border-radius:22px;padding:30px;min-height:220px}
+.cardx .ic{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--sand),var(--clay));margin-bottom:22px}
+.cardx h3{font-size:20px;font-weight:600;letter-spacing:-.01em;margin:0 0 8px}.cardx p{color:var(--muted);margin:0;font-size:16px}
+h2{font-size:44px;font-weight:600;letter-spacing:-.03em;line-height:1.08;text-align:center;margin:0 auto 18px;max-width:760px}
+.center{text-align:center;color:var(--muted);max-width:640px;margin:0 auto 46px;font-size:19px}
+.status{max-width:760px;margin:0 auto 100px;background:#fff;border:1px solid var(--line);border-radius:22px;padding:8px;box-shadow:0 20px 60px rgba(122,74,42,.10)}
+.status .r{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line);font-size:15px}.status .r:last-child{border:0}
+.chip{font-size:13px;padding:4px 10px;border-radius:999px;background:#eef5ea;color:#3f6b33}.chip.w{background:#fbf1e3;color:#8a5a22}
+.vision{background:linear-gradient(135deg,#2a1c13,#5a3820);color:#fdf3e7;border-radius:32px;padding:80px 60px;text-align:center;margin-bottom:80px}
+.vision h2{color:#fff}.vision p{color:#e6cfb4;max-width:640px;margin:0 auto;font-size:19px}
+footer{display:flex;justify-content:space-between;color:var(--muted);font-size:14px;padding:30px 0 60px;border-top:1px solid var(--line)}
+.tag{position:fixed;bottom:16px;right:16px;background:var(--ink);color:#fff;font:500 12px Inter;padding:6px 12px;border-radius:999px}
+</style></head><body>
+<div class="wrap">
+<nav><div class="logo"><i></i>Casper</div><div class="links"><a href="#">How it works</a><a href="#">Trust</a><a href="#">Vision</a><a class="solid" href="#">Sign in</a></div></nav>
+<div class="hero"><div class="orb"></div>
+<h1>Your files, kept safe by your friends.</h1>
+<p class="lede">Casper mirrors your important folders onto computers of people you trust — encrypted, always up to date, with a month of history.</p>
+<div class="box"><span>Tell your agent: <b>“Set me up with Casper using casperagent.dev/agents.md”</b></span><button>Copy</button></div>
+<div class="sub">Don't have an agent? <a href="#">Chat with Casper's guide</a></div></div>
+
+<div class="cards"><div class="cardx"><div class="ic"></div><h3>Set up by your agent</h3><p>One conversation installs Casper and connects you with friends. No settings to learn.</p></div>
+<div class="cardx"><div class="ic"></div><h3>Encrypted end to end</h3><p>Friends store your files but can never open them. Neither can we.</p></div>
+<div class="cardx"><div class="ic"></div><h3>Undo anything</h3><p>Every version for a week, then daily for a month — back with one request.</p></div></div>
+
+<h2>Know you're protected, at a glance.</h2><p class="center">Casper stays out of your way and only speaks up when something needs you.</p>
+<div class="status"><div class="r"><span><b>Documents</b> · 2,431 files</span><span class="chip">Protected</span></div>
+<div class="r"><span>Sam's Mac mini</span><span class="chip">Up to date</span></div>
+<div class="r"><span>Mira's MacBook</span><span class="chip w">Asleep · catching up</span></div>
+<div class="r"><span>Ana's home server</span><span class="chip">Catching changes</span></div></div>
+
+<div class="vision"><h2>Mirroring is the first thing friends can share.</h2><p>Casper is building the trust layer for people who look after each other's computers — and each other's agents. Give space. Be known for it. Default to generosity.</p></div>
+<footer><span>Casper — your friendly ghost.</span><span>Early alpha · macOS</span></footer></div>
+<div class="tag">Direction C · Soft Gradient</div></body></html>

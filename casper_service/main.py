@@ -1668,7 +1668,16 @@ async def telegram_webhook(request: Request):
             with get_db() as db:
                 _get_or_create_profile(db, user_id)  # ensures the row exists before the UPDATE below
                 db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", (chat_id, user_id))
-            _telegram_send_text(chat_id, "Linked! Casper approval requests will show up here.")
+            _telegram_send_text(chat_id, "Linked! Casper approval requests will show up here -- and you can chat with Casper's guide here any time.")
+            return {"ok": True}
+        if text:
+            # Anything else from a linked chat is a message for Casper's guide.
+            with get_db() as db:
+                owner = db.execute("SELECT user_id FROM user_profile WHERE telegram_chat_id = ?", (chat_id,)).fetchone()
+            if owner is None:
+                _telegram_send_text(chat_id, "This chat isn't linked to a Casper account yet -- link it with your agent or `harness profile telegram-link`.")
+            else:
+                _guide_via_telegram(chat_id, owner["user_id"], text)
         return {"ok": True}
 
     return {"ok": True}
@@ -2914,3 +2923,66 @@ for _name, _fn in {
     setattr(_mcp_services, _name, _fn)
 
 mirroring.start_catcher_loop()
+
+
+# =============================================================================
+# Casper's own guide (casper_service/guide.py) -- the onboarding agent for
+# people without one, on the web (after sign-in) and in Telegram.
+# =============================================================================
+import guide  # noqa: E402
+
+_guide_locks: dict[int, threading.Lock] = {}
+_guide_locks_guard = threading.Lock()
+
+
+def _guide_lock(user_id: int) -> threading.Lock:
+    with _guide_locks_guard:
+        return _guide_locks.setdefault(user_id, threading.Lock())
+
+
+def _guide_reply(user_id: int, text: str) -> tuple[str, list[dict]]:
+    """One turn with the guide, serialized per person (web and Telegram
+    share the conversation)."""
+    if not os.environ.get("NOUS_API_KEY"):
+        return "Casper's guide isn't available on this deployment yet.", []
+    prompt = guide.system_prompt(
+        os.environ.get("GUIDE_DOWNLOAD_URL", "https://www.casperagent.dev/download"),
+        os.environ.get("GUIDE_SIGNIN_URL", "https://app.casperagent.dev/signin"),
+    )
+    with _guide_lock(user_id):
+        history = guide.load_history(user_id)
+        before = len(history)
+        try:
+            reply, messages = guide.run(guide.client_from_env(), os.environ.get("GUIDE_MODEL", "deepseek/deepseek-v4.1-flash"),
+                                        _mcp_services, user_id, history, text[:4000], prompt)
+        except Exception as e:  # the model provider being down shouldn't 500 the page
+            print(f"guide failed for user {user_id}: {e}")
+            return "Sorry -- I'm having trouble thinking right now. Please try again in a minute.", []
+        guide.save_new(user_id, before, messages)
+    return reply, messages
+
+
+@app.post("/guide/message")
+def guide_message(body: dict, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    text = str(body.get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Say something.")
+    reply, _ = _guide_reply(user_id, text)
+    return {"reply": reply}
+
+
+@app.get("/guide/history")
+def guide_history(authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    return {"messages": guide.visible(guide.load_history(user_id))}
+
+
+def _guide_via_telegram(chat_id: str, user_id: int, text: str):
+    def work():
+        reply, _ = _guide_reply(user_id, text)
+        _telegram_send_text(chat_id, reply[:4000])
+
+    threading.Thread(target=work, daemon=True).start()

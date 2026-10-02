@@ -82,6 +82,8 @@ if "_signup_token" in st.session_state:
         st.session_state["_pairing_confirmed"] = confirmed
 
     if st.session_state["_pairing_confirmed"]:
-        st.success("Casper connected. You can close this tab.")
+        st.success("Casper connected.")
+        st.markdown("[Next: chat with Casper's guide to keep your files safe (or offer space to friends) →](/guide)")
     else:
-        st.write("Check your computer -- Casper should connect automatically. You can close this tab.")
+        st.write("Check your computer -- Casper should connect automatically.")
+        st.markdown("[Then chat with Casper's guide to finish setting up →](/guide)")
