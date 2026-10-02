@@ -70,7 +70,9 @@ services:
     image: syncthing/relaysrv:latest
     container_name: casper-st-relay
     restart: unless-stopped
-    command: ["-pools=", "-listen=:22067", "-status-srv=", "-keys=/var/strelaysrv"]
+    # -ext-address: what the relay tells peers to connect to for a session
+    # -- its public (Funnel) address, not the container's own port.
+    command: ["-pools=", "-listen=:22067", "-status-srv=", "-keys=/var/strelaysrv", "-ext-address=${ST_RELAY_EXT_ADDRESS:-}"]
     volumes:
       - st_relay_keys:/var/strelaysrv
     ports:
