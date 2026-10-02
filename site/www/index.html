@@ -1,0 +1,35 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;1,9..144,300&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"><title>Casper — your files, kept safe by your friends</title>
+<meta name="description" content="Casper mirrors your important folders onto the computers of people you trust — encrypted, continuously, with a month of history. A trusted commons for the things you can't lose."></head><body><div class="wrap">
+<nav><a class="logo" href="/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C9.4 3 5 8 5 14.5V28l3.6-2.6L12 28l4-2.8L20 28l3.4-2.6L27 28V14.5C27 8 22.6 3 16 3z" fill="#2b1d14"/><circle cx="12.5" cy="14" r="1.8" fill="#f6efe4"/><circle cx="19.5" cy="14" r="1.8" fill="#f6efe4"/></svg> Casper</a><div class="links"><a href="/#how">How it works</a><a href="/#trust">Trust</a><a href="/#commons">The commons</a><a class="pill" href="${APP_URL}/signin">Sign in</a></div></nav>
+<div class="hero"><div>
+<div class="eyebrow">A trusted commons for the things you can't lose</div>
+<h1>Your files, kept safe <em>by your friends.</em></h1>
+<p class="lede">Casper mirrors your important folders onto the computers of people you trust — encrypted, continuously, with a month of history. Lose a laptop, or an afternoon's work, and nothing is gone.</p>
+<div class="cta"><div class="prompt"><code id="p1"><span class="k">› </span>Set me up with Casper using ${AGENTS_URL}</code><button data-copy="p1">Copy</button></div>
+<div class="alt">Paste that into your AI agent — Claude, Hermes, Codex. No agent yet? <a href="/download">Start here, and Casper's guide will help →</a></div></div></div>
+<div class="card"><h4>Documents</h4><small>Protected · last change mirrored 40 seconds ago</small>
+<div class="row"><span><span class="dot"></span>Sam's Mac mini</span><span>up to date</span></div>
+<div class="row"><span><span class="dot sleep"></span>Mira's MacBook</span><span>asleep · catching up</span></div>
+<div class="row"><span><span class="dot"></span>Ana's home server</span><span>catcher</span></div>
+<div class="row"><span>History</span><span>30 days</span></div></div></div>
+
+<section id="how"><div class="eyebrow">How it works</div><h2>Set it up once, in a conversation. Then forget about it.</h2>
+<div class="grid3"><div><div class="num">01</div><h3>Point your agent</h3><p>Your AI agent — or Casper's own guide — installs Casper and asks a couple of questions. You never touch a setting.</p></div>
+<div><div class="num">02</div><h3>Choose your people</h3><p>A friend sends you an invite, or you ask one. They give space; you keep the keys.</p></div>
+<div><div class="num">03</div><h3>Confirm, and it's plumbing</h3><p>You approve once, in Casper's own dialog. From then on every change is mirrored within seconds.</p></div></div></section>
+
+<section id="trust"><div class="eyebrow">Trust</div><h2>Your friends hold your files. <em>They can never read them.</em></h2>
+<div class="grid3"><div><h3>Encrypted before it leaves</h3><p>Names, folders and contents are sealed on your Mac. Not your friends, not us — no one else can open them.</p></div>
+<div><h3>You decide, not your agent</h3><p>Anything consequential waits for your yes, in a dialog your agent can't click.</p></div>
+<div><h3>Undo anything</h3><p>Every version for a week, then daily for a month. Ask for yesterday's file and it comes back.</p></div></div></section>
+
+<section><div class="eyebrow">When a computer sleeps</div><h2>Many hands, so no one has to be always on.</h2>
+<div class="grid3"><div><h3>More than one mirror</h3><p>Friends' computers sleep at different times. With two mirrors, one is usually awake — and each catches up the moment it wakes.</p></div>
+<div><h3>Catchers</h3><p>A friend with an always-on machine holds just your newest changes until a mirror wakes — usually only megabytes.</p></div>
+<div><h3>Honest status</h3><p>Ask "are my files safe?" and get a straight answer — down to which recent files aren't protected yet.</p></div></div></section>
+
+<div class="dark" id="commons"><div class="eyebrow">An emergent support system</div><h2>Every bit of space you give makes everyone around you a little safer.</h2>
+<p>Casper is building a trusted commons: people looking after each other's computers — and, soon, each other's agents. Mirroring is the first thing friends can share. Give space, and be known for it. <em>Default to generosity.</em></p></div>
+
+<section><p class="quote">"Held by friends. Read by no one."</p></section>
+<footer><span>Casper — held by friends, read by no one.</span><span><a href="/download">Download</a> · <a href="${APP_URL}/guide">Guide</a> · Early alpha · macOS</span></footer></div><script>document.querySelectorAll("[data-copy]").forEach(b=>b.addEventListener("click",()=>{navigator.clipboard.writeText(document.getElementById(b.dataset.copy).innerText.trim());const t=b.innerText;b.innerText="Copied";setTimeout(()=>b.innerText=t,1500)}))</script></body></html>

@@ -14,7 +14,9 @@ page_header()
 st.title("Casper's guide")
 
 auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
-token = st.session_state.get("_login_token") or st.session_state.get("_guide_token")
+token = st.session_state.get("_login_token") or st.session_state.get("_signup_token") or st.session_state.get("_guide_token")
+if st.query_params.get("invite"):
+    st.session_state["_invite_code"] = st.query_params["invite"]
 
 if not token:
     st.write("Sign in to chat with Casper's guide. It'll help you keep your files safe with friends, or offer space to them.")
@@ -39,7 +41,12 @@ try:
 except requests.RequestException:
     history = []
 
-if not history:
+# Arrived from an invite link: start the conversation with it, once.
+pending = None
+if invite := st.session_state.pop("_invite_code", None):
+    pending = f"A friend invited me to Casper -- my invite code is {invite}."
+
+if not history and not pending:
     with st.chat_message("assistant", avatar="👻"):
         st.write("Hi! I'm Casper's guide. Would you like to **keep your files safe** on a friend's computer, "
                  "or **offer space** on yours for friends? If a friend sent you an invite code, paste it here.")
@@ -47,7 +54,7 @@ for m in history:
     with st.chat_message(m["role"], avatar="👻" if m["role"] == "assistant" else None):
         st.write(m["text"])
 
-if text := st.chat_input("Message Casper's guide"):
+if (text := st.chat_input("Message Casper's guide") or pending):
     with st.chat_message("user"):
         st.write(text)
     with st.chat_message("assistant", avatar="👻"):

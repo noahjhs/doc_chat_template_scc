@@ -15,6 +15,23 @@ services:
     networks:
       - casper-net
 
+  # The public site (site/www, "Warm Paper"): landing, download and invite
+  # pages. Static; casper-www serves the www subdomain.
+  www:
+    build:
+      context: ./site/www
+    container_name: casper-www
+    restart: unless-stopped
+    environment:
+      APP_URL: ${PUBLIC_APP_URL:-https://dev-app.casperagent.dev}
+      AUTH_URL: ${PUBLIC_AUTH_URL:-https://dev-auth.casperagent.dev}
+      AGENTS_URL: ${PUBLIC_AGENTS_URL:-dev-auth.casperagent.dev/agents.md}
+      DOWNLOAD_URL: ${PUBLIC_DOWNLOAD_URL:-https://dev-auth.casperagent.dev/download/casper/macos}
+    ports:
+      - "127.0.0.1:8080:8080"   # local-only, for debugging
+    networks:
+      - casper-net
+
   auth:
     build:
       context: ./casper_service

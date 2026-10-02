@@ -88,15 +88,16 @@ class FakeCasper:
         if preview:
             return "PREVIEW (nothing changed yet): " + plan
         self.mirroring = True
-        return ("Waiting for the person to confirm. A Casper dialog is open on Rileys-MacBook (it can also be answered in Telegram). "
-                "This confirmation can't come from you -- it's the person's own decision.")
+        return ("NOT protected yet -- nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on Rileys-MacBook; "
+                "click Allow (or answer in Telegram). You can't confirm it for them. Once they say they've allowed it, check "
+                "protection_status before telling them they're protected.")
 
     def protection_status(self, u):
         self._log("protection_status")
         if not self.mirroring:
             return "Nothing is mirrored yet."
         if not self.allowed:
-            return "Documents: waiting for the person to confirm (Casper dialog or Telegram)."
+            return "Documents: NOT protected yet -- waiting for the person to click Allow in the Casper dialog (or Telegram)."
         return "Documents: protected -- every change is on at least one mirror.\n  - mirror: sam/sams-mini: up to date"
 
     def list_versions(self, u, folder, nc):

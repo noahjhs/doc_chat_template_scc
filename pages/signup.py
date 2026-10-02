@@ -16,6 +16,10 @@ page_header()
 st.title("Sign up")
 
 auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
+# An invite link (site/www/invite.html) carries its code here; the guide
+# picks it up after pairing (same Streamlit session, so st.page_link below).
+if st.query_params.get("invite"):
+    st.session_state["_invite_code"] = st.query_params["invite"]
 
 # Once signup succeeds, the form disappears entirely (replaced by the
 # success state below) rather than staying on screen -- otherwise a
@@ -83,7 +87,7 @@ if "_signup_token" in st.session_state:
 
     if st.session_state["_pairing_confirmed"]:
         st.success("Casper connected.")
-        st.markdown("[Next: chat with Casper's guide to keep your files safe (or offer space to friends) →](/guide)")
+        st.page_link("pages/guide.py", label="Next: chat with Casper's guide to keep your files safe (or offer space to friends) →")
     else:
         st.write("Check your computer -- Casper should connect automatically.")
-        st.markdown("[Then chat with Casper's guide to finish setting up →](/guide)")
+        st.page_link("pages/guide.py", label="Then chat with Casper's guide to finish setting up →")

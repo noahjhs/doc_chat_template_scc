@@ -176,7 +176,7 @@ def test_mirroring_end_to_end(world):
     plan = world.mcp("riley", "mirror_folder", source_host="riley-mac", path="Documents", mirrors=["sam/sam-mac"], catcher="cat/cat-server")
     assert plan.startswith("PREVIEW") and "can never read it" in plan
     out = world.mcp("riley", "mirror_folder", source_host="riley-mac", path="Documents", mirrors=["sam/sam-mac"], catcher="cat/cat-server", preview=False)
-    assert "can't come from you" in out
+    assert "can't confirm it for them" in out
 
     # The agent can't confirm; the person (the native dialog) can.
     pending = requests.get(world.base + "/conversations/pending-approvals", headers={"Authorization": f"Bearer {world.people['riley']['token']}"}).json()["pending_approvals"]

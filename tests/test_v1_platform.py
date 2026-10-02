@@ -400,7 +400,7 @@ def _onboard_two(client, sd_url):
     return sam, riley, _agent_token(client, sam), _agent_token(client, riley)
 
 
-def test_onboarding_invite_flow_previews_then_acts(app_env):
+def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
     main, client = app_env
     notes = []
     main.notify = lambda user_id, text, buttons=None: notes.append(text)
@@ -414,9 +414,17 @@ def test_onboarding_invite_flow_previews_then_acts(app_env):
         assert "Done (offering" in _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
         assert _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley").startswith("PREVIEW")
 
+        monkeypatch.setenv("PUBLIC_WWW_URL", "https://www.example")
         out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", preview=False)
         code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
         assert "agents.md" in out and code in out.split("Message for the person")[1]  # ready-to-send message carries both
+        assert f"https://www.example/invite#{code}" in out  # and the no-agent path
+
+        # The site's invite page reads what it offers, without signing in.
+        info = client.get("/invites/info", params={"code": code})
+        assert info.headers["access-control-allow-origin"] == "*"
+        assert info.json() == {"valid": True, "inviter": "sam", "kind": "mirror_space", "quota_gb": 10.0, "expires_at": info.json()["expires_at"]}
+        assert client.get("/invites/info", params={"code": "CASPER-AAAA-AAAA-AAAA"}).json()["valid"] is False
 
         assert "you and sam become friends" in _mcp(client, riley_agent, "redeem_invite", code=code)
         assert client.get("/friends", headers=riley).json()["friends"] == []  # still just a preview

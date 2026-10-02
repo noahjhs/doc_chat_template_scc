@@ -2316,8 +2316,9 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     if offering is None:
         return "No such offering of yours."
     who = for_whom or "the friend you send it to"
+    what = {"mirror_space": f"{quota_gb:g} GB of mirror space", "catcher_space": "a catcher"}.get(offering["kind"], f"{quota_gb:g} GB of backup space")
     plan = (
-        f"Create a single-use invite giving {who} {quota_gb:g} GB of backup space on {offering['host']}. "
+        f"Create a single-use invite giving {who} {what} on {offering['host']}. "
         f"Whoever redeems it becomes your friend on Casper and gets that space; it expires in {trust.INVITE_TTL_DAYS} days and you can cancel it until then."
     )
     if preview:
@@ -2338,7 +2339,31 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
         f"before they leave your machine, so I can't read them. To use it, tell your AI agent (e.g. Claude Code): "
         f"\"Set me up with Casper using {url} -- my invite code is {code}\". (From {me}; the code works once and expires in {trust.INVITE_TTL_DAYS} days.)"
     )
+    if page := _invite_page_url(code):
+        message += f" No AI agent? Start here instead: {page}"
     return f"Invite created: {code}\n\nMessage for the person to send {who}:\n{message}"
+
+
+@app.get("/invites/info")
+def invite_info(code: str, request: Request):
+    """Public: what an invite offers, for the site's invite page
+    (site/www/invite.html). Reveals only what the code's holder was already
+    told in the invite message -- who sent it and what it gives."""
+    check_rate_limit("invite:" + client_ip(request))
+    cors = {"Access-Control-Allow-Origin": "*", **_NO_STORE}
+    try:
+        with get_db() as db:
+            inv = trust.find_invite(db, code.strip())
+            inviter = trust.username(db, inv["owner_user_id"])
+    except trust.TrustError as e:
+        return JSONResponse({"valid": False, "reason": e.message}, headers=cors)
+    return JSONResponse({"valid": True, "inviter": inviter, "kind": inv["kind"],
+                         "quota_gb": round(inv["quota_bytes"] / trust.GB, 1), "expires_at": inv["expires_at"]}, headers=cors)
+
+
+def _invite_page_url(code: str) -> str | None:
+    www = os.environ.get("PUBLIC_WWW_URL", "").rstrip("/")
+    return f"{www}/invite#{code}" if www else None
 
 
 def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
@@ -2733,8 +2758,9 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
     backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"{plan}\n\nStart mirroring?")
     return (
-        f"Waiting for the person to confirm. A Casper dialog is open on {source_host} (it can also be answered in Telegram). "
-        "This confirmation can't come from you -- it's the person's own decision. Mirroring starts the moment they allow it."
+        f"NOT protected yet -- nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
+        "click Allow (or answer in Telegram). You can't confirm it for them. Once they say they've allowed it, check "
+        "protection_status before telling them they're protected."
     )
 
 
@@ -2749,7 +2775,7 @@ def _status_text(db, f) -> str:
     if cd:
         names[cd["device_id"]] = "Casper's catcher"
     if f["status"] == "awaiting_consent":
-        return f"{f['label']}: waiting for the person to confirm (Casper dialog or Telegram)."
+        return f"{f['label']}: NOT protected yet -- waiting for the person to click Allow in the Casper dialog (or Telegram)."
     if f["restore_host_id"] and st.get("restoring"):
         state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
         return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
