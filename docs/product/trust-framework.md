@@ -62,9 +62,10 @@ Either way, the result is consensual on both sides.
 goal 4). An offering requires nothing in return by default. A request
 defaults to offering something back, which the other side may decline.
 Reciprocal or bartered arrangements can be expressed (an offer whose duty
-is "mirror for me too"), but they're the exception, not the template. Future work: attaching
-**conditions** to an offering, e.g. "backups only if you declare what's in
-them".
+is "mirror for me too"), but they're the exception, not the template.
+
+Future work: attaching **conditions** to an offering, e.g. "backups only
+if you declare what's in them".
 
 The daemon remains the sole, authoritative enforcer. The trust framework
 decides *which* policy layers apply to a caller; it never replaces the

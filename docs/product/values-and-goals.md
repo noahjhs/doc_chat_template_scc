@@ -35,7 +35,11 @@ and confirmed on 2026-09-28.
      reason for **approver delegation** (see
      [trust-framework.md](trust-framework.md)).
 
-4. **Curation shapes the community.**
+4. **Curation shapes the community.** Who participates, and how well they
+   match these values, depends on the structures we provide and the
+   workflows we support best. We offer a few opinionated workflows rather
+   than a general-purpose tool. Curation lives in the app layer.
+
    **The community model is a gift economy: default to generosity**
    (Principal, 2026-10-01). People want to be known as providers of
    resources to their community. Casper's defaults favour giving:
@@ -46,10 +50,6 @@ and confirmed on 2026-09-28.
 
    Reciprocity and barter remain possible, but they aren't the featured
    collaboration model.
- Who participates, and how well they
-   match these values, depends on the structures we provide and the
-   workflows we support best. We offer a few opinionated workflows rather
-   than a general-purpose tool. Curation lives in the app layer.
 
 5. **Legibility through modelling.** Granting, reviewing and revoking
    access must make sense to someone who isn't comfortable with a policy
