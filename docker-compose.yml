@@ -59,6 +59,25 @@ services:
     networks:
       - casper-net
 
+  # Casper's own Syncthing relay, for mirror peers that can't reach each
+  # other directly (different home networks, strict NATs). Private: it
+  # doesn't join the public relay pool (-pools=""), so only devices Casper
+  # tells about it use it. It relays end-to-end-encrypted TLS between
+  # peers; it never sees file data. Published to the internet via Tailscale
+  # Funnel (raw TCP, port 10000) on the mini -- see docs/product/
+  # scenarios/mirroring.md.
+  st-relay:
+    image: syncthing/relaysrv:latest
+    container_name: casper-st-relay
+    restart: unless-stopped
+    command: ["-pools=", "-listen=:22067", "-status-srv=", "-keys=/var/strelaysrv"]
+    volumes:
+      - st_relay_keys:/var/strelaysrv
+    ports:
+      - "127.0.0.1:22067:22067"
+    networks:
+      - casper-net
+
   relay:
     build:
       context: ./relay
@@ -83,3 +102,4 @@ networks:
 volumes:
   auth_db:
   catcher_data:
+  st_relay_keys:
