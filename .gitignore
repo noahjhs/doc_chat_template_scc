@@ -205,3 +205,7 @@ cython_debug/
 # Cached third-party binaries fetched (and checksum-verified) by build scripts, e.g. Syncthing.
 build/vendor/
 agent/casper-testdaemon
+
+# Local secrets (never commit)
+nous_key.txt
+*_key.txt
