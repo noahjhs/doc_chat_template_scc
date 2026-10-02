@@ -1169,3 +1169,16 @@ def test_telegram_webhook_callback_rejects_wrong_owner(client):
     assert r.status_code == 200
     with auth_main.get_db() as db:
         assert db.execute("SELECT 1 FROM pending_approvals WHERE id = ?", (approval_id,)).fetchone() is not None
+
+
+def test_dockerfile_copies_every_module():
+    """The image copies an explicit module list; a new module missing from
+    it crash-loops the deployed service (happened 2026-10-01 with
+    mirroring.py)."""
+    import re
+    from pathlib import Path
+
+    root = Path(CASPER_SERVICE_DIR)
+    copied = set(re.search(r"^COPY (main\.py.*) \./$", (root / "Dockerfile").read_text(), re.M).group(1).split())
+    modules = {p.name for p in root.glob("*.py")}
+    assert modules <= copied, f"missing from the Dockerfile COPY line: {sorted(modules - copied)}"
