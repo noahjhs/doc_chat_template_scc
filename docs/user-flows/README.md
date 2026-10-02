@@ -47,3 +47,6 @@ Steps use `- [ ]` so a real run-through can be checked off live.
   machines.
 - [agent-onboarding.md](agent-onboarding.md) -- a fresh agent, pointed at
   Casper with "go", sets up both sides of peer backup for its person.
+- [mirroring.md](mirroring.md) -- mirroring with history: agents set it up,
+  the person confirms in Casper's dialog; live across two Macs, plus a
+  four-daemon integration test (including a lost-Mac rebuild).

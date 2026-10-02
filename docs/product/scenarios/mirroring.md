@@ -1,6 +1,6 @@
 # Design: mirroring with history (v1)
 
-**Status:** draft, 2026-10-01; open questions resolved by the Principal the same day. Replaces peer backup as the v1 product. The
+**Status:** built and passed live on dev 2026-10-01 ([run record](../../user-flows/mirroring.md)); decisions made by the Principal the same day. Replaces peer backup as the v1 product. The
 trust framework, invites, ledger, agent onboarding, notifications and
 recovery kit all carry over. The engine is Syncthing
 ([spikes/syncthing-mirroring.md](../spikes/syncthing-mirroring.md)).
