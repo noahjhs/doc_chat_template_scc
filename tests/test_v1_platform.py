@@ -494,8 +494,8 @@ def test_onboarding_files_are_served_with_this_deployments_url(app_env):
     md = client.get("/agents.md", headers={"host": "dev-auth.casperagent.dev", "x-forwarded-proto": "https"})
     assert md.status_code == 200
     assert "https://dev-auth.casperagent.dev/download/casper/macos" in md.text and "{{" not in md.text
-    skill = client.get("/onboarding/skills/casper-back-up.md")
-    assert skill.status_code == 200 and "recovery-kit" in skill.text
+    skill = client.get("/onboarding/skills/casper-mirror.md")
+    assert skill.status_code == 200 and "recovery-kit" in skill.text and "Allow" in skill.text
     assert client.get("/onboarding/skills/..%2Fsecrets.md").status_code == 404
 
     import io

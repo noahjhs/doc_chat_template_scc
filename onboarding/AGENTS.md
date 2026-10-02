@@ -1,14 +1,25 @@
 # Casper: instructions for the agent
 
 You're helping a person set up **Casper**. Casper lets friends share their
-computers safely. In this version, that means **backing up your files to a
-friend's computer, encrypted so the friend can never read them**, and
-**offering space on your own computer for friends' backups**. Casper is in
-early alpha. It runs on macOS only, with up to 2 GB per backup.
+computers safely. In this version, that means **keeping a person's
+important folders mirrored on friends' computers**:
+- continuously, as files change;
+- encrypted, so the friends can never read them;
+- with 30 days of history, so accidents can be undone.
+
+It also means **offering space on your own computer** for friends' mirrors.
+Once it's set up, it's plumbing: the person shouldn't have to think about
+it again.
+
+Casper is in early alpha. It runs on macOS only.
 
 The person has pointed you here and said something like "go" or "set me up".
 You do the setup; they answer a few questions and confirm what you propose.
 Do it all yourself unless a step below says the person must.
+
+**Casper's community defaults to generosity.** People offer space without
+asking anything back. When someone receives space, Casper suggests they
+offer some in return, but it's never a condition.
 
 ## How to work with the person
 
@@ -57,13 +68,13 @@ the **next step**. Re-run it whenever you're unsure.
 ## Step 2: find out what they want
 
 If they gave you an **invite code** (it looks like `CASPER-XXXX-XXXX-XXXX`),
-a friend has already offered them backup space: they want to back up. Keep
-the code for later.
+a friend has already offered them space: they want their folders kept safe.
+Keep the code for later.
 
 Otherwise, ask:
 
-> Would you like to **back up your files to a friend's computer**, **offer
-> space on this computer for friends' backups**, or **both**?
+> Would you like to **keep your files safe on a friend's computer**, **offer
+> space on this computer for friends' files**, or **both**?
 
 ## Step 3: set up the account, this Mac, and you
 
@@ -79,15 +90,18 @@ MCP server, and have the person restart you once.
 After the restart, run `"$CASPER" setup status` again. Then follow:
 - to **offer space**: the **casper-offer-space** skill
   (`{{CASPER_URL}}/onboarding/skills/casper-offer-space.md`);
-- to **back up**: the **casper-back-up** skill
-  (`{{CASPER_URL}}/onboarding/skills/casper-back-up.md`).
+- to **keep their files safe**: the **casper-mirror** skill
+  (`{{CASPER_URL}}/onboarding/skills/casper-mirror.md`).
 
-If they want both, offer space first, then back up.
+If they want both, offer space first, then mirror.
 
 ## Later, any time
 
 The person may ask you things like:
-- "What have I shared?" Use `my_casper`.
-- "Back up my Photos too." Use **casper-back-up**.
+- "What have I shared?" or "Are my files safe?" Use `my_casper` and
+  `protection_status`.
+- "Get back yesterday's version of budget.xlsx." Use `list_versions`, then
+  `restore_version`.
+- "Keep my Desktop safe too." Use **casper-mirror**.
 - "Anything waiting for me?" Use `list_approvals`, then ask them.
 - "Stop sharing with Sam." Use `revoke`, after confirming.

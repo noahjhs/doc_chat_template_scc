@@ -2070,17 +2070,17 @@ def _mcp_list_hosts(user_id: int) -> list[dict]:
     connected = {c["host_id"] for c in _own_configs(user_id).values()}
     out = [{"host": r["label"], "role": "owner", "connected": r["id"] in connected} for r in own]
     for g in held:
-        out.append(
-            {
-                "host": f"{g['owner']}/{g['host']}",
-                "owner": g["owner"],
-                "role": "backup_peer",
-                "quota": backups.human(g["quota_bytes"]),
-                "used": backups.human(used_by_host.get(g["host_id"]) or 0),
-                "approval_needed_to_write": g["write_tier"] == "ask",
-                "connected": _host_config(g["owner_user_id"], g["host_id"]) is not None,
-            }
-        )
+        entry = {
+            "host": f"{g['owner']}/{g['host']}",
+            "owner": g["owner"],
+            "role": g["relation"],
+            "quota": backups.human(g["quota_bytes"]),
+            "connected": _host_config(g["owner_user_id"], g["host_id"]) is not None,
+        }
+        if g["relation"] == "backup_peer":
+            entry["used"] = backups.human(used_by_host.get(g["host_id"]) or 0)
+            entry["approval_needed_to_write"] = g["write_tier"] == "ask"
+        out.append(entry)
     return out
 
 

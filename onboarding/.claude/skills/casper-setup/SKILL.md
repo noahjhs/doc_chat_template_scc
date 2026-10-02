@@ -65,14 +65,14 @@ need**. For example:
 
 > I've connected myself to Casper. Please quit me (type `/exit`), start
 > me again in this same folder (`claude`), and then say:
-> **"continue setting up Casper — back up, invite code CASPER-ABCD-EFGH-JKLM"**
+> **"continue setting up Casper — keep my files safe, invite code CASPER-ABCD-EFGH-JKLM"**
 
-Adjust the sentence to what they chose: offer space, back up (with their
-invite code if they have one), or both.
+Adjust the sentence to what they chose: offer space, keep their files safe
+(with their invite code if they have one), or both.
 
 ## After the restart
 
 - Run `"$CASPER" setup status`. It should show the account, this Mac
   connected, and the agent connected.
 - Call the `my_casper` tool to confirm you can reach Casper.
-- Continue with **casper-offer-space** or **casper-back-up**.
+- Continue with **casper-offer-space** or **casper-mirror**.
