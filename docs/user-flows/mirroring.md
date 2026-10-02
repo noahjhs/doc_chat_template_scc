@@ -56,23 +56,24 @@ in the integration test.
 
 ## Known issues
 
-- **A catcher on the same machine as the mirror adds nothing.** The agents
-  noticed, but the design should prevent or warn about it:
-  `mirror_folder` could refuse a catcher on a mirror's host, and
-  `casper-offer-space` could suggest catcher space only to people who
-  aren't also the mirror.
-- **Protection status gives counts, not names.** The agent guessed which
-  file was unprotected (and guessed wrong). Status could include up to a
-  few names.
-- **No relay yet.** Peers on different home networks rely on direct
-  connections and Syncthing's NAT traversal; both test Macs share a
-  Tailscale network. A relay needs a public TCP port, either forwarded on
-  the home router or on a small server.
-- **The consent endpoint accepts this Mac's device token.** An agent with
-  full shell access to the same Mac could read that token from Casper's
-  session file and forge a consent. Moving session secrets into the
-  Keychain closes this. Until then the protection is that the dialog itself
-  can't be scripted, and that Telegram is the other channel.
+- ~~**A catcher on the same machine as the mirror adds nothing.**~~ **Fixed
+  2026-10-02:** `mirror_folder` refuses it, and the skills explain why.
+- ~~**Protection status gives counts, not names.**~~ **Fixed 2026-10-02:**
+  up to 10 unprotected files are named. The names are fetched live from the
+  owner's own Mac when status is requested, and never stored on
+  `casper_service`.
+- ~~**No relay yet.**~~ **Fixed 2026-10-02:** Casper's own private relay
+  (`strelaysrv` on the mini, not joined to the public pool) is published
+  through Tailscale Funnel on port 10000. Every Mac and the catcher listen
+  on it and advertise it. Verified with two Macs given only the relay
+  address: they connected as `relay-client` and mirrored through it.
+  *Still to confirm:* the relay's public DNS name didn't resolve outside
+  Tailscale yet when checked (a Funnel DNS publication delay); recheck it
+  from a non-tailnet network.
+- ~~**The consent endpoint accepts this Mac's device token.**~~ **Fixed
+  2026-10-02:** daemon sessions moved from `session.json` into the login
+  Keychain, with a one-time migration that deletes the file (verified on the
+  mini). Other programs reading the item get macOS's own access prompt.
 - **Prod's Compose file is a locally edited copy** (it renames containers
-  for prod). Adding the catcher there needs doing by hand at promotion,
-  with its own port.
+  for prod). Adding the catcher, the relay and the Funnel there needs doing
+  by hand at promotion.
