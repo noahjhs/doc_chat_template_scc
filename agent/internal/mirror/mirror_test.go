@@ -271,3 +271,23 @@ func TestCleanupOrphansAfterGrace(t *testing.T) {
 		t.Fatal("a wanted folder was deleted")
 	}
 }
+
+func TestRelaysSetListenAddresses(t *testing.T) {
+	bin := syncthingBin(t)
+	n := startNode(t, bin)
+	relay := "relay://relay.example:10000/?id=AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA"
+	mustApply(t, n, Desired{Relays: []string{relay}})
+	var opts struct {
+		ListenAddresses []string `json:"listenAddresses"`
+		RelaysEnabled   bool     `json:"relaysEnabled"`
+	}
+	n.m.get("/rest/config/options", &opts)
+	if !opts.RelaysEnabled || len(opts.ListenAddresses) != 2 || opts.ListenAddresses[1] != relay {
+		t.Fatalf("relay not applied: %+v", opts)
+	}
+	mustApply(t, n, Desired{})
+	n.m.get("/rest/config/options", &opts)
+	if opts.RelaysEnabled || len(opts.ListenAddresses) != 1 {
+		t.Fatalf("relay not removed: %+v", opts)
+	}
+}

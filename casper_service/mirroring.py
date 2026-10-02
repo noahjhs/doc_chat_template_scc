@@ -53,6 +53,13 @@ def _device_for_host(db, host_id: int) -> dict | None:
     return {"device_id": row["device_id"], "addresses": json.loads(row["addresses"]), "name": row["hostname"] or f"host{host_id}"}
 
 
+# --- Casper's relay ------------------------------------------------------------------------
+def relays() -> list[str]:
+    """Casper's own Syncthing relays (ST_RELAY_URL, comma-separated), for
+    peers that can't reach each other directly. Never the public pool."""
+    return [r.strip() for r in os.environ.get("ST_RELAY_URL", "").split(",") if r.strip()]
+
+
 # --- Casper's own catcher (the catcher of last resort) ----------------------------------
 def catcher_available() -> bool:
     return bool(os.environ.get("CATCHER_URL"))
@@ -81,7 +88,7 @@ def catcher_device() -> dict | None:
         except requests.RequestException:
             return None
     addrs = [a.strip() for a in os.environ.get("CATCHER_ADDRESSES", "").split(",") if a.strip()]
-    return {"device_id": _catcher_device_id["id"], "addresses": addrs, "name": "casper-catcher"}
+    return {"device_id": _catcher_device_id["id"], "addresses": addrs + relays(), "name": "casper-catcher"}
 
 
 def reconcile_catcher():
@@ -109,7 +116,8 @@ def reconcile_catcher():
             }
     try:
         _catcher_api("PATCH", "/rest/config/options", {
-            "globalAnnounceEnabled": False, "localAnnounceEnabled": False, "relaysEnabled": False,
+            "globalAnnounceEnabled": False, "localAnnounceEnabled": False, "relaysEnabled": bool(relays()),
+            "listenAddresses": ["tcp://0.0.0.0:22000", "quic://0.0.0.0:22000", *relays()],
             "urAccepted": -1, "crashReportingEnabled": False, "autoUpgradeIntervalH": 0,
         })
         for dev in wanted_devices.values():
@@ -220,7 +228,7 @@ def desired_state(db, user_id: int, host_id: int) -> dict:
             "kind": t["role"],
             "quota_bytes": json.loads(t["attrs"]).get("quota_bytes", 0),
         })
-    return {"peers": list(peers.values()), "owned": owned, "held": held}
+    return {"peers": list(peers.values()), "owned": owned, "held": held, "relays": relays()}
 
 
 # --- Folders: creation, consent, stopping ------------------------------------------------

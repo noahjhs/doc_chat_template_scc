@@ -132,6 +132,7 @@ func (s *Service) Step() {
 		}
 		merged.Owned = append(merged.Owned, d.Owned...)
 		merged.Held = append(merged.Held, d.Held...)
+		merged.Relays = union(merged.Relays, d.Relays)
 	}
 	if err := s.Mgr.Apply(merged); err != nil {
 		s.Logf("mirroring: applying config: %s", err)

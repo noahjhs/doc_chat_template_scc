@@ -81,6 +81,9 @@ type Desired struct {
 	Peers []Peer        `json:"peers"`
 	Owned []OwnedFolder `json:"owned"`
 	Held  []HeldFolder  `json:"held"`
+	// Relays are Casper's own Syncthing relays (relay://host:port/?id=...),
+	// for peers that can't reach each other directly. Never the public pool.
+	Relays []string `json:"relays"`
 }
 
 // Manager owns the Syncthing child process and talks to its REST API.
@@ -97,6 +100,9 @@ type Manager struct {
 	apiKey   string
 	deviceID string
 	client   *http.Client
+	// appliedListen is the listen set last pushed to Syncthing (base +
+	// relays), so Apply only patches options when it changes.
+	appliedListen string
 }
 
 func New(bin, home, dataDir, listen string, logf func(string, ...any)) *Manager {
@@ -138,6 +144,7 @@ func (m *Manager) Start() error {
 		return err
 	}
 	m.mu.Lock()
+	m.appliedListen = ""
 	m.guiAddr = fmt.Sprintf("127.0.0.1:%d", port)
 	m.apiKey = randomKey()
 	logFile, _ := os.OpenFile(filepath.Join(m.home, "syncthing.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -177,12 +184,41 @@ func (m *Manager) Start() error {
 		"urAccepted":            -1,
 		"crashReportingEnabled": false,
 		"autoUpgradeIntervalH":  0,
-		"listenAddresses":       []string{m.listenAddresses()},
+		"listenAddresses":       m.listenAddresses(),
 		"startBrowser":          false,
 	})
 }
 
-func (m *Manager) listenAddresses() string { return m.listen }
+// baseListen is where Syncthing listens directly: the explicit listen
+// address (tests), or TCP and QUIC on the standard port. Deliberately not
+// Syncthing's "default", which also joins the public relay pool.
+func (m *Manager) baseListen() []string {
+	if m.listen == "" || m.listen == "default" {
+		return []string{"tcp://0.0.0.0:22000", "quic://0.0.0.0:22000"}
+	}
+	return []string{m.listen}
+}
+
+func (m *Manager) listenAddresses() []string { return m.baseListen() }
+
+// applyRelays makes Syncthing also listen on Casper's relays (or stop).
+func (m *Manager) applyRelays(relays []string) error {
+	want := append(m.baseListen(), relays...)
+	key := strings.Join(want, "|")
+	m.mu.Lock()
+	same := key == m.appliedListen
+	m.mu.Unlock()
+	if same {
+		return nil
+	}
+	if err := m.patch("/rest/config/options", map[string]any{"listenAddresses": want, "relaysEnabled": len(relays) > 0}); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.appliedListen = key
+	m.mu.Unlock()
+	return nil
+}
 
 func (m *Manager) Stop() {
 	m.mu.Lock()
@@ -368,6 +404,9 @@ func CatchFolderID(folderID string) string { return folderID + ".catch" }
 // and removes Casper-managed ones that are no longer desired. Nothing outside
 // the casper namespace is touched.
 func (m *Manager) Apply(d Desired) error {
+	if err := m.applyRelays(d.Relays); err != nil {
+		return err
+	}
 	self := m.DeviceID()
 	wantDevices := map[string]stDevice{}
 	for _, p := range d.Peers {
