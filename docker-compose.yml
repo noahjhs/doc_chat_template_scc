@@ -36,6 +36,29 @@ services:
     networks:
       - casper-net
 
+  # Casper's own catcher -- the catcher of last resort (docs/product/
+  # scenarios/mirroring.md): holds, encrypted and without history, only the
+  # changes a person's mirrors haven't received yet, for people with no
+  # always-on friend. A stock Syncthing; casper_service configures it over
+  # its REST API (CATCHER_URL/CATCHER_API_KEY), which is reachable only on
+  # casper-net. Its sync port is published so owners' Macs can reach it
+  # (CATCHER_ADDRESSES in .env lists the addresses they should use).
+  catcher:
+    image: syncthing/syncthing:2.1.5
+    container_name: casper-catcher
+    restart: unless-stopped
+    hostname: casper-catcher
+    environment:
+      STGUIADDRESS: 0.0.0.0:8384
+      STGUIAPIKEY: ${CATCHER_API_KEY:-}
+    volumes:
+      - catcher_data:/var/syncthing
+    ports:
+      - "22100:22000/tcp"
+      - "22100:22000/udp"
+    networks:
+      - casper-net
+
   relay:
     build:
       context: ./relay
@@ -59,3 +82,4 @@ networks:
 
 volumes:
   auth_db:
+  catcher_data:
