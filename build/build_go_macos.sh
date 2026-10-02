@@ -130,6 +130,32 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp build/go_macos_dist/casper-bin "$APP_DIR/Contents/MacOS/Casper"
 chmod +x "$APP_DIR/Contents/MacOS/Casper"
 
+# Syncthing -- the mirroring engine (docs/product/scenarios/mirroring.md),
+# run by the daemon as a child process (agent/internal/mirror) and never
+# shown to people. Pinned, cached in build/vendor, and checked against the
+# release's published SHA-256 before it goes in the bundle; the codesign
+# step below re-signs it with our Developer ID like everything else.
+SYNCTHING_VERSION="v2.1.5"
+ST_ASSET="syncthing-macos-${GOARCH}-${SYNCTHING_VERSION}.zip"
+ST_CACHE="build/vendor/${ST_ASSET}"
+mkdir -p build/vendor
+if [ ! -f "$ST_CACHE" ]; then
+    curl -fsSL "https://github.com/syncthing/syncthing/releases/download/${SYNCTHING_VERSION}/${ST_ASSET}" -o "$ST_CACHE.tmp"
+    mv "$ST_CACHE.tmp" "$ST_CACHE"
+fi
+ST_SUMS="$(curl -fsSL "https://github.com/syncthing/syncthing/releases/download/${SYNCTHING_VERSION}/sha256sum.txt.asc")"
+ST_EXPECTED="$(echo "$ST_SUMS" | awk -v f="$ST_ASSET" '$2 == f {print $1}')"
+ST_ACTUAL="$(shasum -a 256 "$ST_CACHE" | awk '{print $1}')"
+if [ -z "$ST_EXPECTED" ] || [ "$ST_EXPECTED" != "$ST_ACTUAL" ]; then
+    echo "Syncthing checksum mismatch for $ST_ASSET (expected '$ST_EXPECTED', got '$ST_ACTUAL') -- refusing to bundle it." >&2
+    exit 1
+fi
+ST_TMP="$(mktemp -d)"
+unzip -q "$ST_CACHE" -d "$ST_TMP"
+cp "$ST_TMP"/syncthing-macos-*/syncthing "$APP_DIR/Contents/MacOS/syncthing"
+chmod +x "$APP_DIR/Contents/MacOS/syncthing"
+rm -rf "$ST_TMP"
+
 if [ -s assets/ghost.png ]; then
     ICONSET="build/Casper.iconset"
     rm -rf "$ICONSET"; mkdir -p "$ICONSET"

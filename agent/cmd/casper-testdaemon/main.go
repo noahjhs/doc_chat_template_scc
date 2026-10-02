@@ -13,11 +13,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"casper-agent/internal/backup"
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
+	"casper-agent/internal/mirror"
+	"casper-agent/internal/mirrord"
 	"casper-agent/internal/server"
 )
 
@@ -29,6 +34,8 @@ func main() {
 	commandKey := flag.String("command-key", "", "the pairing's command key")
 	home := flag.String("home", "", "the confined home directory")
 	data := flag.String("data", "", "where backups/keys state lives")
+	syncthing := flag.String("syncthing", "", "syncthing binary (enables mirroring)")
+	stListen := flag.String("st-listen", "", "syncthing listen address, e.g. tcp://127.0.0.1:22101")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "testdaemon "+*username+": ", log.LstdFlags)
@@ -43,6 +50,28 @@ func main() {
 	}
 	if err := config.RegisterBackupKey(*authDomain, *deviceToken, keys.SigningPublicKey(), "memory"); err != nil {
 		logger.Fatal(err)
+	}
+
+	if *syncthing != "" {
+		svc := &mirrord.Service{
+			AuthDomain: *authDomain,
+			Mgr:        mirror.New(*syncthing, filepath.Join(*data, "syncthing"), filepath.Join(*data, "mirror"), *stListen, logger.Printf),
+			Bin:        *syncthing,
+			Passwords:  &mirrord.FilePasswords{Path: filepath.Join(*data, "mirror-passwords.json")},
+			Identities: func() []mirrord.Identity { return []mirrord.Identity{{Username: *username, DeviceToken: *deviceToken}} },
+			Logf:       logger.Printf,
+			Interval:   2 * time.Second, // tests want quick reconciliation
+		}
+		handler.SetMirrorOps(svc.Ops(*username))
+		go svc.Run()
+		// Stop Syncthing with us, so a test "turning a Mac off" really does.
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+		go func() {
+			<-sig
+			svc.Mgr.Stop()
+			os.Exit(0)
+		}()
 	}
 
 	srv := server.New(logger)

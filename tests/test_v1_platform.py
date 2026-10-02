@@ -421,14 +421,14 @@ def test_onboarding_invite_flow_previews_then_acts(app_env):
         assert "you and sam become friends" in _mcp(client, riley_agent, "redeem_invite", code=code)
         assert client.get("/friends", headers=riley).json()["friends"] == []  # still just a preview
         done = _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
-        assert "Back up to it as sam/sam-mini" in done
+        assert "10.0 GB of mirror space on sam/sam-mini" in done and "offer sam mirror space in return" in done
         assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]
         assert any("riley used your Casper invite" in t for t in notes)
         assert "already been used" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
 
         ledger = _mcp(client, sam_agent, "my_casper")
-        assert "Friends: riley" in ledger and "riley: 10.0 GB on sam-mini" in ledger
-        assert "10.0 GB on sam/sam-mini" in _mcp(client, riley_agent, "my_casper")
+        assert "Friends: riley" in ledger and "mirror space for riley: 10.0 GB on sam-mini" in ledger
+        assert "mirror space: 10.0 GB on sam/sam-mini" in _mcp(client, riley_agent, "my_casper")
 
         # Undo: cancelled invites stop working; ending space is one call.
         out2 = _mcp(client, sam_agent, "create_invite", quota_gb=5, preview=False)
@@ -437,7 +437,7 @@ def test_onboarding_invite_flow_previews_then_acts(app_env):
         assert "Cancelled" in _mcp(client, sam_agent, "revoke", kind="invite", id_or_name=invite_id)
         assert "cancelled" in _mcp(client, riley_agent, "redeem_invite", code=code2)
         grant_id = re.search(r"\[grant (\d+)\]", _mcp(client, sam_agent, "my_casper")).group(1)
-        assert "Ended riley's backup space" in _mcp(client, sam_agent, "revoke", kind="grant", id_or_name=grant_id)
+        assert "Ended riley's" in _mcp(client, sam_agent, "revoke", kind="grant", id_or_name=grant_id)
         assert client.get("/grants", headers=riley).json()["held"] == []
 
 
@@ -481,7 +481,7 @@ def test_backup_push_preview_states_the_plan(app_env):
     with client, FakeDaemon(respond_with=lambda b: _ok()) as sd, FakeDaemon(respond_with=lambda b: _ok()) as rd:
         sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
         _pair(client, riley, "rk-laptop", "riley-laptop", rd.url)
-        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
+        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, kind="backup", preview=False)
         code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", quota_gb=10, preview=False)).group(0)
         _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
         out = _mcp(client, riley_agent, "backup_push", source_host="riley-laptop", path="~/Documents", dest_host="sam/sam-mini", preview=True)

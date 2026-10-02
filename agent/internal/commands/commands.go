@@ -12,6 +12,7 @@ package commands
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -95,6 +96,16 @@ type Request struct {
 	Manifest   string `json:"manifest,omitempty"`
 	Signature  string `json:"signature,omitempty"`
 	Passphrase string `json:"passphrase,omitempty"`
+
+	// Mirroring (see mirror_actions.go and internal/mirrord).
+	FolderID      string          `json:"folder_id,omitempty"`
+	EncryptedPath string          `json:"encrypted_path,omitempty"`
+	At            string          `json:"at,omitempty"` // RFC 3339
+	Offset        int64           `json:"offset,omitempty"`
+	Items         json.RawMessage `json:"items,omitempty"`
+	ApprovalID    string          `json:"approval_id,omitempty"`
+	Text          string          `json:"text,omitempty"`
+	Label         string          `json:"label,omitempty"`
 }
 
 // RequestOption is one model-supplied option entry for run_shell_command --
@@ -159,6 +170,7 @@ type Handler struct {
 	policyLayers          []PolicyLayer // see policy.go -- the daemon's own cached copy of policy layers attached to this host, fetched from casper_service
 	refreshPolicyLayersFn func()        // see policy.go's SetRefreshPolicyLayersFunc
 	backup                *backup.Store // see backup_actions.go; nil until the daemon sets one up
+	mirror                MirrorOps     // see mirror_actions.go; nil until the daemon sets one up
 }
 
 func New(homeRoot string) *Handler {
@@ -397,6 +409,9 @@ func (h *Handler) Dispatch(req *Request) (Result, error) {
 	default:
 		if strings.HasPrefix(req.Action, "backup_") || req.Action == "refresh_grants" {
 			return h.dispatchBackup(req)
+		}
+		if strings.HasPrefix(req.Action, "mirror_") || req.Action == "ask_consent" {
+			return h.dispatchMirror(req)
 		}
 		return Result{}, &ActionError{Detail: "Action not authorized."}
 	}

@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 
 GB = 1024**3
 
+# What each kind of offering grants. backup_space is the retiring snapshot
+# backup; mirror_space and catcher_space are mirroring
+# (docs/product/scenarios/mirroring.md).
+RELATION_BY_KIND = {"backup_space": "backup_peer", "mirror_space": "mirror_peer", "catcher_space": "catcher_peer"}
+KIND_NAMES = {"backup_space": "backup space", "mirror_space": "mirror space", "catcher_space": "catcher space"}
+
 
 class TrustError(Exception):
     """A request the trust framework refuses, with a message for a person."""
@@ -154,14 +160,16 @@ def host_label(db, user_id: int, host_id: int) -> str:
     return row["label"] if row else f"host{host_id}"
 
 
-def publish_offering(db, owner_id: int, host_id: int, max_quota_bytes: int, write_tier: str) -> int:
+def publish_offering(db, owner_id: int, host_id: int, max_quota_bytes: int, write_tier: str, kind: str = "backup_space") -> int:
     if not owns_paired_host(db, owner_id, host_id):
         raise TrustError("You can only offer space on a host you've paired.", 404)
     if write_tier not in ("allow", "ask"):
         raise TrustError("write_tier must be 'allow' or 'ask'.")
+    if kind not in RELATION_BY_KIND:
+        raise TrustError(f"Unknown kind of offering {kind!r}.")
     cur = db.execute(
-        "INSERT INTO offerings (owner_user_id, host_id, kind, max_quota_bytes, write_tier) VALUES (?, ?, 'backup_space', ?, ?)",
-        (owner_id, host_id, max_quota_bytes, write_tier),
+        "INSERT INTO offerings (owner_user_id, host_id, kind, max_quota_bytes, write_tier) VALUES (?, ?, ?, ?, ?)",
+        (owner_id, host_id, kind, max_quota_bytes, write_tier),
     )
     return cur.lastrowid
 
@@ -187,7 +195,7 @@ def _offering_dict(db, row, viewer_id: int) -> dict:
         "write_tier": row["write_tier"],
     }
     if row["owner_user_id"] != viewer_id:
-        grant = active_grant(db, viewer_id, row["host_id"], row["owner_user_id"])
+        grant = active_grant(db, viewer_id, row["host_id"], row["owner_user_id"], RELATION_BY_KIND.get(row["kind"], "backup_peer"))
         pending = db.execute(
             "SELECT 1 FROM access_requests WHERE offering_id = ? AND requester_user_id = ? AND status = 'pending'",
             (row["id"], viewer_id),
@@ -232,8 +240,8 @@ def create_access_request(db, requester_id: int, offering_id: int, quota_bytes: 
         raise TrustError("Only friends can request this.", 403)
     if quota_bytes <= 0 or quota_bytes > offering["max_quota_bytes"]:
         raise TrustError(f"Ask for between 0 and {offering['max_quota_bytes'] / GB:g} GB.")
-    if active_grant(db, requester_id, offering["host_id"], owner_id):
-        raise TrustError("You already have backup space there.", 409)
+    if active_grant(db, requester_id, offering["host_id"], owner_id, RELATION_BY_KIND[offering["kind"]]):
+        raise TrustError(f"You already have {KIND_NAMES[offering['kind']]} there.", 409)
     if db.execute(
         "SELECT 1 FROM access_requests WHERE offering_id = ? AND requester_user_id = ? AND status = 'pending'",
         (offering_id, requester_id),
@@ -251,7 +259,7 @@ def decide_access_request(db, request_id: int, grant: bool) -> dict | None:
     pending. Granting writes the backup_peer tuple -- the grant itself."""
     row = db.execute(
         """
-        SELECT ar.*, o.owner_user_id, o.host_id, o.write_tier
+        SELECT ar.*, o.owner_user_id, o.host_id, o.write_tier, o.kind
         FROM access_requests ar JOIN offerings o ON o.id = ar.offering_id
         WHERE ar.id = ? AND ar.status = 'pending'
         """,
@@ -271,8 +279,8 @@ def decide_access_request(db, request_id: int, grant: bool) -> dict | None:
             "offering_id": row["offering_id"],
         }
         db.execute(
-            "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, 'backup_peer', 'host', ?, ?)",
-            (row["requester_user_id"], row["host_id"], json.dumps(attrs)),
+            "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, ?, 'host', ?, ?)",
+            (row["requester_user_id"], RELATION_BY_KIND[row["kind"]], row["host_id"], json.dumps(attrs)),
         )
     return dict(row)
 
@@ -282,6 +290,7 @@ def _grant_dict(db, row) -> dict:
     attrs = json.loads(row["attrs"])
     return {
         "id": row["id"],
+        "relation": row["relation"],
         "grantee_user_id": row["subject_id"],
         "grantee": username(db, row["subject_id"]),
         "owner_user_id": attrs["owner_user_id"],
@@ -295,35 +304,40 @@ def _grant_dict(db, row) -> dict:
     }
 
 
-def _grant_rows(db, where: str, params: tuple) -> list[dict]:
+_GRANT_RELATIONS = tuple(RELATION_BY_KIND.values())
+
+
+def _grant_rows(db, where: str, params: tuple, relation: str | None = None) -> list[dict]:
+    relations = (relation,) if relation else _GRANT_RELATIONS
+    marks = ",".join("?" * len(relations))
     rows = db.execute(
-        f"SELECT * FROM relation_tuples WHERE relation = 'backup_peer' AND object_type = 'host' AND {where} ORDER BY id",
-        params,
+        f"SELECT * FROM relation_tuples WHERE relation IN ({marks}) AND object_type = 'host' AND {where} ORDER BY id",
+        (*relations, *params),
     ).fetchall()
     return [_grant_dict(db, r) for r in rows]
 
 
-def active_grant(db, grantee_id: int, host_id: int, owner_id: int) -> dict | None:
-    for g in _grant_rows(db, "subject_id = ? AND object_id = ? AND revoked_at IS NULL", (grantee_id, host_id)):
+def active_grant(db, grantee_id: int, host_id: int, owner_id: int, relation: str = "backup_peer") -> dict | None:
+    for g in _grant_rows(db, "subject_id = ? AND object_id = ? AND revoked_at IS NULL", (grantee_id, host_id), relation):
         if g["owner_user_id"] == owner_id:
             return g
     return None
 
 
-def latest_grant(db, grantee_id: int, host_id: int, owner_id: int) -> dict | None:
-    """The newest grant, active or revoked -- for reading back backups
+def latest_grant(db, grantee_id: int, host_id: int, owner_id: int, relation: str = "backup_peer") -> dict | None:
+    """The newest grant, active or revoked -- for reading back what was
     stored under a grant that's since been revoked (grace period)."""
-    grants = [g for g in _grant_rows(db, "subject_id = ? AND object_id = ?", (grantee_id, host_id)) if g["owner_user_id"] == owner_id]
+    grants = [g for g in _grant_rows(db, "subject_id = ? AND object_id = ?", (grantee_id, host_id), relation) if g["owner_user_id"] == owner_id]
     return grants[-1] if grants else None
 
 
-def grants_held(db, grantee_id: int, include_revoked: bool = False) -> list[dict]:
+def grants_held(db, grantee_id: int, include_revoked: bool = False, relation: str | None = None) -> list[dict]:
     where = "subject_id = ?" + ("" if include_revoked else " AND revoked_at IS NULL")
-    return _grant_rows(db, where, (grantee_id,))
+    return _grant_rows(db, where, (grantee_id,), relation)
 
 
-def grants_given(db, owner_id: int, include_revoked: bool = False) -> list[dict]:
-    rows = _grant_rows(db, "1 = 1" if include_revoked else "revoked_at IS NULL", ())
+def grants_given(db, owner_id: int, include_revoked: bool = False, relation: str | None = None) -> list[dict]:
+    rows = _grant_rows(db, "1 = 1" if include_revoked else "revoked_at IS NULL", (), relation)
     return [g for g in rows if g["owner_user_id"] == owner_id]
 
 
@@ -337,7 +351,7 @@ def grants_on_host_for_daemon(db, owner_id: int, host_id: int) -> list[dict]:
     daemon can honor the grace period and then purge), each with every
     backup signing key its grantee has registered."""
     out = []
-    for g in _grant_rows(db, "object_id = ?", (host_id,)):
+    for g in _grant_rows(db, "object_id = ?", (host_id,), "backup_peer"):
         if g["owner_user_id"] != owner_id:
             continue
         keys = db.execute(
@@ -414,7 +428,7 @@ def create_invite(db, owner_id: int, offering_id: int, quota_bytes: int, note: s
 def find_invite(db, code: str) -> dict:
     row = db.execute(
         """
-        SELECT i.*, o.host_id, o.write_tier, o.withdrawn_at AS offering_withdrawn
+        SELECT i.*, o.host_id, o.write_tier, o.kind, o.withdrawn_at AS offering_withdrawn
         FROM invites i JOIN offerings o ON o.id = i.offering_id WHERE i.code_hash = ?
         """,
         (_invite_hash(code),),
@@ -437,8 +451,9 @@ def redeem_invite(db, user_id: int, code: str) -> dict:
     owner_id = inv["owner_user_id"]
     if owner_id == user_id:
         raise TrustError("That's your own invite -- send it to the friend it's for.")
-    if active_grant(db, user_id, inv["host_id"], owner_id):
-        raise TrustError("You already have backup space there.", 409)
+    relation = RELATION_BY_KIND[inv["kind"]]
+    if active_grant(db, user_id, inv["host_id"], owner_id, relation):
+        raise TrustError(f"You already have {KIND_NAMES[inv['kind']]} there.", 409)
     if not are_friends(db, user_id, owner_id):
         for a, b in ((user_id, owner_id), (owner_id, user_id)):
             db.execute(
@@ -447,8 +462,8 @@ def redeem_invite(db, user_id: int, code: str) -> dict:
             )
     attrs = {"owner_user_id": owner_id, "quota_bytes": inv["quota_bytes"], "write_tier": inv["write_tier"], "offering_id": inv["offering_id"], "invite_id": inv["id"]}
     db.execute(
-        "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, 'backup_peer', 'host', ?, ?)",
-        (user_id, inv["host_id"], json.dumps(attrs)),
+        "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, ?, 'host', ?, ?)",
+        (user_id, relation, inv["host_id"], json.dumps(attrs)),
     )
     db.execute("UPDATE invites SET used_by_user_id = ?, used_at = ? WHERE id = ?", (user_id, now_iso(), inv["id"]))
     return inv

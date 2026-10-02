@@ -65,6 +65,13 @@ class Services:
     list_approvals: Callable[..., str] | None = None
     decide_approval: Callable[..., str] | None = None
     revoke: Callable[..., str] | None = None
+    # Mirroring (docs/product/scenarios/mirroring.md).
+    mirror_folder: Callable[..., str] | None = None
+    protection_status: Callable[..., str] | None = None
+    list_versions: Callable[..., str] | None = None
+    restore_version: Callable[..., str] | None = None
+    restore_folder: Callable[..., str] | None = None
+    stop_mirroring: Callable[..., str] | None = None
 
 
 class _Unauthorized(Exception):
@@ -155,13 +162,15 @@ def build(svc: Services) -> MCPServer:
 
     @server.tool(
         description=(
-            "Offer backup space on one of the person's own machines to their friends. max_gb is the most any one friend can get. "
-            "approve_each_backup=false (usual) stores any backup within a friend's share without asking; true asks the person each time. "
+            "Offer space on one of the person's own machines to their friends. kind='mirror' (usual): friends' folders are mirrored "
+            "here, encrypted, with 30 days of history. kind='catcher': for an always-on machine -- it briefly holds only the changes "
+            "friends' mirrors haven't received yet. kind='backup': snapshot backups (older feature). max_gb is the most any one friend "
+            "can get. Offerings ask nothing in return -- Casper defaults to generosity. "
             "Call with preview=true first, show the person the plan, and only call again with preview=false once they agree."
         )
     )
-    def publish_offering(ctx: Context, host: str, max_gb: float, approve_each_backup: bool = False, preview: bool = True) -> str:
-        return svc.publish_offering(_caller(svc, ctx), host, max_gb, approve_each_backup, preview)
+    def publish_offering(ctx: Context, host: str, max_gb: float, kind: str = "mirror", approve_each_backup: bool = False, preview: bool = True) -> str:
+        return svc.publish_offering(_caller(svc, ctx), host, max_gb, approve_each_backup, preview, kind)
 
     @server.tool(
         description=(
@@ -193,6 +202,39 @@ def build(svc: Services) -> MCPServer:
     @server.tool(description="Undo: kind='grant' (end backup space given or held, by grant id), 'invite' (cancel an unused invite), 'offering' (withdraw an offering), or 'friend' (by username; also ends space between you). Ids are in my_casper. Confirm with the person first.")
     def revoke(ctx: Context, kind: str, id_or_name: str) -> str:
         return svc.revoke(_caller(svc, ctx), kind, id_or_name)
+
+    # --- Mirroring -------------------------------------------------------------
+    @server.tool(
+        description=(
+            "Mirror a folder from one of the person's own machines to friends' machines where they hold mirror space "
+            "(names as list_hosts shows them, e.g. ['sam/sam-mini']). Ask the person which folder (Documents or Desktop are good "
+            "defaults; not Photos) and which friends. Optionally a catcher (a friend's always-on machine, catcher space) -- or, "
+            "only if they have none, use_casper_catcher=true (Casper's own server, encrypted). preview=true first, show the plan; "
+            "then preview=false starts it, and the PERSON must confirm in a Casper dialog on their Mac or in Telegram -- you can't."
+        )
+    )
+    def mirror_folder(ctx: Context, source_host: str, path: str, mirrors: list[str], catcher: str = "", use_casper_catcher: bool = False, label: str = "", preview: bool = True) -> str:
+        return svc.mirror_folder(_caller(svc, ctx), source_host, path, mirrors, catcher, use_casper_catcher, label, preview)
+
+    @server.tool(description="How well each mirrored folder is protected right now: whether every change is on a mirror, which mirrors are up to date or asleep, and any recent changes not yet protected.")
+    def protection_status(ctx: Context) -> str:
+        return svc.protection_status(_caller(svc, ctx))
+
+    @server.tool(description="List earlier versions of files in a mirrored folder (by its name, e.g. 'Documents'), optionally filtered by part of a file name. Versions live on the mirrors, encrypted; their names are decrypted on the person's own Mac.")
+    def list_versions(ctx: Context, folder: str, name_contains: str = "") -> str:
+        return svc.list_versions(_caller(svc, ctx), folder, name_contains)
+
+    @server.tool(description="Bring back one earlier version (name and at exactly as list_versions shows). It's restored as a new copy under 'Casper Restores' -- nothing is overwritten.")
+    def restore_version(ctx: Context, folder: str, name: str, at: str) -> str:
+        return svc.restore_version(_caller(svc, ctx), folder, name, at)
+
+    @server.tool(description="Rebuild a whole mirrored folder onto another (e.g. a replacement) Mac of the person's, from the mirrors and catcher. That Mac needs the recovery kit imported first (`Casper setup restore`).")
+    def restore_folder(ctx: Context, folder: str, dest_host: str, dest_path: str = "") -> str:
+        return svc.restore_folder(_caller(svc, ctx), folder, dest_host, dest_path)
+
+    @server.tool(description="Stop mirroring a folder. Friends' copies are deleted after 7 days. Confirm with the person first.")
+    def stop_mirroring(ctx: Context, folder: str) -> str:
+        return svc.stop_mirroring(_caller(svc, ctx), folder)
 
     return server
 

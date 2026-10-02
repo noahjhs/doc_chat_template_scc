@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 func ShowFarewellDialog(_ func(format string, args ...any)) {}
@@ -77,4 +78,10 @@ func ConfirmWithDontAskAgain(message, _ string) (accepted bool, dontAskAgain boo
 	default:
 		return false, false
 	}
+}
+
+// Confirm isn't implemented on Windows yet (mirroring is macOS-only for the
+// alpha); it reports no answer, so consent falls back to Telegram.
+func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
+	return false, false
 }

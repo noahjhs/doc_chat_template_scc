@@ -149,7 +149,7 @@ def resolve_dest(user_id: int, dest_host: str) -> tuple[dict, dict]:
         raise BackupError(f"{dest_host!r} isn't a shared host -- use the owner/host name list_hosts shows (e.g. sam/sam-mini).")
     with get_db() as db:
         owner_id = trust.user_id_by_name(db, owner_name)
-        grants = [g for g in trust.grants_held(db, user_id) if g["owner_user_id"] == owner_id and g["host"] == label]
+        grants = [g for g in trust.grants_held(db, user_id, relation="backup_peer") if g["owner_user_id"] == owner_id and g["host"] == label]
     if owner_id is None or not grants:
         raise BackupError(f"You don't have backup space on {dest_host}.")
     grant = grants[0]

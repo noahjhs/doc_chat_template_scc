@@ -2178,20 +2178,35 @@ def _mcp_my_casper(user_id: int) -> str:
     if offerings:
         lines.append("You offer:")
         for o in offerings:
-            each = "you approve each backup" if o["write_tier"] == "ask" else "any backup within a friend's share is allowed"
-            lines.append(f"  - up to {o['max_quota_gb']:g} GB per friend on {o['host']} ({each}) [offering {o['id']}]")
+            if o["kind"] == "mirror_space":
+                lines.append(f"  - mirror space: up to {o['max_quota_gb']:g} GB per friend on {o['host']} [offering {o['id']}]")
+            elif o["kind"] == "catcher_space":
+                lines.append(f"  - catcher space on {o['host']} [offering {o['id']}]")
+            else:
+                each = "you approve each backup" if o["write_tier"] == "ask" else "any backup within a friend's share is allowed"
+                lines.append(f"  - backup space: up to {o['max_quota_gb']:g} GB per friend on {o['host']} ({each}) [offering {o['id']}]")
     if invites:
         lines.append("Open invites (single-use, not yet redeemed):")
         for i in invites:
             lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}, expires {i['expires_at'][:10]} [invite {i['id']}]")
+    kinds = {"backup_peer": "backup", "mirror_peer": "mirror", "catcher_peer": "catcher"}
     if given:
-        lines.append("Space you've given (they can store encrypted backups; they and you can't read each other's files):")
+        lines.append("Space you give friends (everything arrives encrypted; you can't read it):")
         for g in given:
-            lines.append(f"  - {g['grantee']}: {_gb(g['quota_bytes'])} on {g['host']}, using {_gb(stored_by_friend.get(g['grantee_user_id'], 0))} [grant {g['id']}]")
+            using = f", using {_gb(stored_by_friend.get(g['grantee_user_id'], 0))}" if g["relation"] == "backup_peer" else ""
+            lines.append(f"  - {kinds[g['relation']]} space for {g['grantee']}: {_gb(g['quota_bytes'])} on {g['host']}{using} [grant {g['id']}]")
     if held:
         lines.append("Space friends have given you:")
         for g in held:
-            lines.append(f"  - {_gb(g['quota_bytes'])} on {g['owner']}/{g['host']} [grant {g['id']}]")
+            lines.append(f"  - {kinds[g['relation']]} space: {_gb(g['quota_bytes'])} on {g['owner']}/{g['host']} [grant {g['id']}]")
+    with get_db() as db:
+        mirrored = db.execute(
+            "SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status IN ('active', 'awaiting_consent')", (user_id,)
+        ).fetchall()
+        if mirrored:
+            lines.append("Mirrored folders:")
+            for f in mirrored:
+                lines.append("  " + _status_text(db, f).replace("\n", "\n  "))
     if my_backups:
         lines.append("Your backups:")
         for b in my_backups:
@@ -2231,10 +2246,12 @@ def _mcp_add_friend(user_id: int, username: str) -> str:
     return f"Sent {username} a friend request. They'll be asked to accept."
 
 
-def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_backup: bool, preview: bool) -> str:
+def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_backup: bool, preview: bool, kind: str = "backup") -> str:
     host_id = _own_host_id(user_id, host)
     if host_id is None:
         return f"{host} isn't one of your paired machines (see list_hosts)."
+    if kind in ("mirror", "catcher"):
+        return _publish_mirror_offering(user_id, host, host_id, max_gb, kind, preview)
     each = (
         "you'll be asked to approve each backup before it's stored"
         if approve_each_backup
@@ -2250,6 +2267,30 @@ def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_b
     try:
         with get_db() as db:
             offering_id = trust.publish_offering(db, user_id, host_id, int(max_gb * trust.GB), "ask" if approve_each_backup else "allow")
+    except trust.TrustError as e:
+        return f"Can't: {e.message}"
+    return f"Done (offering {offering_id}). {plan}"
+
+
+def _publish_mirror_offering(user_id: int, host: str, host_id: int, max_gb: float, kind: str, preview: bool) -> str:
+    if kind == "mirror":
+        plan = (
+            f"Offer mirror space on {host}: friends you invite can each keep up to {max_gb:g} GB of folders mirrored here, "
+            "with 30 days of history. Everything arrives encrypted -- you can never read it, and they can't see anything of yours. "
+            f"Nothing is asked in return. {host} needs to be on and running Casper to receive changes; while it's asleep, friends' "
+            "changes wait or go to a catcher. You can withdraw this or end anyone's space at any time."
+        )
+    else:
+        plan = (
+            f"Offer catcher space on {host} (best on a machine that's always on): when a friend's mirrors are all asleep, their "
+            f"newest changes are held here, encrypted, until a mirror wakes up -- usually only megabytes, up to {max_gb:g} GB each. "
+            "Nothing is asked in return. You can withdraw this or end anyone's space at any time."
+        )
+    if preview:
+        return "PREVIEW (nothing changed yet): " + plan
+    try:
+        with get_db() as db:
+            offering_id = trust.publish_offering(db, user_id, host_id, int(max_gb * trust.GB), "allow", f"{kind}_space")
     except trust.TrustError as e:
         return f"Can't: {e.message}"
     return f"Done (offering {offering_id}). {plan}"
@@ -2279,8 +2320,12 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     except trust.TrustError as e:
         return f"Can't: {e.message}"
     url = f"{_public_base_url()}/agents.md"
+    gift = {
+        "mirror_space": f"room for {quota_gb:g} GB of your folders to be mirrored on my computer with Casper -- kept up to date as you work, with 30 days of history",
+        "catcher_space": "a catcher on my always-on computer with Casper -- it holds your newest changes while your mirrors are asleep",
+    }.get(offering["kind"], f"{quota_gb:g} GB of backup space for you on my computer with Casper")
     message = (
-        f"I've set aside {quota_gb:g} GB of backup space for you on my computer with Casper -- your files get encrypted "
+        f"I've set aside {gift} -- your files get encrypted "
         f"before they leave your machine, so I can't read them. To use it, tell your AI agent (e.g. Claude Code): "
         f"\"Set me up with Casper using {url} -- my invite code is {code}\". (From {me}; the code works once and expires in {trust.INVITE_TTL_DAYS} days.)"
     )
@@ -2297,9 +2342,13 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
     except trust.TrustError as e:
         return f"Can't use that invite: {e.message}"
     each = "they'll approve each backup before it's stored" if inv["write_tier"] == "ask" else "backups within your share are stored without waiting for them"
+    what = {
+        "mirror_space": f"{_gb(inv['quota_bytes'])} of mirror space on {owner}'s machine ({owner}/{label}) -- folders you choose are kept there continuously, with 30 days of history",
+        "catcher_space": f"catcher space on {owner}'s machine ({owner}/{label}) -- it holds your newest changes while your mirrors sleep",
+    }.get(inv["kind"], f"{_gb(inv['quota_bytes'])} of backup space on {owner}'s machine ({owner}/{label}); {each}")
     plan = (
-        f"Use {owner}'s invite: {'' if already else f'you and {owner} become friends on Casper, and '}you get {_gb(inv['quota_bytes'])} of backup space "
-        f"on {owner}'s machine ({owner}/{label}); {each}. Your files are encrypted on your own machine before they're sent, so {owner} can never read them. "
+        f"Use {owner}'s invite: {'' if already else f'you and {owner} become friends on Casper, and '}you get {what}. "
+        f"Your files are encrypted on your own machine before they're sent, so {owner} can never read them. "
         f"Either of you can end this at any time."
     )
     if preview:
@@ -2312,6 +2361,14 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
         return f"Can't use that invite: {e.message}"
     _refresh_daemon_grants(inv["owner_user_id"], inv["host_id"])
     notify(inv["owner_user_id"], f"{me} used your Casper invite: they now have {_gb(inv['quota_bytes'])} of backup space on {label}.")
+    if inv["kind"] == "mirror_space":
+        return (
+            f"Done. You and {owner} are friends, and you have {_gb(inv['quota_bytes'])} of mirror space on {owner}/{label}. "
+            f"Next: ask the person which folder to mirror there (mirror_folder). Casper defaults to generosity: suggest the person "
+            f"also offer {owner} mirror space in return (publish_offering + create_invite) -- {owner} is free to decline."
+        )
+    if inv["kind"] == "catcher_space":
+        return f"Done. You and {owner} are friends; {owner}/{label} can now catch your changes while your mirrors sleep (use it as the catcher in mirror_folder)."
     return f"Done. {plan} Back up to it as {owner}/{label}."
 
 
@@ -2374,7 +2431,8 @@ def _mcp_revoke(user_id: int, kind: str, id_or_name: str) -> str:
     _refresh_daemon_grants(g["owner_user_id"], g["host_id"])
     other = g["grantee_user_id"] if user_id == g["owner_user_id"] else g["owner_user_id"]
     notify(other, f"Backup space on {g['owner']}/{g['host']} was ended. Stored backups stay restorable for 7 days.")
-    return f"Ended {g['grantee']}'s backup space on {g['host']}. New backups stop now; what's stored stays restorable by its owner for 7 days, then it's deleted."
+    kind = {"backup_peer": "backup", "mirror_peer": "mirror", "catcher_peer": "catcher"}[g["relation"]]
+    return f"Ended {g['grantee']}'s {kind} space on {g['host']}. New changes stop now; what's stored stays restorable by its owner for 7 days, then it's deleted."
 
 
 def _mcp_backup_push(user_id: int, source_host: str, path: str, dest_host: str, preview: bool = False) -> str:
@@ -2499,3 +2557,336 @@ for _name, _fn in {
     "backup_push": _mcp_backup_push,
 }.items():
     setattr(_mcp_services, _name, _fn)
+
+
+# =============================================================================
+# Mirroring with history (docs/product/scenarios/mirroring.md). Syncthing
+# moves the data directly between peers; casper_service is discovery, the
+# desired state (from grants), consent, protection status and restores.
+# =============================================================================
+import mirroring  # noqa: E402
+
+
+def _attached_or_401(db, authorization: str) -> dict:
+    attached = _resolve_attached(db, authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    return attached
+
+
+@app.post("/hosts/mirror-device")
+def report_mirror_device(body: dict, authorization: str = Header(default="")):
+    with get_db() as db:
+        attached = _attached_or_401(db, authorization)
+        device_id = str(body.get("device_id", ""))
+        if not device_id or len(device_id) > 80:
+            raise HTTPException(status_code=400, detail="device_id is required.")
+        addresses = [str(a) for a in (body.get("addresses") or []) if isinstance(a, str) and len(a) < 120]
+        mirroring.report_device(db, attached["routing_key"], device_id, addresses)
+    return {"ok": True}
+
+
+@app.get("/hosts/mirror-config")
+def mirror_config(authorization: str = Header(default="")):
+    """This identity's desired mirroring state on this host -- computed
+    from grants on every call, so a revoked grant disappears at the
+    daemon's next reconcile."""
+    with get_db() as db:
+        attached = _attached_or_401(db, authorization)
+        return mirroring.desired_state(db, attached["user_id"], attached["host_id"])
+
+
+@app.post("/hosts/mirror-status")
+def report_mirror_status(body: dict, authorization: str = Header(default="")):
+    with get_db() as db:
+        attached = _attached_or_401(db, authorization)
+        nudges = mirroring.store_status(db, attached["user_id"], body.get("folders") or [])
+    for n in nudges:
+        st = n["status"]
+        notify(
+            attached["user_id"],
+            f"{st.get('unprotected_files')} recent change(s) in your {n['folder']['label']} aren't on any mirror yet -- "
+            "the computers mirroring it have been off for a while. Nothing to do if they'll be back soon; "
+            "otherwise, ask your agent about adding a mirror or a catcher.",
+        )
+    return {"ok": True}
+
+
+@app.post("/hosts/consent")
+def record_consent(body: dict, authorization: str = Header(default="")):
+    """The person's answer from Casper's native dialog on their own Mac --
+    the out-of-agent confirmation for their own consequential actions."""
+    with get_db() as db:
+        attached = _attached_or_401(db, authorization)
+        row = db.execute(
+            "SELECT * FROM pending_approvals WHERE id = ? AND user_id = ? AND kind = 'mirror_consent'",
+            (str(body.get("approval_id", "")), attached["user_id"]),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such pending confirmation.")
+    _resume_pending_approval(row, "allow" if body.get("approve") else "deny")
+    return {"ok": True}
+
+
+def _mirror_refresh(user_id: int, host_id: int):
+    config = _host_config(user_id, host_id)
+    if config is not None:
+        threading.Thread(target=lambda: backups.daemon_call(config, "mirror_refresh"), daemon=True).start()
+
+
+def _refresh_folder_parties(folder) -> None:
+    _mirror_refresh(folder["owner_user_id"], folder["owner_host_id"])
+    if folder["restore_host_id"]:
+        _mirror_refresh(folder["owner_user_id"], folder["restore_host_id"])
+    with get_db() as db:
+        targets = mirroring.peers_of(db, folder["id"])
+    for t in targets:
+        _mirror_refresh(t["peer_owner_user_id"], t["peer_host_id"])
+
+
+def _decide_mirror_consent(row, decision: str) -> str:
+    folder_id = json.loads(row["payload"])["folder_id"]
+    with get_db() as db:
+        f = mirroring.folder_row(db, folder_id)
+        if f is None or f["status"] != "awaiting_consent":
+            return "That's no longer waiting."
+        if decision != "allow":
+            db.execute("UPDATE mirror_folders SET status = 'declined', stopped_at = ? WHERE id = ?", (trust.now_iso(), folder_id))
+            return f"Didn't start mirroring {f['label']}."
+        db.execute("UPDATE mirror_folders SET status = 'active', activated_at = ? WHERE id = ?", (trust.now_iso(), folder_id))
+        f = mirroring.folder_row(db, folder_id)
+        me = trust.username(db, f["owner_user_id"])
+        targets = mirroring.peers_of(db, folder_id)
+        hosts = [trust.host_label(db, t["peer_owner_user_id"], t["peer_host_id"]) for t in targets]
+    _refresh_folder_parties(f)
+    for t in targets:
+        notify(t["peer_owner_user_id"], f"{me}'s {f['label']} is now mirrored on your Mac, encrypted -- you can't read it. Thanks for keeping a copy safe.")
+    where = ", ".join(hosts) or ("Casper's catcher" if f["use_casper_catcher"] else "no one yet")
+    return f"Mirroring {f['label']} to {where}. Changes reach them within seconds whenever both computers are on."
+
+
+_APPROVAL_HANDLERS["mirror_consent"] = _decide_mirror_consent
+
+
+def _folder_size(user_id: int, host_label: str, path: str) -> tuple[dict, int, str]:
+    configs = _own_configs(user_id)
+    if host_label not in configs:
+        raise mirroring.MirrorError(f"{host_label} isn't one of your connected machines.")
+    config = {**configs[host_label], "label": host_label}
+    r = backups.daemon_call(config, "mirror_folder_size", path=path)
+    if not r.get("success"):
+        raise mirroring.MirrorError(r.get("stderr") or "couldn't read that folder")
+    data = json.loads(r["stdout"])
+    return config, int(data["bytes"]), data["path"]
+
+
+def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list, catcher: str, use_casper_catcher: bool, label: str, preview: bool) -> str:
+    try:
+        config, size, abs_path = _folder_size(user_id, source_host, path)
+        with get_db() as db:
+            mirror_grants = mirroring.resolve_peer_grants(db, user_id, mirrors or [], "mirror_peer")
+            catcher_grant = mirroring.resolve_peer_grants(db, user_id, [catcher], "catcher_peer")[0] if catcher else None
+            for g in mirror_grants:
+                free = g["quota_bytes"] - mirroring.used_bytes(db, g["id"])
+                if size > free:
+                    raise mirroring.MirrorError(
+                        f"{os.path.basename(abs_path)} is {backups.human(size)}, but your space on {g['owner']}/{g['host']} has {backups.human(max(free, 0))} free."
+                    )
+            if not mirror_grants:
+                raise mirroring.MirrorError("Name at least one friend's machine to mirror to (list_hosts shows the machines you have mirror space on).")
+    except mirroring.MirrorError as e:
+        return f"Can't: {e.message}"
+    label = label or os.path.basename(abs_path.rstrip("/")) or "Folder"
+    if use_casper_catcher and catcher_grant:
+        use_casper_catcher = False
+    where = ", ".join(f"{g['owner']}/{g['host']}" for g in mirror_grants)
+    catch = (
+        f" While they're all asleep, new changes are caught by {catcher_grant['owner']}/{catcher_grant['host']}." if catcher_grant
+        else " While they're all asleep, new changes are caught by Casper's own server (encrypted; only until a friend can catch for you)." if use_casper_catcher
+        else " If they're all asleep at once, recent changes wait on this Mac until one wakes up."
+    )
+    plan = (
+        f"Mirror {label} ({backups.human(size)}) from {source_host} to {where}: every change is encrypted here and reaches them within "
+        f"seconds while both computers are on, with 30 days of history (every version for a week, then daily). They can never read it.{catch}"
+    )
+    if preview:
+        return "PREVIEW (nothing changed yet): " + plan
+    with get_db() as db:
+        folder_id = mirroring.create_folder(db, user_id, config["host_id"], abs_path, label, mirror_grants, catcher_grant, use_casper_catcher)
+    description = f"Start mirroring {label} ({backups.human(size)}) to {where}?"
+    approval_id = create_approval(user_id, user_id, "mirror_consent", description, {"folder_id": folder_id})
+    with get_db() as db:
+        db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
+    backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"{plan}\n\nStart mirroring?")
+    return (
+        f"Waiting for the person to confirm. A Casper dialog is open on {source_host} (it can also be answered in Telegram). "
+        "This confirmation can't come from you -- it's the person's own decision. Mirroring starts the moment they allow it."
+    )
+
+
+def _status_text(db, f) -> str:
+    st = mirroring.latest_status(db, f["id"]) or {}
+    names = {}
+    for t in mirroring.peers_of(db, f["id"]):
+        dev = mirroring._device_for_host(db, t["peer_host_id"])
+        if dev:
+            names[dev["device_id"]] = f"{trust.username(db, t['peer_owner_user_id'])}/{trust.host_label(db, t['peer_owner_user_id'], t['peer_host_id'])}"
+    cd = mirroring.catcher_device()
+    if cd:
+        names[cd["device_id"]] = "Casper's catcher"
+    if f["status"] == "awaiting_consent":
+        return f"{f['label']}: waiting for the person to confirm (Casper dialog or Telegram)."
+    if f["restore_host_id"] and st.get("restoring"):
+        state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
+        return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
+    if not st:
+        return f"{f['label']}: starting up (no report from {trust.host_label(db, f['owner_user_id'], f['owner_host_id'])} yet)."
+    lines = []
+    unprotected = st.get("unprotected_files", 0)
+    if unprotected:
+        import time as _t
+
+        age = int((_t.time() - st.get("unprotected_oldest_unix", _t.time())) / 60)
+        lines.append(f"{f['label']}: {unprotected} recent change(s) not on any mirror or catcher yet (oldest {age} min).")
+    elif st.get("at_risk_files"):
+        lines.append(f"{f['label']}: protected -- {st['at_risk_files']} recent change(s) are held by the catcher until a mirror wakes up.")
+    else:
+        lines.append(f"{f['label']}: protected -- every change is on at least one mirror.")
+    for p in st.get("peers", []):
+        who = names.get(p["device_id"], p["device_id"][:7])
+        state = "up to date" if p.get("completion") == 100 and p.get("connected") else ("connected, catching up" if p.get("connected") else f"offline (last seen {(p.get('last_seen') or '?')[:16]})")
+        lines.append(f"  - {p['role']}: {who}: {state}")
+    lines.append(f"  ({st.get('local_files', 0)} files, {backups.human(st.get('local_bytes', 0))}; as of {st.get('reported_at', '')[:19]})")
+    return "\n".join(lines)
+
+
+def _mcp_protection_status(user_id: int) -> str:
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status IN ('active', 'awaiting_consent') ORDER BY created_at", (user_id,)
+        ).fetchall()
+        if not rows:
+            return "Nothing is mirrored yet."
+        return "\n".join(_status_text(db, f) for f in rows)
+
+
+def _version_listing(user_id: int, folder_name: str) -> tuple:
+    with get_db() as db:
+        f = mirroring.find_owned(db, user_id, folder_name)
+        targets = [t for t in mirroring.peers_of(db, f["id"]) if t["role"] == "mirror"]
+    owner = _host_config(user_id, f["owner_host_id"])
+    if owner is None:
+        raise mirroring.MirrorError("Your Mac that owns this folder is offline; versions are decrypted there.")
+    for t in targets:
+        peer = _host_config(t["peer_owner_user_id"], t["peer_host_id"])
+        if peer is None:
+            continue
+        r = backups.daemon_call(peer, "mirror_version_trailers", folder_id=f["id"])
+        if not r.get("success"):
+            continue
+        items = json.loads(r["stdout"])["versions"]
+        d = backups.daemon_call(owner, "mirror_decrypt_trailers", folder_id=f["id"], items=items)
+        if not d.get("success"):
+            raise mirroring.MirrorError(d.get("stderr") or "couldn't read the version list")
+        return f, owner, peer, json.loads(d["stdout"])["versions"]
+    raise mirroring.MirrorError("None of the computers mirroring this folder is online right now; versions live on them.")
+
+
+def _mcp_list_versions(user_id: int, folder: str, name_contains: str) -> str:
+    try:
+        f, _, _, versions = _version_listing(user_id, folder)
+    except mirroring.MirrorError as e:
+        return f"Can't: {e.message}"
+    versions = [v for v in versions if name_contains.lower() in v["name"].lower()]
+    if not versions:
+        return "No earlier versions match." if name_contains else "No earlier versions yet (they appear when files change or are deleted)."
+    lines = [f"Earlier versions in {f['label']} (newest first; restore with restore_version(folder, name, at)):"]
+    for v in sorted(versions, key=lambda v: v["at"], reverse=True)[:100]:
+        lines.append(f"  - {v['name']}  at={v['at']}  ({backups.human(v['size'])}{', deleted afterwards' if v.get('deleted') else ''})")
+    return "\n".join(lines)
+
+
+def _mcp_restore_version(user_id: int, folder: str, name: str, at: str) -> str:
+    try:
+        f, owner, peer, versions = _version_listing(user_id, folder)
+    except mirroring.MirrorError as e:
+        return f"Can't: {e.message}"
+    v = next((v for v in versions if v["name"] == name and (v["at"] == at or at in ("", "latest"))), None)
+    if v is None:
+        return f"No version of {name!r} at {at!r} (use list_versions)."
+    offset, total = 0, None
+    while total is None or offset < total:
+        r = backups.daemon_call(peer, "mirror_read_version", folder_id=f["id"], encrypted_path=v["encrypted_path"], at=v["at"], offset=offset)
+        if not r.get("success"):
+            return f"Can't fetch that version: {r.get('stderr')}"
+        data = json.loads(r["stdout"])
+        total = int(data["total"])
+        w = backups.daemon_call(owner, "mirror_restore_version_chunk", folder_id=f["id"], encrypted_path=v["encrypted_path"], offset=offset, content=data["content"])
+        if not w.get("success"):
+            return f"Can't restore: {w.get('stderr')}"
+        chunk = len(base64.b64decode(data["content"]))
+        if chunk == 0:
+            break
+        offset += chunk
+    done = backups.daemon_call(owner, "mirror_restore_version_finish", folder_id=f["id"], encrypted_path=v["encrypted_path"])
+    if not done.get("success"):
+        return f"Can't restore: {done.get('stderr')}"
+    return f"Restored {name} as it was at {v['at']} to {json.loads(done['stdout'])['restored_to']} -- a new copy; nothing was overwritten."
+
+
+def _mcp_restore_folder(user_id: int, folder: str, dest_host: str, dest_path: str) -> str:
+    """A replacement (or second) Mac rebuilds a mirrored folder from the
+    mirrors, plus the catcher's gap. The Mac needs the folder's password
+    first: `Casper setup restore` imports it from the recovery kit."""
+    with get_db() as db:
+        try:
+            f = mirroring.find_owned(db, user_id, folder)
+        except mirroring.MirrorError as e:
+            return f"Can't: {e.message}"
+    configs = _own_configs(user_id)
+    if dest_host not in configs:
+        return f"Can't: {dest_host} isn't one of your connected machines."
+    host_id = configs[dest_host]["host_id"]
+    if host_id == f["owner_host_id"]:
+        return "That's the Mac the folder already lives on; use restore_version for individual files."
+    path = dest_path or f"~/Casper Restores/{f['label']}"
+    home = configs[dest_host].get("cwd") or ""
+    abs_path = path.replace("~", home, 1) if path.startswith("~") and home else path
+    with get_db() as db:
+        db.execute("UPDATE mirror_folders SET restore_host_id = ?, restore_path = ? WHERE id = ?", (host_id, abs_path, f["id"]))
+        f = mirroring.folder_row(db, f["id"])
+    _refresh_folder_parties(f)
+    return (
+        f"Restoring {f['label']} onto {dest_host} at {abs_path} from its mirrors"
+        + (" and catcher" if f["use_casper_catcher"] or _has_catcher(f["id"]) else "")
+        + ". This needs the folder's password on that Mac (from the recovery kit: `Casper setup restore`). Check progress with protection_status."
+    )
+
+
+def _has_catcher(folder_id: str) -> bool:
+    with get_db() as db:
+        return any(t["role"] == "catcher" for t in mirroring.peers_of(db, folder_id))
+
+
+def _mcp_stop_mirroring(user_id: int, folder: str) -> str:
+    with get_db() as db:
+        try:
+            f = mirroring.find_owned(db, user_id, folder)
+        except mirroring.MirrorError as e:
+            return f"Can't: {e.message}"
+        db.execute("UPDATE mirror_folders SET status = 'stopped', stopped_at = ? WHERE id = ?", (trust.now_iso(), f["id"]))
+    _refresh_folder_parties(f)
+    return f"Stopped mirroring {f['label']}. The copies on your friends' computers are deleted after 7 days (until then they can still be restored)."
+
+
+for _name, _fn in {
+    "mirror_folder": _mcp_mirror_folder,
+    "protection_status": _mcp_protection_status,
+    "list_versions": _mcp_list_versions,
+    "restore_version": _mcp_restore_version,
+    "restore_folder": _mcp_restore_folder,
+    "stop_mirroring": _mcp_stop_mirroring,
+}.items():
+    setattr(_mcp_services, _name, _fn)
+
+mirroring.start_catcher_loop()

@@ -323,6 +323,57 @@ CREATE TABLE IF NOT EXISTS backups (
 );
 CREATE INDEX IF NOT EXISTS idx_backups_owner ON backups(owner_user_id);
 
+-- Mirroring (docs/product/scenarios/mirroring.md). casper_service is the
+-- discovery service: each Mac's Syncthing device ID and addresses, keyed by
+-- the machine's routing_key (one Syncthing per machine, shared by every
+-- account paired there).
+CREATE TABLE IF NOT EXISTS mirror_devices (
+    routing_key TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    addresses TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
+);
+
+-- A folder a person mirrors. status: awaiting_consent -> active (the
+-- person confirmed outside their agent) | declined; stopped when they end
+-- it. restore_host_id/restore_path: a replacement Mac rebuilding it.
+CREATE TABLE IF NOT EXISTS mirror_folders (
+    id TEXT PRIMARY KEY,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    owner_host_id INTEGER NOT NULL REFERENCES hosts(id),
+    path TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL,
+    approval_id TEXT,
+    use_casper_catcher INTEGER NOT NULL DEFAULT 0,
+    restore_host_id INTEGER REFERENCES hosts(id),
+    restore_path TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    activated_at TEXT,
+    stopped_at TEXT
+);
+
+-- Where a folder is mirrored: a friend's mirror, or a friend's catcher,
+-- each under a grant on that friend's host.
+CREATE TABLE IF NOT EXISTS mirror_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_id TEXT NOT NULL REFERENCES mirror_folders(id),
+    role TEXT NOT NULL,                 -- 'mirror' | 'catcher'
+    grant_id INTEGER NOT NULL REFERENCES relation_tuples(id),
+    peer_owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    peer_host_id INTEGER NOT NULL REFERENCES hosts(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    removed_at TEXT
+);
+
+-- The owner's daemon's latest protection report per folder.
+CREATE TABLE IF NOT EXISTS mirror_status (
+    folder_id TEXT PRIMARY KEY REFERENCES mirror_folders(id),
+    status TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    nudged_at TEXT
+);
+
 -- Single-use invites to an offering (docs/product/scenarios/
 -- agent-onboarding.md, "Why invite codes"): the inviter consents by creating
 -- one for a specific amount; redeeming it makes the redeemer their friend

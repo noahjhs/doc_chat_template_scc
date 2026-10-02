@@ -142,6 +142,7 @@ func main() {
 	srv := server.New(logger)
 
 	state := newDaemonState(srv, homeRoot, relayDomain, authDomain, routingKey, port, logf)
+	state.startMirroring()
 
 	go func() {
 		if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
@@ -309,6 +310,7 @@ func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, 
 // restartApp can run the exact same steps synchronously itself (see its own
 // doc comment for why it can't just go through systray.Quit()/onExit).
 func shutdownDaemon(state *daemonState, srv *server.Server) {
+	state.stopMirroring()
 	state.stopTunnel()
 	srv.Shutdown()
 }

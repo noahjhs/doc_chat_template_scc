@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"casper-agent/internal/backup"
 	"casper-agent/internal/config"
+	"casper-agent/internal/mirrord"
 )
 
 // --- status ---------------------------------------------------------------------
@@ -336,21 +338,37 @@ func (c *cli) notifications() error {
 
 // --- recovery kit ---------------------------------------------------------------------------
 
+// recoveryKit is what a kit holds (version 2): this account's backup keys
+// and every mirrored folder's password, so a replacement Mac can read the
+// mirrors. Locked with a passphrase the person types into a macOS dialog.
+type recoveryKit struct {
+	Version         int               `json:"version"`
+	Account         string            `json:"account"`
+	AuthDomain      string            `json:"auth_domain"`
+	BackupKeys      []byte            `json:"backup_keys,omitempty"`
+	MirrorPasswords map[string]string `json:"mirror_passwords"` // folder ID -> password
+}
+
 func (c *cli) recoveryKit() error {
 	acct, err := c.currentAccount()
 	if err != nil {
 		return err
 	}
-	data, err := backup.MacKeychain{}.Load(c.backupKeyAccount(acct.Username))
-	if err != nil {
-		return err
+	kit := recoveryKit{Version: 2, Account: acct.Username, AuthDomain: c.authDomain, MirrorPasswords: map[string]string{}}
+	if data, _ := (backup.MacKeychain{}).Load(c.backupKeyAccount(acct.Username)); data != nil {
+		kit.BackupKeys = data
 	}
-	if data == nil {
-		return errors.New("this Mac has no backup keys yet -- Casper creates them when the Mac is paired (`setup pair`), then try again")
+	prefix := mirrord.Account(c.authDomain, acct.Username, "")
+	accounts, _ := mirrord.ListAccounts()
+	for _, a := range accounts {
+		if strings.HasPrefix(a, prefix) {
+			if pw, err := (mirrord.KeychainPasswords{}).Get(a); err == nil && pw != "" {
+				kit.MirrorPasswords[strings.TrimPrefix(a, prefix)] = pw
+			}
+		}
 	}
-	keys, _, err := backup.LoadOrCreateKeys(backup.MacKeychain{}, c.backupKeyAccount(acct.Username))
-	if err != nil {
-		return err
+	if kit.BackupKeys == nil && len(kit.MirrorPasswords) == 0 {
+		return errors.New("this Mac has no keys or mirrored folders yet -- make the kit after setting up mirroring (or after pairing, for backups)")
 	}
 	pass, err := askHidden("Choose a passphrase for your Casper recovery kit (12+ characters). Keep it somewhere other than this Mac.")
 	if err != nil {
@@ -363,23 +381,77 @@ func (c *cli) recoveryKit() error {
 	if pass != again {
 		return errors.New("the two passphrases didn't match -- run `setup recovery-kit` again")
 	}
-	armored, err := backup.ExportKeys(keys, pass)
+	data, _ := json.Marshal(kit)
+	armored, err := backup.ExportSecret(data, pass)
 	if err != nil {
 		return err
 	}
-	kit := fmt.Sprintf(`Casper recovery kit -- %s (made on %s, %s)
+	text := fmt.Sprintf(`Casper recovery kit -- %s (made on %s, %s)
 
-This file holds the keys that decrypt the backups this Mac makes, locked with
-the passphrase you chose. If this Mac is lost, these keys plus that passphrase
-are the only way to restore those backups. Keep a copy of this file, and the
+This file holds what's needed to get your data back if this Mac is lost:
+the passwords of the %d folder(s) you mirror to friends, and your backup keys,
+all locked with the passphrase you chose. With this file and that passphrase,
+a new Mac can rebuild your mirrored folders from your friends' computers
+(`+"`Casper setup restore --kit <this file>`"+`). Keep a copy of this file, and the
 passphrase, somewhere other than this Mac (a password manager is ideal).
+Make a new kit whenever you start mirroring another folder.
 
-%s`, acct.Username, hostname(), time.Now().Format("2 Jan 2006"), armored)
+%s`, acct.Username, hostname(), time.Now().Format("2 Jan 2006"), len(kit.MirrorPasswords), armored)
 	path := recoveryKitPath(acct.Username)
-	if err := os.WriteFile(path, []byte(kit), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		return err
 	}
-	c.emit("Saved the recovery kit to "+path+". Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.",
-		map[string]any{"ok": true, "path": path})
+	c.emit(fmt.Sprintf("Saved the recovery kit (%d mirrored folder(s)) to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.", len(kit.MirrorPasswords), path),
+		map[string]any{"ok": true, "path": path, "mirrored_folders": len(kit.MirrorPasswords)})
+	return nil
+}
+
+// restore imports a recovery kit on a (replacement) Mac: the folder
+// passwords go into this Mac's Keychain, so it can rebuild mirrored folders
+// from the mirrors (the agent then calls restore_folder).
+func (c *cli) restore(kitPath string) error {
+	if kitPath == "" {
+		return errors.New("--kit <path to the recovery kit file> is required")
+	}
+	acct, err := c.currentAccount()
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(kitPath)
+	if err != nil {
+		return err
+	}
+	i := strings.Index(string(raw), "-----BEGIN AGE ENCRYPTED FILE-----")
+	if i < 0 {
+		return errors.New("that file isn't a Casper recovery kit")
+	}
+	pass, err := askHidden("Passphrase for your Casper recovery kit:")
+	if err != nil {
+		return err
+	}
+	data, err := backup.ImportSecret(string(raw[i:]), pass)
+	if err != nil {
+		return errors.New("couldn't open the kit -- wrong passphrase?")
+	}
+	var kit recoveryKit
+	if json.Unmarshal(data, &kit) != nil || kit.Version != 2 {
+		// A version-1 kit holds only backup keys.
+		kit = recoveryKit{BackupKeys: data, Account: acct.Username}
+	}
+	if kit.Account != "" && kit.Account != acct.Username {
+		return fmt.Errorf("this kit is for %s, but this Mac is signed in as %s", kit.Account, acct.Username)
+	}
+	for folderID, pw := range kit.MirrorPasswords {
+		if err := (mirrord.KeychainPasswords{}).Set(mirrord.Account(c.authDomain, acct.Username, folderID), pw); err != nil {
+			return err
+		}
+	}
+	if kit.BackupKeys != nil {
+		if existing, _ := (backup.MacKeychain{}).Load(c.backupKeyAccount(acct.Username)); existing == nil {
+			_, _ = (backup.MacKeychain{}).Save(c.backupKeyAccount(acct.Username), kit.BackupKeys)
+		}
+	}
+	c.emit(fmt.Sprintf("Imported the recovery kit: %d mirrored folder(s) can now be rebuilt on this Mac (ask the agent to restore_folder).", len(kit.MirrorPasswords)),
+		map[string]any{"ok": true, "mirrored_folders": len(kit.MirrorPasswords)})
 	return nil
 }

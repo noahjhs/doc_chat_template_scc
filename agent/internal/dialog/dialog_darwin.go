@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 //go:embed assets/ghost.png
@@ -156,4 +157,26 @@ function run() {
 		return false, false
 	}
 	return result[0] == '1', result[1] == '1'
+}
+
+// Confirm asks the person a yes/no question in a native dialog and reports
+// their answer; answered is false if they didn't respond within the time
+// limit. Used for consent that must come from the person, not their agent
+// (docs/product/scenarios/mirroring.md, "Setup").
+func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
+	script := fmt.Sprintf(`set r to display dialog %q with title "Casper" buttons {%q, %q} default button %q cancel button %q giving up after %d
+if gave up of r then return "timeout"
+return button returned of r`, message, noLabel, yesLabel, yesLabel, noLabel, int(within.Seconds()))
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return false, true // the cancel button exits non-zero: an explicit "no"
+	}
+	switch strings.TrimSpace(string(out)) {
+	case yesLabel:
+		return true, true
+	case "timeout":
+		return false, false
+	default:
+		return false, true
+	}
 }

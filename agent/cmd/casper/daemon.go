@@ -12,6 +12,7 @@ import (
 	"casper-agent/internal/backup"
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
+	"casper-agent/internal/mirrord"
 	"casper-agent/internal/server"
 	"casper-agent/internal/tunnel"
 
@@ -52,6 +53,7 @@ type daemonState struct {
 	tun        *tunnel.Tunnel
 	enabled    bool
 	identities map[string]*pairedIdentity // keyed by username
+	mirror     *mirrord.Service             // nil if mirroring is off (see mirroring.go)
 
 	// Set once onReady runs; nil until then. A casper:// pairing event can
 	// arrive before the menu exists (confirmed via a cold-launch spike: the
@@ -162,6 +164,14 @@ func (d *daemonState) addOrReplaceIdentity(username, deviceToken, commandKey str
 	})
 	if old == nil {
 		d.setUpBackups(username, handler)
+		d.mu.Lock()
+		if d.mirror != nil {
+			handler.SetMirrorOps(d.mirror.Ops(username))
+		}
+		d.mu.Unlock()
+	}
+	if d.mirror != nil {
+		d.mirror.Refresh()
 	}
 
 	if old != nil && old.commandKey != commandKey {

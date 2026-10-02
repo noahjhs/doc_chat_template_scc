@@ -52,6 +52,7 @@ func Main(args []string) int {
 	fs.StringVar(&c.account, "account", "", "which Casper account (when this Mac has more than one)")
 	username := fs.String("username", "", "username")
 	client := fs.String("client", "claude-code", "which agent to connect")
+	kitPath := fs.String("kit", "", "recovery kit file (for restore)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -72,6 +73,8 @@ func Main(args []string) int {
 		run = c.notifications
 	case "recovery-kit":
 		run = c.recoveryKit
+	case "restore":
+		run = func() error { return c.restore(*kitPath) }
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %q.\n\n%s", cmd, usage)
 		return 2
@@ -92,7 +95,8 @@ Every command is safe to re-run.
   pair                          connect this Mac to the account
   agent [--client claude-code]  connect your AI agent to Casper (then restart the agent)
   notifications                 link Telegram for nudges and approvals (optional)
-  recovery-kit                  save this Mac's backup keys, protected by a passphrase you type
+  recovery-kit                  save what's needed to recover (folder passwords, keys), locked by a passphrase you type
+  restore --kit FILE            on a new Mac: import a recovery kit, so mirrored folders can be rebuilt here
 
 Flags: --json (machine-readable), --account U (if this Mac has several accounts).
 `
@@ -239,4 +243,3 @@ func recoveryKitPath(username string) string {
 // backupKeyAccount mirrors cmd/casper/daemon.go's setUpBackups: the daemon
 // files each identity's backup keys under "<auth domain>/<username>".
 func (c *cli) backupKeyAccount(username string) string { return c.authDomain + "/" + username }
-

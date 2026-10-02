@@ -123,14 +123,25 @@ func LoadOrCreateKeys(ks KeyStore, account string) (keys *Keys, storage string, 
 // with this text AND the passphrase can decrypt every backup this identity
 // made, so it's only ever returned to the owner's own session.
 func ExportKeys(k *Keys, passphrase string) (string, error) {
+	data, err := k.marshal()
+	if err != nil {
+		return "", err
+	}
+	return ExportSecret(data, passphrase)
+}
+
+// MarshalKeys is the stored form of keys, for embedding in a recovery kit.
+func MarshalKeys(k *Keys) ([]byte, error) { return k.marshal() }
+
+// UnmarshalKeys reverses MarshalKeys.
+func UnmarshalKeys(data []byte) (*Keys, error) { return unmarshalKeys(data) }
+
+// ExportSecret encrypts any secret to a passphrase (age scrypt), armored.
+func ExportSecret(data []byte, passphrase string) (string, error) {
 	if len(passphrase) < 12 {
 		return "", errors.New("passphrase must be at least 12 characters")
 	}
 	r, err := age.NewScryptRecipient(passphrase)
-	if err != nil {
-		return "", err
-	}
-	data, err := k.marshal()
 	if err != nil {
 		return "", err
 	}
@@ -154,19 +165,24 @@ func ExportKeys(k *Keys, passphrase string) (string, error) {
 
 // ImportKeys reverses ExportKeys.
 func ImportKeys(armored, passphrase string) (*Keys, error) {
+	data, err := ImportSecret(armored, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	return unmarshalKeys(data)
+}
+
+// ImportSecret reverses ExportSecret.
+func ImportSecret(armored, passphrase string) ([]byte, error) {
 	id, err := age.NewScryptIdentity(passphrase)
 	if err != nil {
 		return nil, err
 	}
 	r, err := age.Decrypt(armor.NewReader(bytes.NewReader([]byte(armored))), id)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't decrypt the exported keys (wrong passphrase?): %w", err)
+		return nil, fmt.Errorf("couldn't decrypt (wrong passphrase?): %w", err)
 	}
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	return unmarshalKeys(data)
+	return io.ReadAll(r)
 }
 
 // MemoryKeyStore is an in-memory KeyStore for tests.
