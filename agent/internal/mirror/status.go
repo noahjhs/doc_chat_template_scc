@@ -34,6 +34,10 @@ type FolderStatus struct {
 	UnprotectedOldest int64       `json:"unprotected_oldest_unix"`
 	Peers             []PeerState `json:"peers"`
 	Error             string      `json:"error,omitempty"`
+	// UnprotectedNames lists (up to 50) unprotected files by name. Never
+	// reported to casper_service: it's only sent, live, to the person's own
+	// agent when they ask (mirror_unprotected_files).
+	UnprotectedNames []string `json:"-"`
 }
 
 // needed returns the files (not deletions) device still needs in folder.
@@ -157,6 +161,9 @@ func (m *Manager) OwnedStatus(f OwnedFolder) (FolderStatus, []string) {
 			continue
 		}
 		st.UnprotectedFiles++
+		if len(st.UnprotectedNames) < 50 {
+			st.UnprotectedNames = append(st.UnprotectedNames, rel)
+		}
 		if info, err := os.Stat(filepath.Join(f.Path, rel)); err == nil {
 			if t := info.ModTime().Unix(); st.UnprotectedOldest == 0 || t < st.UnprotectedOldest {
 				st.UnprotectedOldest = t

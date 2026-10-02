@@ -34,7 +34,9 @@ this version; they're too large and change constantly. Check the size
 (`du -sh ~/Documents`); it has to fit the friend's space.
 
 **A catcher** (optional, but valuable): if the person also has catcher
-space from a friend with an always-on machine, include it. If they have no
+space from a friend with an always-on machine, include it. It must be a
+**different machine from every mirror**: a catcher only helps while the
+mirrors are asleep. Casper refuses a catcher on a mirror's own machine. If they have no
 catcher at all, you may offer Casper's own:
 
 > When your friend's computer is asleep, your newest changes would wait

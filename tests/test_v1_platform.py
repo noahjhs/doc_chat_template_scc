@@ -517,3 +517,26 @@ def test_app_download(app_env, tmp_path, monkeypatch):
         assert r.status_code == 200 and r.content == b"PK zip"
         assert r.headers["cache-control"] == "no-store"
     assert client.get("/agents.md").headers["cache-control"] == "no-store"
+
+
+# --- Mirroring: validation ----------------------------------------------------------------
+def test_catcher_on_a_mirrors_machine_is_refused(app_env):
+    main, client = app_env
+
+    def riley_daemon(body):
+        if body["action"] == "mirror_folder_size":
+            return _ok(path="/Users/riley/Documents", bytes=1000)
+        return _ok()
+
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd, FakeDaemon(respond_with=riley_daemon) as rd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _pair(client, riley, "rk-laptop", "riley-laptop", rd.url)
+        for kind in ("mirror", "catcher"):
+            oid = re.search(r"offering (\d+)", _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=5, kind=kind, preview=False)).group(1)
+            code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", quota_gb=1, offering_id=int(oid), preview=False)).group(0)
+            assert "Done" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        out = _mcp(client, riley_agent, "mirror_folder", source_host="riley-laptop", path="Documents",
+                   mirrors=["sam/sam-mini"], catcher="sam/sam-mini", preview=True)
+        assert "already one of the mirrors" in out
+        ok = _mcp(client, riley_agent, "mirror_folder", source_host="riley-laptop", path="Documents", mirrors=["sam/sam-mini"], preview=True)
+        assert ok.startswith("PREVIEW") and "wait on this Mac" in ok

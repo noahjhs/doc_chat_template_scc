@@ -19,6 +19,7 @@ type MirrorOps interface {
 	DecryptTrailers(folderID string, items json.RawMessage) ([]map[string]any, error)
 	RestoreVersionChunk(folderID, encryptedPath string, offset int64, data []byte) error
 	RestoreVersionFinish(folderID, encryptedPath string, restoresRoot string) (string, error)
+	UnprotectedFiles(folderID string) ([]string, error)
 }
 
 func (h *Handler) SetMirrorOps(m MirrorOps) {
@@ -92,6 +93,9 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 			return nil, &ActionError{Detail: "invalid base64 content"}
 		}
 		return map[string]any{}, m.RestoreVersionChunk(req.FolderID, req.EncryptedPath, req.Offset, data)
+	case "mirror_unprotected_files":
+		names, err := m.UnprotectedFiles(req.FolderID)
+		return map[string]any{"files": names}, err
 	case "mirror_restore_version_finish":
 		path, err := m.RestoreVersionFinish(req.FolderID, req.EncryptedPath, h.HomeRoot())
 		return map[string]any{"restored_to": path}, err

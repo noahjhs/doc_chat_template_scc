@@ -135,7 +135,7 @@ func TestMirrorLifecycle(t *testing.T) {
 	os.WriteFile(filepath.Join(src, "new-idea.txt"), []byte("written while the mirror slept"), 0o644)
 	waitFor(t, "change seen as unprotected", 30*time.Second, func() bool {
 		st, _ := owner.m.OwnedStatus(ownerFolder)
-		return st.UnprotectedFiles == 1
+		return st.UnprotectedFiles == 1 && len(st.UnprotectedNames) == 1 && st.UnprotectedNames[0] == "new-idea.txt"
 	})
 
 	// A catcher picks up only the gap.

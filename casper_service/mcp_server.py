@@ -86,8 +86,34 @@ def _caller(svc: Services, ctx: Context) -> int:
     return agent["user_id"]
 
 
+def _logged(fn):
+    """Print a tool's traceback to the service log before the MCP SDK turns
+    it into a bare 'Error executing tool' for the agent."""
+    import functools
+    import traceback
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except _Unauthorized:
+            raise
+        except Exception:
+            traceback.print_exc()
+            raise
+
+    return wrapper
+
+
 def build(svc: Services) -> MCPServer:
     server = MCPServer(name="casper", instructions=INSTRUCTIONS)
+    _tool = server.tool
+
+    def logged_tool(*a, **k):
+        register = _tool(*a, **k)
+        return lambda fn: register(_logged(fn))
+
+    server.tool = logged_tool
 
     @server.tool(description="List the hosts you can use: your own, and ones friends have shared with you (with your role and any quota).")
     def list_hosts(ctx: Context) -> list[dict[str, Any]]:

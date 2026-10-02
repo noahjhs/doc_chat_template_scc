@@ -30,14 +30,21 @@ func sessionFilePath() (string, error) {
 	return filepath.Join(dir, "session.json"), nil
 }
 
-// LoadSessions tolerates a missing or corrupt file (returns nil, nil in
-// either case) -- mirrors the old single-session LoadSession's broad
-// tolerance. Also tolerates the OLD single-object shape this file used to
-// have before multi-account pairing (before this, a fresh install's
-// session.json was never anything but a single Session; this makes any
-// such file left over from an earlier build carry over as one identity
-// rather than getting silently dropped as "corrupt").
-func LoadSessions() ([]Session, error) {
+// sessionStore persists the raw session list. On macOS that's the login
+// Keychain (session_keychain_darwin.go): the device token and command key
+// it holds are exactly what a local process (say, an agent with a shell)
+// would need to impersonate this daemon to casper_service -- for example to
+// forge the person's own consent (docs/user-flows/mirroring.md, Known
+// issues) -- so they don't belong in a plain file. Tests swap in the file
+// store.
+type sessionStore interface {
+	read() ([]byte, error) // nil if nothing saved
+	write([]byte) error
+}
+
+type fileSessionStore struct{}
+
+func (fileSessionStore) read() ([]byte, error) {
 	path, err := sessionFilePath()
 	if err != nil {
 		return nil, err
@@ -45,6 +52,33 @@ func LoadSessions() ([]Session, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil //nolint:nilerr // missing file is a normal "no saved sessions" case
+	}
+	return data, nil
+}
+
+func (fileSessionStore) write(data []byte) error {
+	path, err := sessionFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	_ = os.Chmod(path, 0o600)
+	return nil
+}
+
+var sessionBackend sessionStore = defaultSessionStore()
+
+// LoadSessions tolerates missing or corrupt data (returns nil, nil in
+// either case), and the old single-object shape from before multi-account
+// pairing. On first run after an upgrade it moves a leftover session.json
+// into the Keychain and deletes the file.
+func LoadSessions() ([]Session, error) {
+	migrateSessionFile()
+	data, err := sessionBackend.read()
+	if err != nil || data == nil {
+		return nil, err
 	}
 	var sessions []Session
 	if err := json.Unmarshal(data, &sessions); err == nil {
@@ -54,7 +88,23 @@ func LoadSessions() ([]Session, error) {
 	if err := json.Unmarshal(data, &single); err == nil {
 		return validSessions([]Session{single}), nil
 	}
-	return nil, nil //nolint:nilerr // corrupt file is treated the same as no sessions
+	return nil, nil //nolint:nilerr // corrupt data is treated the same as no sessions
+}
+
+func migrateSessionFile() {
+	if _, isFile := sessionBackend.(fileSessionStore); isFile {
+		return
+	}
+	data, _ := fileSessionStore{}.read()
+	if data == nil {
+		return
+	}
+	if err := sessionBackend.write(data); err != nil {
+		return // keep the file; try again next launch
+	}
+	if path, err := sessionFilePath(); err == nil {
+		_ = os.Remove(path)
+	}
 }
 
 func validSessions(sessions []Session) []Session {
@@ -67,13 +117,9 @@ func validSessions(sessions []Session) []Session {
 	return out
 }
 
-// SaveSessions replaces the whole file with exactly these sessions --
+// SaveSessions replaces the saved set with exactly these sessions --
 // callers (daemon.go) always pass the complete current set, never a delta.
 func SaveSessions(sessions []Session) error {
-	path, err := sessionFilePath()
-	if err != nil {
-		return err
-	}
 	if sessions == nil {
 		sessions = []Session{}
 	}
@@ -81,14 +127,7 @@ func SaveSessions(sessions []Session) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return err
-	}
-	// Best-effort -- WriteFile's mode is already 0600, but Chmod again
-	// covers platforms/filesystems where WriteFile's mode isn't honored
-	// exactly (mirrors the Python version's separate os.chmod call).
-	_ = os.Chmod(path, 0o600)
-	return nil
+	return sessionBackend.write(data)
 }
 
 type VerifyResult int

@@ -143,3 +143,10 @@ func TestLoadSessions_TreatsCorruptFileAsEmpty(t *testing.T) {
 		t.Fatalf("expected a corrupt file to load as empty, got sessions=%v err=%v", sessions, err)
 	}
 }
+
+// Tests never touch the real Keychain: sessions go to a file in the test's
+// own config dir.
+func TestMain(m *testing.M) {
+	sessionBackend = fileSessionStore{}
+	os.Exit(m.Run())
+}

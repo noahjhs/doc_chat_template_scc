@@ -389,3 +389,12 @@ func (o *ops) RestoreVersionFinish(folderID, encPath, homeRoot string) (string, 
 	dest := filepath.Join(homeRoot, "Casper Restores", fmt.Sprintf("%s (versions, %s)", f.Label, time.Now().Format("2006-01-02 15.04.05")))
 	return mirror.DecryptVersion(o.s.Bin, encPath, data, f.ID, f.Password, dest)
 }
+
+func (o *ops) UnprotectedFiles(folderID string) ([]string, error) {
+	f, err := o.owned(folderID)
+	if err != nil {
+		return nil, err
+	}
+	st, _ := o.s.Mgr.OwnedStatus(f)
+	return st.UnprotectedNames, nil
+}

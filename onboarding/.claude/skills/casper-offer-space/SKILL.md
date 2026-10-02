@@ -26,7 +26,9 @@ space (`df -h ~`). Then suggest, for example:
   sleeps), also suggest **catcher space**. When a friend's mirrors are
   asleep, their newest changes wait here, encrypted, usually only megabytes,
   until a mirror wakes. For their friends, this is the most valuable thing
-  an always-on machine can give.
+  an always-on machine can give. A catcher only helps a friend whose
+  mirrors are on *other* machines; for a friend this Mac already mirrors,
+  it adds nothing.
 
 Then:
 1. `publish_offering(host=..., max_gb=..., kind="mirror" or "catcher", preview=true)`

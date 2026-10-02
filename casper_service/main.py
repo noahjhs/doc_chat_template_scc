@@ -2694,6 +2694,11 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
                     )
             if not mirror_grants:
                 raise mirroring.MirrorError("Name at least one friend's machine to mirror to (list_hosts shows the machines you have mirror space on).")
+            if catcher_grant and catcher_grant["host_id"] in {g["host_id"] for g in mirror_grants}:
+                raise mirroring.MirrorError(
+                    f"{catcher_grant['owner']}/{catcher_grant['host']} is already one of the mirrors. A catcher only helps on a "
+                    "different machine (it holds changes while the mirrors are asleep), so choose another catcher or none."
+                )
     except mirroring.MirrorError as e:
         return f"Can't: {e.message}"
     label = label or os.path.basename(abs_path.rstrip("/")) or "Folder"
@@ -2748,6 +2753,10 @@ def _status_text(db, f) -> str:
 
         age = int((_t.time() - st.get("unprotected_oldest_unix", _t.time())) / 60)
         lines.append(f"{f['label']}: {unprotected} recent change(s) not on any mirror or catcher yet (oldest {age} min).")
+        files = _unprotected_names(f)
+        if files:
+            more = f" (and {unprotected - min(len(files), 10)} more)" if unprotected > min(len(files), 10) else ""
+            lines.append("  not yet protected: " + ", ".join(files[:10]) + more)
     elif st.get("at_risk_files"):
         lines.append(f"{f['label']}: protected -- {st['at_risk_files']} recent change(s) are held by the catcher until a mirror wakes up.")
     else:
@@ -2758,6 +2767,21 @@ def _status_text(db, f) -> str:
         lines.append(f"  - {p['role']}: {who}: {state}")
     lines.append(f"  ({st.get('local_files', 0)} files, {backups.human(st.get('local_bytes', 0))}; as of {st.get('reported_at', '')[:19]})")
     return "\n".join(lines)
+
+
+def _unprotected_names(f) -> list[str]:
+    """Asked live from the owner's own Mac and passed straight to the
+    person's agent -- never stored here (file names stay off the server)."""
+    config = _host_config(f["owner_user_id"], f["owner_host_id"])
+    if config is None:
+        return []
+    r = backups.daemon_call(config, "mirror_unprotected_files", folder_id=f["id"])
+    if not r.get("success"):
+        return []
+    try:
+        return json.loads(r["stdout"]).get("files") or []
+    except ValueError:
+        return []
 
 
 def _mcp_protection_status(user_id: int) -> str:

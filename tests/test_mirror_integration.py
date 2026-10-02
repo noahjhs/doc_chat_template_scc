@@ -59,8 +59,9 @@ class World:
         env = {**os.environ, "AUTH_DB_PATH": str(tmp / "users.db"), "STORAGE_ROOT": str(tmp / "storage")}
         env.pop("TELEGRAM_BOT_TOKEN", None)
         env.pop("CATCHER_URL", None)
+        self.svc_log = tmp / "casper_service.log"
         self.svc = subprocess.Popen([sys.executable, "-m", "uvicorn", "main:app", "--port", str(port), "--log-level", "warning"],
-                                    cwd=ROOT / "casper_service", env=env)
+                                    cwd=ROOT / "casper_service", env=env, stderr=open(self.svc_log, "w"))
         self.domain, self.base = f"127.0.0.1:{port}", f"http://127.0.0.1:{port}"
         _wait(lambda: self._up(), "casper_service")
         self.people = {}
@@ -113,7 +114,11 @@ class World:
         r = requests.post(self.base + "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}},
                           headers={**MCP_HEADERS, "Authorization": f"Bearer {self.people[person]['agent']}"}, timeout=120)
         res = r.json()["result"]
-        assert not res.get("isError"), res
+        if res.get("isError"):
+            full = self.svc_log.read_text() if self.svc_log.exists() else ""
+            Path("/tmp/casper_service_last_failure.log").write_text(full)
+            tail = full[-4000:]
+            raise AssertionError(f"{tool} failed: {res}\n--- casper_service log ---\n{tail}")
         if "structuredContent" in res and "result" in res["structuredContent"]:
             return res["structuredContent"]["result"]
         return "\n".join(c.get("text", "") for c in res["content"])
