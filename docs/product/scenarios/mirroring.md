@@ -1,6 +1,6 @@
 # Design: mirroring with history (v1)
 
-**Status:** draft, 2026-10-01. Replaces peer backup as the v1 product. The
+**Status:** draft, 2026-10-01; open questions resolved by the Principal the same day. Replaces peer backup as the v1 product. The
 trust framework, invites, ledger, agent onboarding, notifications and
 recovery kit all carry over. The engine is Syncthing
 ([spikes/syncthing-mirroring.md](../spikes/syncthing-mirroring.md)).
@@ -109,11 +109,16 @@ through shared infrastructure) as a concrete role. In the trust framework
 it's another offering, **catcher space**, small and always-on, granted
 like mirror space.
 
-**Casper's own server as a last-resort catcher** is possible: it's
-always on and would hold only ciphertext. It's also exactly the dependence
-goal 2 warns about (CrashPlan's peer feature died with the vendor). So:
-**offered, off by default, and clearly labelled**, for people who have no
-always-on friend yet. *Open question for the Principal.*
+**Casper as the catcher of last resort** (decided 2026-10-01). Casper's
+server offers to be the catcher **precisely when a person has no other
+catcher**. The agent suggests it, the person accepts or declines, and it
+holds only ciphertext. As soon as a friend's always-on catcher exists,
+Casper's role ends and its copy is dropped.
+
+This sits within the sovereignty goal because of a later stage the
+Principal has in mind: **community-hosted instances of the Casper service
+itself**. The "Casper" catching for you would then be your community's own
+instance, not a single vendor.
 
 ### Protection status, precisely
 
@@ -132,7 +137,7 @@ to fix it.
 |---|---|
 | Pairing a Mac | The daemon starts its bundled Syncthing with its own home and registers the device ID with `casper_service` |
 | Invite / grant of mirror space | `casper_service` introduces the two device IDs to each other's daemons. Nobody ever sees a device ID. |
-| Mirroring a folder to a friend | The owner's folder is shared with the friend's device **with a folder password**. The friend's daemon creates a `receiveencrypted` folder with staggered versioning (30 days). |
+| Mirroring a folder to a friend | The owner's folder is shared with the friend's device **with a folder password**. The friend's daemon creates a `receiveencrypted` folder with versioning (see History below). |
 | Folder password | Generated per folder, kept in the Keychain, and protected by the recovery kit (it replaces the age key for mirroring) |
 | Catcher | The staging folder, shared encrypted with the catcher's device, without versioning |
 | Undo / restore a version | A Casper action: decrypt the needed `.stversions` entries (stripping the `~timestamp` suffix, the gap the spike found) into a new folder |
@@ -174,16 +179,36 @@ carries over to mirroring.
 5. **Undo and disaster restore** through the agent; then the onboarding
    skills rewritten for mirroring, and live runs (Claude and Hermes).
 
-## Open questions
+## Decisions (2026-10-01)
 
-1. **Casper's server as a last-resort catcher:** offer it (off by default)
-   or not at all?
-2. **History length:** 30 days staggered, or keep every version for N
-   days? Staggered thins old versions; "every version for 7 days, then
-   daily" is easier to explain.
-3. **Default folders:** Documents and Desktop? Photos libraries are large
-   and change constantly; leave them out of v1?
-4. **Reciprocity:** present mirroring as mutual by default ("you keep mine,
-   I keep yours"), or one-way offerings as today?
-5. **Discovery and relay hosting:** run them on the mini for the alpha
-   (another reason it must survive reboots)?
+1. **Casper is the catcher of last resort,** offered only when someone has
+   no other catcher (see above).
+2. **History: every version for 7 days, then one per day up to 30 days.**
+   It's easy to explain: "anything from the last week, and a daily
+   snapshot for the month before". Syncthing's built-in staggered
+   versioning only approximates this (every 30 s for the first hour,
+   hourly for a day, daily for 30 days). Since version files carry
+   timestamps in their names, the **mirror's own daemon prunes
+   `.stversions` to the exact policy**, and Syncthing keeps everything in
+   between.
+3. **Photos are out of v1.** The default folders are Documents and Desktop.
+   The agent can add other folders on request, within the size limits.
+4. **Default to generosity, not reciprocity** (the community model; see
+   [values-and-goals.md](../values-and-goals.md)).
+   - **Publishing** a mirror or catcher offering defaults to **no
+     reciprocity required**. You give space; nothing is asked back.
+   - **Looking for** mirroring defaults to **offering reciprocity**: when
+     you ask a friend to mirror for you, Casper's suggestion includes
+     mirroring for them in return, which they can decline.
+   - Reciprocity and barter stay possible, but they aren't the featured
+     model.
+   - People can be **known as resource providers** to their community. The
+     ledger and friends' views show what someone gives, not what they owe.
+5. **Discovery and relay servers run on the mini** for the alpha. This is
+   another reason it must come back by itself after a restart.
+
+## Still open
+
+- How "known as a resource provider" shows up: on a friend's profile, in
+  the ledger, in invites ("Sam keeps copies for 4 friends")? This is a
+  design pass of its own, and it should come after the landing-page work.

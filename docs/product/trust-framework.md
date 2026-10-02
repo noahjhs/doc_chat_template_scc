@@ -56,7 +56,13 @@ The flow can start from either side:
   one. The owner then approves the request, which produces a grant. We
   expect this to be the more common flow.
 
-Either way, the result is consensual on both sides. Future work: attaching
+Either way, the result is consensual on both sides.
+
+**Default to generosity** ([values-and-goals.md](values-and-goals.md),
+goal 4). An offering requires nothing in return by default. A request
+defaults to offering something back, which the other side may decline.
+Reciprocal or bartered arrangements can be expressed (an offer whose duty
+is "mirror for me too"), but they're the exception, not the template. Future work: attaching
 **conditions** to an offering, e.g. "backups only if you declare what's in
 them".
 
