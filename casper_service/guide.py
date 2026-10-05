@@ -41,6 +41,12 @@ How to work:
        login: suggest yes).
     2. Sign in at {signin_url} on that Mac -- that connects the Mac to their account.
   Use list_hosts to see whether a Mac is connected (role owner, connected true).
+  Someone arriving with an invite code can accept it (redeem_invite) before
+  their Mac is connected; mirroring needs the Mac.
+- Inviting a friend: ask their first name (the invitation greets them by it),
+  what the person calls their group the first time (e.g. "Mutual Aid"), and
+  how to send it -- by email (their address), to the person's own Telegram to
+  forward, or a message the person passes on themselves.
 - After mirroring starts, suggest the recovery kit: on their Mac, it's made by
   the Casper app (their own agent or Terminal can run
   `/Applications/CasperGo/Casper.app/Contents/MacOS/Casper setup recovery-kit`);
@@ -70,8 +76,10 @@ TOOLS = [
     _tool("add_friend", "Send a friend request by username.", {"username": _S}, ["username"]),
     _tool("publish_offering", "Offer space on one of the person's machines. kind 'mirror' (usual) or 'catcher' (always-on machines). preview=true first.",
           {"host": _S, "max_gb": _N, "kind": {"type": "string", "enum": ["mirror", "catcher"]}, "preview": _B}, ["host", "max_gb"]),
-    _tool("create_invite", "Create a single-use invite to the person's offering; returns a message for them to send. preview=true first.",
-          {"quota_gb": _N, "for_whom": _S, "preview": _B}, ["quota_gb"]),
+    _tool("create_invite", "Create a single-use invite to the person's offering. for_whom: the friend's first name (the invitation greets them). "
+          "group: the person's circle the friend joins (e.g. 'Mutual Aid'; ask the first time). Delivery: email (friend's address) and/or "
+          "send_telegram (a copy in the person's Telegram to forward); else returns a message for them to send. preview=true first.",
+          {"quota_gb": _N, "for_whom": _S, "group": _S, "email": _S, "send_telegram": _B, "preview": _B}, ["quota_gb"]),
     _tool("mirror_folder", "Mirror a folder from the person's Mac to friends' machines (owner/host names from list_hosts). preview=true first; then the PERSON confirms in a Casper dialog.",
           {"source_host": _S, "path": _S, "mirrors": {"type": "array", "items": _S}, "catcher": _S, "use_casper_catcher": _B, "preview": _B},
           ["source_host", "path", "mirrors"]),
@@ -95,7 +103,8 @@ def _call_tool(services, user_id: int, name: str, args: dict) -> str:
         elif name == "publish_offering":
             out = services.publish_offering(user_id, args["host"], float(args["max_gb"]), False, args.get("preview", True), args.get("kind", "mirror"))
         elif name == "create_invite":
-            out = services.create_invite(user_id, float(args["quota_gb"]), None, args.get("for_whom", ""), args.get("preview", True))
+            out = services.create_invite(user_id, float(args["quota_gb"]), None, args.get("for_whom", ""), args.get("preview", True),
+                                         args.get("group", ""), args.get("email", ""), bool(args.get("send_telegram", False)))
         elif name == "mirror_folder":
             out = services.mirror_folder(user_id, args["source_host"], args["path"], args.get("mirrors") or [], args.get("catcher", ""),
                                          bool(args.get("use_casper_catcher", False)), "", args.get("preview", True))

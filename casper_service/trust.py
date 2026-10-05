@@ -125,6 +125,16 @@ def remove_friend(db, user_id: int, other_username: str) -> list[dict]:
         """,
         (ts, user_id, other_id, other_id, user_id),
     )
+    # ...and membership of each other's groups.
+    db.execute(
+        """
+        UPDATE relation_tuples SET revoked_at = ?
+        WHERE relation = 'member' AND object_type = 'group' AND revoked_at IS NULL
+          AND ((subject_id = ? AND object_id IN (SELECT id FROM groups WHERE owner_user_id = ?))
+            OR (subject_id = ? AND object_id IN (SELECT id FROM groups WHERE owner_user_id = ?)))
+        """,
+        (ts, user_id, other_id, other_id, user_id),
+    )
     revoked = []
     for g in grants_between(db, user_id, other_id) + grants_between(db, other_id, user_id):
         revoke_grant_row(db, g["id"], ts)
@@ -404,7 +414,49 @@ def new_invite_code() -> str:
     return f"CASPER-{raw[:4]}-{raw[4:8]}-{raw[8:]}"
 
 
-def create_invite(db, owner_id: int, offering_id: int, quota_bytes: int, note: str = "") -> tuple[str, dict]:
+def group_named(db, owner_id: int, name: str) -> int:
+    """The owner's group with this name, created on first use."""
+    name = " ".join(name.split())
+    if not 1 <= len(name) <= 60:
+        raise TrustError("A group name is 1-60 characters.")
+    row = db.execute("SELECT id FROM groups WHERE owner_user_id = ? AND name = ? COLLATE NOCASE", (owner_id, name)).fetchone()
+    if row:
+        return row["id"]
+    return db.execute("INSERT INTO groups (owner_user_id, name) VALUES (?, ?)", (owner_id, name)).lastrowid
+
+
+def group_name(db, group_id: int | None) -> str:
+    if group_id is None:
+        return ""
+    row = db.execute("SELECT name FROM groups WHERE id = ?", (group_id,)).fetchone()
+    return row["name"] if row else ""
+
+
+def groups_of(db, user_id: int) -> list[dict]:
+    """Groups the person runs, and groups they've joined (with whose)."""
+    owned = db.execute("SELECT id, name FROM groups WHERE owner_user_id = ? ORDER BY id", (user_id,)).fetchall()
+    joined = db.execute(
+        """
+        SELECT g.id, g.name, u.username AS owner FROM relation_tuples t JOIN groups g ON g.id = t.object_id
+        JOIN users u ON u.id = g.owner_user_id
+        WHERE t.subject_type = 'user' AND t.subject_id = ? AND t.relation = 'member' AND t.object_type = 'group' AND t.revoked_at IS NULL
+        ORDER BY g.id
+        """,
+        (user_id,),
+    ).fetchall()
+    members = {}
+    for g in owned:
+        members[g["id"]] = [r["username"] for r in db.execute(
+            """SELECT u.username FROM relation_tuples t JOIN users u ON u.id = t.subject_id
+               WHERE t.relation = 'member' AND t.object_type = 'group' AND t.object_id = ? AND t.revoked_at IS NULL ORDER BY t.id""",
+            (g["id"],),
+        ).fetchall()]
+    return [{"id": g["id"], "name": g["name"], "owner": None, "members": members[g["id"]]} for g in owned] + [
+        {"id": g["id"], "name": g["name"], "owner": g["owner"], "members": []} for g in joined
+    ]
+
+
+def create_invite(db, owner_id: int, offering_id: int, quota_bytes: int, note: str = "", group_id: int | None = None) -> tuple[str, dict]:
     """Returns (code, offering). The code itself is shown once; only its
     hash is kept."""
     from datetime import timedelta
@@ -419,8 +471,8 @@ def create_invite(db, owner_id: int, offering_id: int, quota_bytes: int, note: s
     code = new_invite_code()
     expires = (datetime.now(timezone.utc) + timedelta(days=INVITE_TTL_DAYS)).isoformat(timespec="seconds")
     db.execute(
-        "INSERT INTO invites (code_hash, owner_user_id, offering_id, quota_bytes, note, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (_invite_hash(code), owner_id, offering_id, quota_bytes, note, expires),
+        "INSERT INTO invites (code_hash, owner_user_id, offering_id, quota_bytes, note, expires_at, group_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (_invite_hash(code), owner_id, offering_id, quota_bytes, note, expires, group_id),
     )
     return code, dict(offering)
 
@@ -465,6 +517,14 @@ def redeem_invite(db, user_id: int, code: str) -> dict:
         "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, ?, 'host', ?, ?)",
         (user_id, relation, inv["host_id"], json.dumps(attrs)),
     )
+    if inv["group_id"] is not None and not db.execute(
+        "SELECT 1 FROM relation_tuples WHERE subject_type = 'user' AND subject_id = ? AND relation = 'member' AND object_type = 'group' AND object_id = ? AND revoked_at IS NULL",
+        (user_id, inv["group_id"]),
+    ).fetchone():
+        db.execute(
+            "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id) VALUES ('user', ?, 'member', 'group', ?)",
+            (user_id, inv["group_id"]),
+        )
     db.execute("UPDATE invites SET used_by_user_id = ?, used_at = ? WHERE id = ?", (user_id, now_iso(), inv["id"]))
     return inv
 

@@ -4,17 +4,16 @@
 <div id="loading" class="muted">Opening your invitation…</div>
 <div id="bad" class="hide"><div class="eyebrow">Invitation</div><h2 id="badmsg">This invitation can't be used.</h2><p class="muted">Ask the friend who sent it for a new one — invitations work once and expire after a week.</p></div>
 <div id="good" class="hide">
-<div class="eyebrow">You're invited</div>
-<h2><span id="who"></span> <em id="what"></em></h2>
-<p class="lede" id="why"></p>
+<div class="eyebrow" id="eyebrow">You're invited</div>
+<h1 style="font-size:clamp(40px,6vw,64px)"><span id="hello">Welcome.</span><br><em id="joined">You've been invited to Casper.</em></h1>
+<p class="lede" id="gift"></p>
+<div class="cta" style="margin-bottom:56px"><div><a class="btn" id="begin" href="${APP_URL}/signup?start=guide">Begin setup with Casper's guide →</a></div>
+<div class="alt">Casper's guide is a friendly AI that sets everything up with you in a short chat — no technical steps.</div></div>
 <div class="two">
-<div class="panel"><h3>With your AI agent</h3><p class="muted">Claude Code, Hermes, Codex… paste this, and it does the rest:</p>
+<div class="panel"><h3>Already use an AI agent?</h3><p class="muted">Claude Code, Hermes, Codex… paste this, and it does the rest:</p>
 <div class="prompt"><code id="ap"></code><button data-copy="ap">Copy</button></div></div>
-<div class="panel"><h3>Without one</h3><p class="muted">Casper's own guide will walk you through it.</p>
-<ol class="steps" style="gap:10px"><li style="padding:14px 18px 14px 60px"><p><a href="${DOWNLOAD_URL}" style="color:var(--accent);font-weight:500">Download Casper</a> and open it.</p></li>
-<li style="padding:14px 18px 14px 60px"><p><a id="signup" href="${APP_URL}/signup" style="color:var(--accent);font-weight:500">Create your account</a> on that Mac — your invitation comes with you.</p></li></ol></div>
+<div class="panel"><h3>What you're joining</h3><p class="muted">Casper keeps your important folders mirrored on the computers of people you trust — continuously, with a month of history. Your files are encrypted on your Mac before they leave it, so <span class="who2"></span> can never read them. Either of you can end this at any time.</p></div>
 </div>
-<p class="muted" style="margin-top:28px">Your files are encrypted on your Mac before they leave it, so <span class="who2"></span> can never read them. Either of you can end this at any time.</p>
 </div></section>
 <footer><span>Casper — held by friends, read by no one.</span><span><a href="/download">Download</a> · <a href="${APP_URL}/guide">Guide</a> · Early alpha · macOS</span></footer></div><script>document.querySelectorAll("[data-copy]").forEach(b=>b.addEventListener("click",()=>{navigator.clipboard.writeText(document.getElementById(b.dataset.copy).innerText.trim());const t=b.innerText;b.innerText="Copied";setTimeout(()=>b.innerText=t,1500)}))</script>
 <script>
@@ -23,11 +22,14 @@ const show=id=>{document.getElementById("loading").classList.add("hide");documen
 if(!code){document.getElementById("badmsg").innerText="No invitation code in this link.";show("bad")}
 else fetch("${AUTH_URL}/invites/info?code="+encodeURIComponent(code)).then(r=>r.json()).then(d=>{
  if(!d.valid){document.getElementById("badmsg").innerText=d.reason||"This invitation can't be used.";show("bad");return}
- const what={mirror_space:"set aside "+d.quota_gb+" GB on their computer to keep your folders safe.",catcher_space:"offered their always-on computer as your catcher.",backup_space:"set aside "+d.quota_gb+" GB of backup space for you."}[d.kind]||"invited you to Casper.";
- document.getElementById("who").innerText=d.inviter+" has";document.getElementById("what").innerText=what;
+ const what={mirror_space:"has set aside "+d.quota_gb+" GB on their computer to keep your folders safe, with 30 days of history.",catcher_space:"has offered their always-on computer as your catcher.",backup_space:"has set aside "+d.quota_gb+" GB of backup space for you."}[d.kind]||"has invited you to Casper.";
+ const set=(id,t)=>document.getElementById(id).innerText=t;
+ if(d.name)set("hello","Welcome, "+d.name+".");
+ if(d.group){set("joined","You've been invited to join \u2018"+d.group+".\u2019");set("eyebrow","An invitation from "+d.inviter);document.title="Join "+d.group+" — Casper"}
+ else set("joined",d.inviter+" invited you to Casper.");
+ set("gift",d.inviter+" "+what);
  document.querySelectorAll(".who2").forEach(e=>e.innerText=d.inviter);
- document.getElementById("why").innerText="Casper keeps your important folders mirrored on the computers of people you trust — encrypted, continuously, with a month of history.";
- document.getElementById("ap").innerText="Set me up with Casper using ${AGENTS_URL} — my invite code is "+code;
- document.getElementById("signup").href="${APP_URL}/signup?invite="+encodeURIComponent(code);
+ set("ap","Set me up with Casper using ${AGENTS_URL} -- my invite code is "+code);
+ document.getElementById("begin").href="${APP_URL}/signup?start=guide&invite="+encodeURIComponent(code);
  show("good")}).catch(()=>{document.getElementById("badmsg").innerText="Couldn't reach Casper just now — try again in a moment.";show("bad")});
 </script></body></html>

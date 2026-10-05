@@ -201,12 +201,15 @@ def build(svc: Services) -> MCPServer:
     @server.tool(
         description=(
             "Create a single-use invite to the person's offering for one friend, with quota_gb of space. Returns the code and a ready-to-send "
-            "message for the person to pass on however they normally talk. for_whom is the friend's name, for the person's own records. "
-            "Call with preview=true first and confirm with the person."
+            "message. for_whom is the friend's first name -- the invitation greets them by it. group is the name of the person's circle "
+            "the friend is welcomed into (e.g. 'Mutual Aid'; ask what they call it the first time -- after that their one group is the default). "
+            "Delivery: email (the friend's address) and/or send_telegram=true (a copy in the person's own Telegram, to forward); otherwise "
+            "they pass the message on themselves. Call with preview=true first and confirm with the person."
         )
     )
-    def create_invite(ctx: Context, quota_gb: float, for_whom: str = "", offering_id: int | None = None, preview: bool = True) -> str:
-        return svc.create_invite(_caller(svc, ctx), quota_gb, offering_id, for_whom, preview)
+    def create_invite(ctx: Context, quota_gb: float, for_whom: str = "", offering_id: int | None = None, group: str = "",
+                      email: str = "", send_telegram: bool = False, preview: bool = True) -> str:
+        return svc.create_invite(_caller(svc, ctx), quota_gb, offering_id, for_whom, preview, group, email, send_telegram)
 
     @server.tool(
         description=(

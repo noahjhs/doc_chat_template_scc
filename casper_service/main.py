@@ -8,6 +8,7 @@ import os
 import secrets
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 
 import bcrypt
@@ -19,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 import backups
 import conversations
+import mailer
 import mcp_server
 import trust
 from models import (
@@ -2184,6 +2186,13 @@ def _mcp_my_casper(user_id: int) -> str:
     lines = [f"Casper account: {me}"]
     lines.append("Your machines: " + (", ".join(f"{h['host']} ({'online' if h['connected'] else 'offline'})" for h in hosts) or "none paired"))
     lines.append("Friends: " + (", ".join(friends) or "none yet"))
+    with get_db() as db:
+        groups = trust.groups_of(db, user_id)
+    for g in groups:
+        if g["owner"] is None:
+            lines.append(f"Your group '{g['name']}': " + (", ".join(g["members"]) or "no one has joined yet"))
+        else:
+            lines.append(f"You're in {g['owner']}'s group '{g['name']}'")
     if offerings:
         lines.append("You offer:")
         for o in offerings:
@@ -2197,7 +2206,9 @@ def _mcp_my_casper(user_id: int) -> str:
     if invites:
         lines.append("Open invites (single-use, not yet redeemed):")
         for i in invites:
-            lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}, expires {i['expires_at'][:10]} [invite {i['id']}]")
+            with get_db() as db:
+                gname = trust.group_name(db, i["group_id"])
+            lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}{' to join ' + gname if gname else ''}, expires {i['expires_at'][:10]} [invite {i['id']}]")
     kinds = {"backup_peer": "backup", "mirror_peer": "mirror", "catcher_peer": "catcher"}
     if given:
         lines.append("Space you give friends (everything arrives encrypted; you can't read it):")
@@ -2305,9 +2316,24 @@ def _publish_mirror_offering(user_id: int, host: str, host_id: int, max_gb: floa
     return f"Done (offering {offering_id}). {plan}"
 
 
-def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, for_whom: str, preview: bool) -> str:
+INVITE_EMAILS_PER_DAY = 20
+
+
+def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, for_whom: str, preview: bool,
+                       group: str = "", email: str = "", send_telegram: bool = False) -> str:
+    """for_whom is the invitee's name (the invite page and email greet them
+    by it); group names the inviter's circle they're welcomed into (their
+    only group if not given). Delivery: email to the invitee, and/or a
+    ready-to-forward copy in the inviter's own Telegram (a bot can't message
+    someone who's never talked to it)."""
     with get_db() as db:
         mine = trust.list_offerings(db, user_id)["mine"]
+        my_groups = [g for g in trust.groups_of(db, user_id) if g["owner"] is None]
+        profile = _get_or_create_profile(db, user_id)
+        emailed_today = db.execute(
+            "SELECT COUNT(*) AS n FROM invites WHERE owner_user_id = ? AND delivered_via LIKE '%email%' AND created_at > datetime('now', '-1 day')",
+            (user_id,),
+        ).fetchone()["n"]
     if offering_id is None:
         if len(mine) != 1:
             return "Say which offering (offering_id) -- " + ("you have none yet; publish_offering first." if not mine else f"you have {len(mine)}.")
@@ -2315,33 +2341,77 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     offering = next((o for o in mine if o["id"] == offering_id), None)
     if offering is None:
         return "No such offering of yours."
+    group = " ".join(group.split()) or (my_groups[0]["name"] if len(my_groups) == 1 else "")
+    email = email.strip()
+    if email and not mailer.valid_address(email):
+        return f"'{email}' doesn't look like an email address."
+    if email and not (mailer.configured() and _invite_page_url("x")):
+        return "This Casper deployment can't send email yet -- create the invite without email and pass the message on yourself."
+    if email and emailed_today >= INVITE_EMAILS_PER_DAY:
+        return f"You've emailed {INVITE_EMAILS_PER_DAY} invites today -- that's the daily limit. Try tomorrow, or send the message yourself."
+    if send_telegram and not (os.environ.get("TELEGRAM_BOT_TOKEN") and profile.telegram_chat_id):
+        return "Telegram isn't linked for you yet -- link it first (Casper setup notifications), or skip send_telegram."
     who = for_whom or "the friend you send it to"
     what = {"mirror_space": f"{quota_gb:g} GB of mirror space", "catcher_space": "a catcher"}.get(offering["kind"], f"{quota_gb:g} GB of backup space")
+    into = f", welcoming them into your group '{group}'" if group else ""
+    delivery = [d for d in (f"email it to {email}" if email else "", "send it to your own Telegram to forward" if send_telegram else "") if d]
     plan = (
-        f"Create a single-use invite giving {who} {what} on {offering['host']}. "
-        f"Whoever redeems it becomes your friend on Casper and gets that space; it expires in {trust.INVITE_TTL_DAYS} days and you can cancel it until then."
+        f"Create a single-use invite giving {who} {what} on {offering['host']}{into}. "
+        + (f"Casper will {' and '.join(delivery)}. " if delivery else "")
+        + f"Whoever redeems it becomes your friend on Casper and gets that space; it expires in {trust.INVITE_TTL_DAYS} days and you can cancel it until then."
     )
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
     try:
         with get_db() as db:
-            code, _ = trust.create_invite(db, user_id, offering_id, int(quota_gb * trust.GB), for_whom)
+            group_id = trust.group_named(db, user_id, group) if group else None
+            code, _ = trust.create_invite(db, user_id, offering_id, int(quota_gb * trust.GB), for_whom, group_id)
             me = trust.username(db, user_id)
     except trust.TrustError as e:
         return f"Can't: {e.message}"
     url = f"{_public_base_url()}/agents.md"
+    prompt = f"Set me up with Casper using {url} -- my invite code is {code}"
     gift = {
         "mirror_space": f"room for {quota_gb:g} GB of your folders to be mirrored on my computer with Casper -- kept up to date as you work, with 30 days of history",
         "catcher_space": "a catcher on my always-on computer with Casper -- it holds your newest changes while your mirrors are asleep",
     }.get(offering["kind"], f"{quota_gb:g} GB of backup space for you on my computer with Casper")
+    page = _invite_page_url(code)
+    joining = f" to join '{group}'" if group else ""
     message = (
-        f"I've set aside {gift} -- your files get encrypted "
-        f"before they leave your machine, so I can't read them. To use it, tell your AI agent (e.g. Claude Code): "
-        f"\"Set me up with Casper using {url} -- my invite code is {code}\". (From {me}; the code works once and expires in {trust.INVITE_TTL_DAYS} days.)"
+        f"{'Hi ' + for_whom + '! ' if for_whom else ''}I'm inviting you{joining} on Casper. I've set aside {gift} -- your files get encrypted "
+        f"before they leave your machine, so I can't read them. "
+        + (f"Start here: {page} -- or, if you use an AI agent (e.g. Claude Code), tell it: \"{prompt}\". " if page
+           else f"To use it, tell your AI agent (e.g. Claude Code): \"{prompt}\". ")
+        + f"(From {me}; the code works once and expires in {trust.INVITE_TTL_DAYS} days.)"
     )
-    if page := _invite_page_url(code):
-        message += f" No AI agent? Start here instead: {page}"
-    return f"Invite created: {code}\n\nMessage for the person to send {who}:\n{message}"
+    sent, problems, channels = [], [], []
+    if email:
+        third = {"mirror_space": f"{quota_gb:g} GB on their computer to keep your folders safe, with 30 days of history",
+                 "catcher_space": "their always-on computer as a catcher for your newest changes"}.get(offering["kind"], f"{quota_gb:g} GB of backup space")
+        try:
+            mailer.send(email, *mailer.invite_email(for_whom, me, group, third, page, prompt))
+            sent.append(f"emailed to {email}")
+            channels.append("email")
+        except Exception as e:
+            print(f"invite email to user {user_id}'s invitee failed: {e}")
+            problems.append("the email couldn't be sent")
+    if send_telegram:
+        share = "https://t.me/share/url?" + urllib.parse.urlencode({"url": page or url, "text": message})
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage", json={
+                "chat_id": profile.telegram_chat_id, "text": f"Your invite for {who} -- forward this message, or tap Share:\n\n{message}",
+                "reply_markup": {"inline_keyboard": [[{"text": "Share", "url": share}]]}}, timeout=10)
+            r.raise_for_status()
+            sent.append("sent to your Telegram to forward")
+            channels.append("telegram")
+        except Exception as e:
+            print(f"invite Telegram copy for user {user_id} failed: {e}")
+            problems.append("the Telegram copy couldn't be sent")
+    if channels:
+        with get_db() as db:
+            db.execute("UPDATE invites SET delivered_via = ? WHERE code_hash = ?", (",".join(channels), trust._invite_hash(code)))
+    status = (" Delivered: " + "; ".join(sent) + "." if sent else "") + (" But " + " and ".join(problems) + " -- send the message below yourself." if problems else "")
+    return f"Invite created: {code}.{status}\n\nMessage for the person to send {who}:\n{message}"
 
 
 @app.get("/invites/info")
@@ -2355,9 +2425,10 @@ def invite_info(code: str, request: Request):
         with get_db() as db:
             inv = trust.find_invite(db, code.strip())
             inviter = trust.username(db, inv["owner_user_id"])
+            group = trust.group_name(db, inv["group_id"])
     except trust.TrustError as e:
         return JSONResponse({"valid": False, "reason": e.message}, headers=cors)
-    return JSONResponse({"valid": True, "inviter": inviter, "kind": inv["kind"],
+    return JSONResponse({"valid": True, "inviter": inviter, "name": inv["note"], "group": group, "kind": inv["kind"],
                          "quota_gb": round(inv["quota_bytes"] / trust.GB, 1), "expires_at": inv["expires_at"]}, headers=cors)
 
 
@@ -2373,6 +2444,7 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
             owner = trust.username(db, inv["owner_user_id"])
             label = trust.host_label(db, inv["owner_user_id"], inv["host_id"])
             already = trust.are_friends(db, user_id, inv["owner_user_id"])
+            group = trust.group_name(db, inv["group_id"])
     except trust.TrustError as e:
         return f"Can't use that invite: {e.message}"
     each = "they'll approve each backup before it's stored" if inv["write_tier"] == "ask" else "backups within your share are stored without waiting for them"
@@ -2381,7 +2453,7 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
         "catcher_space": f"catcher space on {owner}'s machine ({owner}/{label}) -- it holds your newest changes while your mirrors sleep",
     }.get(inv["kind"], f"{_gb(inv['quota_bytes'])} of backup space on {owner}'s machine ({owner}/{label}); {each}")
     plan = (
-        f"Use {owner}'s invite: {'' if already else f'you and {owner} become friends on Casper, and '}you get {what}. "
+        f"Use {owner}'s invite: {'' if already else f'you and {owner} become friends on Casper, '}{f'you join their group {group!r}, ' if group else ''}{'and ' if not already or group else ''}you get {what}. "
         f"Your files are encrypted on your own machine before they're sent, so {owner} can never read them. "
         f"Either of you can end this at any time."
     )

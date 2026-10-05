@@ -400,7 +400,20 @@ CREATE TABLE IF NOT EXISTS invites (
     expires_at TEXT NOT NULL,
     used_by_user_id INTEGER REFERENCES users(id),
     used_at TEXT,
-    cancelled_at TEXT
+    cancelled_at TEXT,
+    group_id INTEGER REFERENCES groups(id),
+    delivered_via TEXT NOT NULL DEFAULT ''
+);
+
+-- A person's named circle ("Mutual Aid"): the name an invite welcomes
+-- someone into. Redeeming an invite to a group adds a 'member' tuple
+-- (user -> group) in relation_tuples; the owner is groups.owner_user_id.
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (owner_user_id, name)
 );
 """
 
@@ -549,6 +562,18 @@ def init_db():
         _add_mock_tier_column_to_pending_approvals(db)
         _add_kind_columns_to_pending_approvals(db)
         _add_backup_key_columns_to_host_pairings(db)
+        _add_group_columns_to_invites(db)
+
+
+def _add_group_columns_to_invites(db):
+    """One-time ALTER TABLE ADD COLUMNs: which group an invite welcomes
+    someone into, and how it was delivered ('email', 'telegram'). Same
+    posture as the migrations above."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(invites)").fetchall()}
+    if "group_id" not in columns:
+        db.execute("ALTER TABLE invites ADD COLUMN group_id INTEGER REFERENCES groups(id)")
+    if "delivered_via" not in columns:
+        db.execute("ALTER TABLE invites ADD COLUMN delivered_via TEXT NOT NULL DEFAULT ''")
 
 
 @contextlib.contextmanager

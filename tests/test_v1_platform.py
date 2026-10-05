@@ -400,6 +400,33 @@ def _onboard_two(client, sd_url):
     return sam, riley, _agent_token(client, sam), _agent_token(client, riley)
 
 
+def test_invite_sent_to_inviters_telegram_with_a_share_button(app_env, monkeypatch):
+    """A bot can't message someone who's never talked to it, so Telegram
+    delivery is a forwardable copy in the inviter's own chat."""
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, _, sam_agent, _ = _onboard_two(client, sd.url)
+        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+        monkeypatch.setenv("PUBLIC_WWW_URL", "https://www.example")
+        with main.get_db() as db:
+            db.execute("INSERT OR IGNORE INTO user_profile (user_id) VALUES (?)", (_user_id(main, "sam"),))
+            db.execute("UPDATE user_profile SET telegram_chat_id = '42' WHERE user_id = ?", (_user_id(main, "sam"),))
+
+        class _Ok:
+            def raise_for_status(self):
+                pass
+        sent = []
+        monkeypatch.setattr(main.requests, "post", lambda url, json=None, timeout=None: sent.append(json) or _Ok())
+        out = _mcp(client, sam_agent, "create_invite", quota_gb=5, for_whom="Noah", group="Mutual Aid", send_telegram=True, preview=False)
+        assert "sent to your Telegram to forward" in out
+        (msg,) = sent
+        assert msg["chat_id"] == "42" and "Hi Noah! I'm inviting you to join 'Mutual Aid' on Casper" in msg["text"]
+        share = msg["reply_markup"]["inline_keyboard"][0][0]
+        assert share["text"] == "Share" and share["url"].startswith("https://t.me/share/url?url=https%3A%2F%2Fwww.example%2Finvite%23CASPER-")
+
+
 def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
     main, client = app_env
     notes = []
@@ -415,7 +442,18 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         assert _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley").startswith("PREVIEW")
 
         monkeypatch.setenv("PUBLIC_WWW_URL", "https://www.example")
-        out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", preview=False)
+        monkeypatch.setenv("SMTP_HOST", "smtp.example")
+        emails = []
+        monkeypatch.setattr(main.mailer, "send", lambda to, subject, text, html: emails.append((to, subject, text, html)))
+        plan = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com")
+        assert "welcoming them into your group 'Mutual Aid'" in plan and "email it to riley@example.com" in plan and not emails
+        assert "doesn't look like an email" in _mcp(client, sam_agent, "create_invite", quota_gb=10, email="riley@x", preview=False)
+        assert "Telegram isn't linked" in _mcp(client, sam_agent, "create_invite", quota_gb=10, send_telegram=True, preview=False)
+        out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com", preview=False)
+        assert "emailed to riley@example.com" in out
+        (to, subject, text, html), = emails
+        assert to == "riley@example.com" and subject == "sam invited you to join Mutual Aid on Casper"
+        assert "Welcome, Riley." in text and "join \u2018Mutual Aid.\u2019" in text and "https://www.example/invite#" in html
         code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
         assert "agents.md" in out and code in out.split("Message for the person")[1]  # ready-to-send message carries both
         assert f"https://www.example/invite#{code}" in out  # and the no-agent path
@@ -423,10 +461,11 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         # The site's invite page reads what it offers, without signing in.
         info = client.get("/invites/info", params={"code": code})
         assert info.headers["access-control-allow-origin"] == "*"
-        assert info.json() == {"valid": True, "inviter": "sam", "kind": "mirror_space", "quota_gb": 10.0, "expires_at": info.json()["expires_at"]}
+        assert info.json() == {"valid": True, "inviter": "sam", "name": "Riley", "group": "Mutual Aid", "kind": "mirror_space",
+                               "quota_gb": 10.0, "expires_at": info.json()["expires_at"]}
         assert client.get("/invites/info", params={"code": "CASPER-AAAA-AAAA-AAAA"}).json()["valid"] is False
 
-        assert "you and sam become friends" in _mcp(client, riley_agent, "redeem_invite", code=code)
+        assert "you and sam become friends on Casper, you join their group 'Mutual Aid'" in _mcp(client, riley_agent, "redeem_invite", code=code)
         assert client.get("/friends", headers=riley).json()["friends"] == []  # still just a preview
         done = _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
         assert "10.0 GB of mirror space on sam/sam-mini" in done and "offer sam mirror space in return" in done
@@ -436,10 +475,13 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
 
         ledger = _mcp(client, sam_agent, "my_casper")
         assert "Friends: riley" in ledger and "mirror space for riley: 10.0 GB on sam-mini" in ledger
+        assert "Your group 'Mutual Aid': riley" in ledger
         assert "mirror space: 10.0 GB on sam/sam-mini" in _mcp(client, riley_agent, "my_casper")
+        assert "You're in sam's group 'Mutual Aid'" in _mcp(client, riley_agent, "my_casper")
 
         # Undo: cancelled invites stop working; ending space is one call.
         out2 = _mcp(client, sam_agent, "create_invite", quota_gb=5, preview=False)
+        assert "to join 'Mutual Aid'" in out2  # their one group is the default
         code2 = re.search(r"CASPER-[A-Z2-9-]{14}", out2).group(0)
         invite_id = re.search(r"\[invite (\d+)\]", _mcp(client, sam_agent, "my_casper")).group(1)
         assert "Cancelled" in _mcp(client, sam_agent, "revoke", kind="invite", id_or_name=invite_id)

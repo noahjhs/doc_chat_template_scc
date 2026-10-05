@@ -20,6 +20,13 @@ auth_domain = st.secrets["AUTH_SERVICE_DOMAIN"]
 # picks it up after pairing (same Streamlit session, so st.page_link below).
 if st.query_params.get("invite"):
     st.session_state["_invite_code"] = st.query_params["invite"]
+# "Begin setup with Casper's guide" (the site): the account comes first and
+# the guide walks them through installing Casper, so there's no app to hand
+# off to yet -- skip the pairing step and go straight to the guide.
+if st.query_params.get("start") == "guide":
+    st.session_state["_start_guide"] = True
+if st.session_state.get("_start_guide"):
+    st.write("Pick a username and password -- then Casper's guide will set everything up with you.")
 
 # Once signup succeeds, the form disappears entirely (replaced by the
 # success state below) rather than staying on screen -- otherwise a
@@ -38,7 +45,8 @@ if "_signup_token" not in st.session_state:
     # Ready to type into without an extra click.
     st.iframe(f"<script>{autofocus_input_js('Username')}</script>", height=1)
 
-    st.markdown('Already have an account? <a href="/signin" target="_self">Sign in</a>', unsafe_allow_html=True)
+    carry = f"?invite={st.session_state['_invite_code']}" if st.session_state.get("_invite_code") else ""
+    st.markdown(f'Already have an account? <a href="/signin{carry}" target="_self">Sign in</a>', unsafe_allow_html=True)
 
     if submitted:
         # See pages/signin.py's identical spinner for why, including the
@@ -56,6 +64,9 @@ if "_signup_token" not in st.session_state:
             st.session_state["_signup_token"] = result["token"]
             st.session_state["_signup_username"] = result["username"]
             st.rerun()  # so the form is fully gone on the next render, not shown alongside the success message
+
+if "_signup_token" in st.session_state and st.session_state.get("_start_guide"):
+    st.switch_page("pages/guide.py")
 
 if "_signup_token" in st.session_state:
     token = st.session_state["_signup_token"]
