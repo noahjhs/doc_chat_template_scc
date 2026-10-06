@@ -70,7 +70,7 @@ class FakeCasper:
         self.offering = True
         return "Done (offering 1). " + plan
 
-    def create_invite(self, u, quota_gb, offering_id, for_whom, preview, group="", email="", send_telegram=False):
+    def create_invite(self, u, quota_gb, offering_id, for_whom, preview, group="", email="", send_telegram=False, host=""):
         self._log("create_invite", quota_gb=quota_gb, preview=preview)
         if not self.offering:
             return "Say which offering -- you have none yet; publish_offering first."

@@ -400,6 +400,21 @@ def _onboard_two(client, sd_url):
     return sam, riley, _agent_token(client, sam), _agent_token(client, riley)
 
 
+def test_invite_with_no_offering_sets_one_up_in_the_same_yes(app_env):
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, _, sam_agent, _ = _onboard_two(client, sd.url)
+        plan = _mcp(client, sam_agent, "create_invite", for_whom="Noah")
+        assert plan.startswith("PREVIEW") and "20 GB of mirror space on sam-mini" in plan and "Also sets up mirror space on sam-mini" in plan
+        assert client.get("/offerings", headers=sam).json()["mine"] == []  # a preview changes nothing
+        out = _mcp(client, sam_agent, "create_invite", for_whom="Noah", preview=False)
+        assert out.startswith("Invite created for Noah.") and "Message for the person to send Noah" in out
+        (offering,) = client.get("/offerings", headers=sam).json()["mine"]
+        assert offering["kind"] == "mirror_space" and offering["max_quota_gb"] == 20
+        assert "Also sets up" not in _mcp(client, sam_agent, "create_invite", for_whom="Ana")  # now it reuses that one
+
+
 def test_invite_sent_to_inviters_telegram_with_a_share_button(app_env, monkeypatch):
     """A bot can't message someone who's never talked to it, so Telegram
     delivery is a forwardable copy in the inviter's own chat."""
@@ -446,17 +461,17 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         emails = []
         monkeypatch.setattr(main.mailer, "send", lambda to, subject, text, html: emails.append((to, subject, text, html)))
         plan = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com")
-        assert "welcoming them into your group 'Mutual Aid'" in plan and "email it to riley@example.com" in plan and not emails
-        assert "doesn't look like an email" in _mcp(client, sam_agent, "create_invite", quota_gb=10, email="riley@x", preview=False)
+        assert plan == ("PREVIEW (nothing changed yet): Invite Riley to Mutual Aid -- 10 GB of mirror space on sam-mini, "
+                        "by email to riley@example.com. Single-use, expires in 7 days.") and not emails
+        assert "isn't a valid email address" in _mcp(client, sam_agent, "create_invite", quota_gb=10, email="riley@x", preview=False)
         assert "Telegram isn't linked" in _mcp(client, sam_agent, "create_invite", quota_gb=10, send_telegram=True, preview=False)
         out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com", preview=False)
-        assert "emailed to riley@example.com" in out
+        assert out.startswith("Sent: emailed to riley@example.com.") and "Message for the person" not in out  # delivered: nothing to relay
         (to, subject, text, html), = emails
         assert to == "riley@example.com" and subject == "sam invited you to join Mutual Aid on Casper"
         assert "Welcome, Riley." in text and "join \u2018Mutual Aid.\u2019" in text and "https://www.example/invite#" in html
         code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
-        assert "agents.md" in out and code in out.split("Message for the person")[1]  # ready-to-send message carries both
-        assert f"https://www.example/invite#{code}" in out  # and the no-agent path
+        assert f"https://www.example/invite#{code}" in html and "agents.md" in text and code in text  # both paths
 
         # The site's invite page reads what it offers, without signing in.
         info = client.get("/invites/info", params={"code": code})
@@ -465,12 +480,12 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
                                "quota_gb": 10.0, "expires_at": info.json()["expires_at"]}
         assert client.get("/invites/info", params={"code": "CASPER-AAAA-AAAA-AAAA"}).json()["valid"] is False
 
-        assert "you and sam become friends on Casper, you join their group 'Mutual Aid'" in _mcp(client, riley_agent, "redeem_invite", code=code)
+        assert "Accept sam's invite to Mutual Aid: 10.0 GB of mirror space on sam/sam-mini (30 days of history); you and sam become friends" in _mcp(client, riley_agent, "redeem_invite", code=code)
         assert client.get("/friends", headers=riley).json()["friends"] == []  # still just a preview
         done = _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
-        assert "10.0 GB of mirror space on sam/sam-mini" in done and "offer sam mirror space in return" in done
+        assert done.startswith("Done: 10.0 GB of mirror space on sam/sam-mini.") and "offer sam space back" in done
         assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]
-        assert any("riley used your Casper invite" in t for t in notes)
+        assert any("riley accepted your Casper invite to Mutual Aid" in t for t in notes)
         assert "already been used" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
 
         ledger = _mcp(client, sam_agent, "my_casper")
@@ -544,8 +559,7 @@ def test_onboarding_files_are_served_with_this_deployments_url(app_env):
     md = client.get("/agents.md", headers={"host": "dev-auth.casperagent.dev", "x-forwarded-proto": "https"})
     assert md.status_code == 200
     assert "https://dev-auth.casperagent.dev/download/casper/macos" in md.text and "{{" not in md.text
-    skill = client.get("/onboarding/skills/casper-mirror.md")
-    assert skill.status_code == 200 and "recovery-kit" in skill.text and "Allow" in skill.text
+    assert "continue Casper" in md.text and "Voice" in md.text  # one file: bootstrap and voice; the rest is MCP's instructions
     assert client.get("/onboarding/skills/..%2Fsecrets.md").status_code == 404
 
     import io
@@ -553,7 +567,7 @@ def test_onboarding_files_are_served_with_this_deployments_url(app_env):
 
     z = zipfile.ZipFile(io.BytesIO(client.get("/onboarding.zip").content))
     names = set(z.namelist())
-    assert {"casper/AGENTS.md", "casper/CLAUDE.md", "casper/.claude/skills/casper-setup/SKILL.md"} <= names
+    assert names == {"casper/AGENTS.md", "casper/CLAUDE.md"}
     assert "{{" not in z.read("casper/AGENTS.md").decode()
 
 
@@ -589,7 +603,7 @@ def test_catcher_on_a_mirrors_machine_is_refused(app_env):
                    mirrors=["sam/sam-mini"], catcher="sam/sam-mini", preview=True)
         assert "already one of the mirrors" in out
         ok = _mcp(client, riley_agent, "mirror_folder", source_host="riley-laptop", path="Documents", mirrors=["sam/sam-mini"], preview=True)
-        assert ok.startswith("PREVIEW") and "wait on this Mac" in ok
+        assert ok.startswith("PREVIEW") and ok.endswith("no catcher -- encrypted, 30 days of history.")
 
 
 # --- Casper's guide ---------------------------------------------------------------------

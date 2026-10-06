@@ -298,9 +298,8 @@ func (c *cli) agent(client string) error {
 				if err != nil {
 					return fmt.Errorf("claude mcp add failed: %s", strings.TrimSpace(string(out)))
 				}
-				c.emit("Connected: Claude Code now has Casper as an MCP server (\"casper\").\n"+
-					"Claude Code only loads new MCP servers when it starts, so the person needs to restart it once: "+
-					"quit this session, start `claude` again in the same folder, and say \"continue\".",
+				c.emit("Connected. Restart required: tell the person to type /exit, run `claude`, and say \"continue Casper\" "+
+					"(with their invite code, if they have one).",
 					map[string]any{"ok": true, "client": client, "configured": true, "restart_required": true})
 				return nil
 			}

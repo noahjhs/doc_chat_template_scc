@@ -2294,18 +2294,11 @@ def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_b
 
 def _publish_mirror_offering(user_id: int, host: str, host_id: int, max_gb: float, kind: str, preview: bool) -> str:
     if kind == "mirror":
-        plan = (
-            f"Offer mirror space on {host}: friends you invite can each keep up to {max_gb:g} GB of folders mirrored here, "
-            "with 30 days of history. Everything arrives encrypted -- you can never read it, and they can't see anything of yours. "
-            f"Nothing is asked in return. {host} needs to be on and running Casper to receive changes; while it's asleep, friends' "
-            "changes wait or go to a catcher. You can withdraw this or end anyone's space at any time."
-        )
+        plan = (f"Offer mirror space on {host}: up to {max_gb:g} GB per friend, with 30 days of history. "
+                "It arrives encrypted -- you can never read it. Nothing asked in return.")
     else:
-        plan = (
-            f"Offer catcher space on {host} (best on a machine that's always on): when a friend's mirrors are all asleep, their "
-            f"newest changes are held here, encrypted, until a mirror wakes up -- usually only megabytes, up to {max_gb:g} GB each. "
-            "Nothing is asked in return. You can withdraw this or end anyone's space at any time."
-        )
+        plan = (f"Offer catcher space on {host}: holds friends' newest changes while their mirrors sleep (up to {max_gb:g} GB each), "
+                "encrypted -- you can never read it. Nothing asked in return.")
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
     try:
@@ -2320,50 +2313,68 @@ INVITE_EMAILS_PER_DAY = 20
 
 
 def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, for_whom: str, preview: bool,
-                       group: str = "", email: str = "", send_telegram: bool = False) -> str:
+                       group: str = "", email: str = "", send_telegram: bool = False, host: str = "") -> str:
     """for_whom is the invitee's name (the invite page and email greet them
     by it); group names the inviter's circle they're welcomed into (their
     only group if not given). Delivery: email to the invitee, and/or a
     ready-to-forward copy in the inviter's own Telegram (a bot can't message
-    someone who's never talked to it)."""
+    someone who's never talked to it). With no offering yet, the invite
+    sets one up (mirror space on their machine) in the same confirmation --
+    one plan, one yes."""
     with get_db() as db:
-        mine = trust.list_offerings(db, user_id)["mine"]
+        mine = [o for o in trust.list_offerings(db, user_id)["mine"]]
         my_groups = [g for g in trust.groups_of(db, user_id) if g["owner"] is None]
         profile = _get_or_create_profile(db, user_id)
         emailed_today = db.execute(
             "SELECT COUNT(*) AS n FROM invites WHERE owner_user_id = ? AND delivered_via LIKE '%email%' AND created_at > datetime('now', '-1 day')",
             (user_id,),
         ).fetchone()["n"]
+    new_offering_host = None
     if offering_id is None:
-        if len(mine) != 1:
-            return "Say which offering (offering_id) -- " + ("you have none yet; publish_offering first." if not mine else f"you have {len(mine)}.")
-        offering_id = mine[0]["id"]
+        candidates = [o for o in mine if not host or o["host"] == host]
+        if len(candidates) > 1:
+            mirror = [o for o in candidates if o["kind"] == "mirror_space"]
+            candidates = mirror if len(mirror) == 1 else candidates
+        if len(candidates) > 1:
+            return "Next: ask which space this invite is from -- " + "; ".join(f"offering {o['id']}: {o['kind'].replace('_', ' ')} on {o['host']}" for o in candidates) + " (pass offering_id)."
+        if candidates:
+            offering_id = candidates[0]["id"]
+        else:
+            owned = [h["host"] for h in _mcp_list_hosts(user_id) if h["role"] == "owner"]
+            if host and host not in owned:
+                return f"Next: {host} isn't one of their machines ({', '.join(owned) or 'none paired'})."
+            if not host and len(owned) != 1:
+                return ("Next: Casper isn't connected on any of their Macs yet." if not owned
+                        else f"Next: ask which machine the space is on ({', '.join(owned)}) and pass host.")
+            new_offering_host = host or owned[0]
     offering = next((o for o in mine if o["id"] == offering_id), None)
-    if offering is None:
-        return "No such offering of yours."
+    if offering is None and new_offering_host is None:
+        return "No such offering of theirs."
+    kind = offering["kind"] if offering else "mirror_space"
+    where = offering["host"] if offering else new_offering_host
     group = " ".join(group.split()) or (my_groups[0]["name"] if len(my_groups) == 1 else "")
     email = email.strip()
     if email and not mailer.valid_address(email):
-        return f"'{email}' doesn't look like an email address."
+        return f"Next: '{email}' isn't a valid email address -- ask for it again."
     if email and not (mailer.configured() and _invite_page_url("x")):
-        return "This Casper deployment can't send email yet -- create the invite without email and pass the message on yourself."
+        return "Next: this Casper can't send email -- create the invite without email; they pass the message on."
     if email and emailed_today >= INVITE_EMAILS_PER_DAY:
-        return f"You've emailed {INVITE_EMAILS_PER_DAY} invites today -- that's the daily limit. Try tomorrow, or send the message yourself."
+        return f"Next: the daily limit of {INVITE_EMAILS_PER_DAY} emailed invites is reached -- send without email, or tomorrow."
     if send_telegram and not (os.environ.get("TELEGRAM_BOT_TOKEN") and profile.telegram_chat_id):
-        return "Telegram isn't linked for you yet -- link it first (Casper setup notifications), or skip send_telegram."
-    who = for_whom or "the friend you send it to"
-    what = {"mirror_space": f"{quota_gb:g} GB of mirror space", "catcher_space": "a catcher"}.get(offering["kind"], f"{quota_gb:g} GB of backup space")
-    into = f", welcoming them into your group '{group}'" if group else ""
-    delivery = [d for d in (f"email it to {email}" if email else "", "send it to your own Telegram to forward" if send_telegram else "") if d]
-    plan = (
-        f"Create a single-use invite giving {who} {what} on {offering['host']}{into}. "
-        + (f"Casper will {' and '.join(delivery)}. " if delivery else "")
-        + f"Whoever redeems it becomes your friend on Casper and gets that space; it expires in {trust.INVITE_TTL_DAYS} days and you can cancel it until then."
-    )
+        return "Next: Telegram isn't linked -- run `Casper setup notifications` (they tap Start in Telegram), then retry."
+    who = for_whom or "a friend"
+    what = {"mirror_space": f"{quota_gb:g} GB of mirror space", "catcher_space": "a catcher"}.get(kind, f"{quota_gb:g} GB of backup space")
+    into = f" to {group}" if group else ""
+    via = " and ".join(v for v in (f"email to {email}" if email else "", "your Telegram to forward" if send_telegram else "") if v)
+    plan = (f"Invite {who}{into} -- {what} on {where}" + (f", by {via}" if via else "") + ". Single-use, expires in "
+            f"{trust.INVITE_TTL_DAYS} days."
+            + (f" (Also sets up mirror space on {where}: up to {quota_gb:g} GB per friend, nothing asked in return.)" if new_offering_host else ""))
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
     try:
         with get_db() as db:
+            if new_offering_host:
+                offering_id = trust.publish_offering(db, user_id, _own_host_id(user_id, new_offering_host), int(quota_gb * trust.GB), "allow", "mirror_space")
             group_id = trust.group_named(db, user_id, group) if group else None
             code, _ = trust.create_invite(db, user_id, offering_id, int(quota_gb * trust.GB), for_whom, group_id)
             me = trust.username(db, user_id)
@@ -2374,7 +2385,7 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     gift = {
         "mirror_space": f"room for {quota_gb:g} GB of your folders to be mirrored on my computer with Casper -- kept up to date as you work, with 30 days of history",
         "catcher_space": "a catcher on my always-on computer with Casper -- it holds your newest changes while your mirrors are asleep",
-    }.get(offering["kind"], f"{quota_gb:g} GB of backup space for you on my computer with Casper")
+    }.get(kind, f"{quota_gb:g} GB of backup space for you on my computer with Casper")
     page = _invite_page_url(code)
     joining = f" to join '{group}'" if group else ""
     message = (
@@ -2387,14 +2398,14 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     sent, problems, channels = [], [], []
     if email:
         third = {"mirror_space": f"{quota_gb:g} GB on their computer to keep your folders safe, with 30 days of history",
-                 "catcher_space": "their always-on computer as a catcher for your newest changes"}.get(offering["kind"], f"{quota_gb:g} GB of backup space")
+                 "catcher_space": "their always-on computer as a catcher for your newest changes"}.get(kind, f"{quota_gb:g} GB of backup space")
         try:
             mailer.send(email, *mailer.invite_email(for_whom, me, group, third, page, prompt))
             sent.append(f"emailed to {email}")
             channels.append("email")
         except Exception as e:
             print(f"invite email to user {user_id}'s invitee failed: {e}")
-            problems.append("the email couldn't be sent")
+            problems.append("email")
     if send_telegram:
         share = "https://t.me/share/url?" + urllib.parse.urlencode({"url": page or url, "text": message})
         try:
@@ -2406,12 +2417,14 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
             channels.append("telegram")
         except Exception as e:
             print(f"invite Telegram copy for user {user_id} failed: {e}")
-            problems.append("the Telegram copy couldn't be sent")
+            problems.append("Telegram")
     if channels:
         with get_db() as db:
             db.execute("UPDATE invites SET delivered_via = ? WHERE code_hash = ?", (",".join(channels), trust._invite_hash(code)))
-    status = (" Delivered: " + "; ".join(sent) + "." if sent else "") + (" But " + " and ".join(problems) + " -- send the message below yourself." if problems else "")
-    return f"Invite created: {code}.{status}\n\nMessage for the person to send {who}:\n{message}"
+    out = f"Sent: {'; '.join(sent)}." if sent else f"Invite created for {who}."
+    if problems or not sent:
+        out += (f" ({' and '.join(problems)} delivery failed.)" if problems else "") + f"\n\nMessage for the person to send {who}:\n{message}"
+    return out + f"\nNext: code {code}; details in my_casper."
 
 
 @app.get("/invites/info")
@@ -2447,15 +2460,13 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
             group = trust.group_name(db, inv["group_id"])
     except trust.TrustError as e:
         return f"Can't use that invite: {e.message}"
-    each = "they'll approve each backup before it's stored" if inv["write_tier"] == "ask" else "backups within your share are stored without waiting for them"
     what = {
-        "mirror_space": f"{_gb(inv['quota_bytes'])} of mirror space on {owner}'s machine ({owner}/{label}) -- folders you choose are kept there continuously, with 30 days of history",
-        "catcher_space": f"catcher space on {owner}'s machine ({owner}/{label}) -- it holds your newest changes while your mirrors sleep",
-    }.get(inv["kind"], f"{_gb(inv['quota_bytes'])} of backup space on {owner}'s machine ({owner}/{label}); {each}")
+        "mirror_space": f"{_gb(inv['quota_bytes'])} of mirror space on {owner}/{label} (30 days of history)",
+        "catcher_space": f"a catcher on {owner}/{label}",
+    }.get(inv["kind"], f"{_gb(inv['quota_bytes'])} of backup space on {owner}/{label}")
     plan = (
-        f"Use {owner}'s invite: {'' if already else f'you and {owner} become friends on Casper, '}{f'you join their group {group!r}, ' if group else ''}{'and ' if not already or group else ''}you get {what}. "
-        f"Your files are encrypted on your own machine before they're sent, so {owner} can never read them. "
-        f"Either of you can end this at any time."
+        f"Accept {owner}'s invite{f' to {group}' if group else ''}: {what}{'' if already else f'; you and {owner} become friends'}. "
+        f"Encrypted -- {owner} can never read it. Either of you can end it any time."
     )
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
@@ -2466,16 +2477,16 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
     except trust.TrustError as e:
         return f"Can't use that invite: {e.message}"
     _refresh_daemon_grants(inv["owner_user_id"], inv["host_id"])
-    notify(inv["owner_user_id"], f"{me} used your Casper invite: they now have {_gb(inv['quota_bytes'])} of backup space on {label}.")
+    notify(inv["owner_user_id"], f"{me} accepted your Casper invite{f' to {group}' if group else ''}.")
     if inv["kind"] == "mirror_space":
         return (
-            f"Done. You and {owner} are friends, and you have {_gb(inv['quota_bytes'])} of mirror space on {owner}/{label}. "
-            f"Next: ask the person which folder to mirror there (mirror_folder). Casper defaults to generosity: suggest the person "
-            f"also offer {owner} mirror space in return (publish_offering + create_invite) -- {owner} is free to decline."
+            f"Done: {_gb(inv['quota_bytes'])} of mirror space on {owner}/{label}. "
+            f"Next: ask which folder to mirror there (suggest Documents), and in one line whether to offer {owner} space back "
+            f"(not expected; create_invite for_whom={owner!r})."
         )
     if inv["kind"] == "catcher_space":
-        return f"Done. You and {owner} are friends; {owner}/{label} can now catch your changes while your mirrors sleep (use it as the catcher in mirror_folder)."
-    return f"Done. {plan} Back up to it as {owner}/{label}."
+        return f"Done: {owner}/{label} is their catcher. Next: use it as the catcher in mirror_folder."
+    return f"Done: {what}. Next: back up to {owner}/{label}."
 
 
 def _mcp_list_approvals(user_id: int) -> str:
@@ -2820,8 +2831,11 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         f"Mirror {label} ({backups.human(size)}) from {source_host} to {where}: every change is encrypted here and reaches them within "
         f"seconds while both computers are on, with 30 days of history (every version for a week, then daily). They can never read it.{catch}"
     )
-    if preview:
-        return "PREVIEW (nothing changed yet): " + plan
+    if preview:  # the one-line version; the Casper dialog shows the full plan
+        short_catch = (f", catcher {catcher_grant['owner']}/{catcher_grant['host']}" if catcher_grant
+                       else ", Casper's catcher" if use_casper_catcher else ", no catcher")
+        return (f"PREVIEW (nothing changed yet): Mirror {label} ({backups.human(size)}) to {where}{short_catch} -- "
+                "encrypted, 30 days of history.")
     with get_db() as db:
         folder_id = mirroring.create_folder(db, user_id, config["host_id"], abs_path, label, mirror_grants, catcher_grant, use_casper_catcher)
     description = f"Start mirroring {label} ({backups.human(size)}) to {where}?"

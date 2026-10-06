@@ -165,7 +165,7 @@ def test_mirroring_end_to_end(world):
         code = re.search(r"CASPER-[A-Z2-9-]{14}", out).group(0)
         done = world.mcp("riley", "redeem_invite", code=code, preview=False)
         assert "Done" in done
-    assert "offer sam mirror space in return" in done or "catch your changes" in done
+    assert "offer sam space back" in done or "is their catcher" in done
 
     docs = riley["home"] / "Documents"
     (docs / "taxes").mkdir(parents=True)
@@ -174,7 +174,7 @@ def test_mirroring_end_to_end(world):
     (docs / "taxes" / "return.pdf").write_bytes(big)
 
     plan = world.mcp("riley", "mirror_folder", source_host="riley-mac", path="Documents", mirrors=["sam/sam-mac"], catcher="cat/cat-server")
-    assert plan.startswith("PREVIEW") and "can never read it" in plan
+    assert plan.startswith("PREVIEW") and "encrypted, 30 days of history" in plan
     out = world.mcp("riley", "mirror_folder", source_host="riley-mac", path="Documents", mirrors=["sam/sam-mac"], catcher="cat/cat-server", preview=False)
     assert "can't confirm it for them" in out
 
