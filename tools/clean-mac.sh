@@ -10,7 +10,8 @@
 #   invitee-base        the invited person's Mac before Casper: Chrome
 #                       (default browser), Gmail and Telegram signed in,
 #                       realistic Documents; no sleep/lock, no update nags,
-#                       remote login off. No AI agent -- the guide's path.
+#                       remote login off; copy/paste with the host (Tart
+#                       guest agent, per-user). No AI agent -- the guide's path.
 #   invitee-base-agent  the same, plus Claude Code installed and signed in
 #                       -- the "paste this to your agent" path.
 # Login: user admin; the password is in ~/.config/casper-vm/password.
