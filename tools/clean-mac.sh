@@ -35,7 +35,7 @@ reset)
     tart stop "$VM" 2>/dev/null || true
     tart delete "$VM" 2>/dev/null || true
     tart clone "$base" "$VM"
-    tart set "$VM" --cpu 4 --memory 6144 --display 1440x900
+    tart set "$VM" --cpu 4 --memory 4096 --display 1440x900
     echo "$VM is fresh from $base. Run: $0 start"
     ;;
 stop)
