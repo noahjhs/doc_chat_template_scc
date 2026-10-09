@@ -1,22 +1,7 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: casper-app
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - ./dist:/app/dist:ro
-    ports:
-      - "127.0.0.1:8501:8501"   # local-only, for debugging; not required for the tunnel
-    depends_on:
-      - auth
-    networks:
-      - casper-net
-
-  # The public site (site/www, "Warm Paper"): landing, download and invite
-  # pages. Static; casper-www serves the www subdomain.
+  # The web front end (site/www, "Warm Paper"): the public site (www) and the
+  # signed-in pages -- sign in, sign up, Casper's guide (app). Static pages;
+  # /api/ is proxied to casper_service, so the browser talks to one origin.
   www:
     build:
       context: ./site/www
@@ -27,6 +12,9 @@ services:
       AUTH_URL: ${PUBLIC_AUTH_URL:-https://dev-auth.casperagent.dev}
       AGENTS_URL: ${PUBLIC_AGENTS_URL:-dev-auth.casperagent.dev/agents.md}
       DOWNLOAD_URL: ${PUBLIC_DOWNLOAD_URL:-https://dev-auth.casperagent.dev/download/casper/macos}
+      WWW_URL: ${PUBLIC_WWW_URL:-https://dev-www.casperagent.dev}
+      PAIR_SCHEME: ${PAIR_SCHEME:-casper-dev}
+      AUTH_UPSTREAM: http://casper-auth:8100
     ports:
       - "127.0.0.1:8080:8080"   # local-only, for debugging
     networks:

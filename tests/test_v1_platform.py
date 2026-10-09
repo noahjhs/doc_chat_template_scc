@@ -400,6 +400,38 @@ def _onboard_two(client, sd_url):
     return sam, riley, _agent_token(client, sam), _agent_token(client, riley)
 
 
+def test_an_accepted_invite_stays_usable_until_the_first_mirror_runs(app_env):
+    """Someone who stalls or starts over (a new account, a reset Mac) uses
+    the same invite again; the unfinished start is undone. It's used up
+    once their first mirror is running."""
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        out = _mcp(client, sam_agent, "create_invite", for_whom="Riley", group="Mutual Aid", preview=False)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", out).group(0)
+        assert _mcp(client, riley_agent, "redeem_invite", code=code, preview=False).startswith("Done")
+        assert "accepted by riley, still setting up" in _mcp(client, sam_agent, "my_casper")
+
+        # Riley starts over as a new account: the invite still works, and
+        # the abandoned account loses what the invite gave it.
+        _, riley2 = _signup(client, "riley2")
+        riley2_agent = _agent_token(client, riley2)
+        assert client.get("/invites/info", params={"code": code}).json()["valid"] is True
+        assert _mcp(client, riley2_agent, "redeem_invite", code=code, preview=False).startswith("Done")
+        assert client.get("/friends", headers=riley).json()["friends"] == []
+        assert "mirror space" not in _mcp(client, riley_agent, "my_casper") and "Mutual Aid" not in _mcp(client, riley_agent, "my_casper")
+        ledger = _mcp(client, sam_agent, "my_casper")
+        assert "Friends: riley2" in ledger and "accepted by riley2" in ledger and "Your group 'Mutual Aid': riley2" in ledger
+
+        # riley2's first mirror runs: now it's used up.
+        with main.get_db() as db:
+            main.trust.complete_invites(db, _user_id(main, "riley2"))
+        assert client.get("/invites/info", params={"code": code}).json()["valid"] is False
+        assert "already been used" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        assert "Open invites" not in _mcp(client, sam_agent, "my_casper")
+
+
 def test_invite_with_no_offering_sets_one_up_in_the_same_yes(app_env):
     main, client = app_env
     main.notify = lambda *a, **k: None
@@ -486,7 +518,8 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         assert done.startswith("Done: 10.0 GB of mirror space on sam/sam-mini.") and "offer sam space back" in done
         assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]
         assert any("riley accepted your Casper invite to Mutual Aid" in t for t in notes)
-        assert "already been used" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        assert _mcp(client, riley_agent, "redeem_invite", code=code, preview=False).startswith("Done")  # again: a no-op
+        assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]
 
         ledger = _mcp(client, sam_agent, "my_casper")
         assert "Friends: riley" in ledger and "mirror space for riley: 10.0 GB on sam-mini" in ledger
@@ -498,7 +531,7 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         out2 = _mcp(client, sam_agent, "create_invite", quota_gb=5, preview=False)
         assert "to join 'Mutual Aid'" in out2  # their one group is the default
         code2 = re.search(r"CASPER-[A-Z2-9-]{14}", out2).group(0)
-        invite_id = re.search(r"\[invite (\d+)\]", _mcp(client, sam_agent, "my_casper")).group(1)
+        invite_id = re.findall(r"\[invite (\d+)\]", _mcp(client, sam_agent, "my_casper"))[-1]
         assert "Cancelled" in _mcp(client, sam_agent, "revoke", kind="invite", id_or_name=invite_id)
         assert "cancelled" in _mcp(client, riley_agent, "redeem_invite", code=code2)
         grant_id = re.search(r"\[grant (\d+)\]", _mcp(client, sam_agent, "my_casper")).group(1)
@@ -674,3 +707,19 @@ def test_guide_unavailable_without_a_key(app_env, monkeypatch):
     _, riley = _signup(client, "riley")
     monkeypatch.delenv("NOUS_API_KEY", raising=False)
     assert "isn't available" in client.post("/guide/message", json={"text": "hi"}, headers=riley).json()["reply"]
+
+
+def test_guide_offers_buttons_only_for_a_proposal_ending_in_a_short_question(app_env):
+    import guide
+
+    assert guide.choices_for("Accept Riley's invite -- 10 GB on Riley's MacBook. Accept?", True) == ["Accept", "Not now"]
+    assert guide.choices_for("Invite Noah to Mutual Aid -- 20 GB on this Mac, by email. Send?", True) == ["Send", "Not now"]
+    assert guide.choices_for("Noah's email, and the group name?", True) == []  # needs typing
+    assert guide.choices_for("Accept?", False) == []  # nothing was proposed
+    shown = guide.visible([
+        {"role": "assistant", "content": "Old plan. Send?", "_choices": ["Send", "Not now"]},
+        {"role": "user", "content": "Not now"},
+        {"role": "assistant", "content": "New plan. Start?", "_choices": ["Start", "Not now"]},
+    ])
+    assert "choices" not in shown[0] and shown[-1]["choices"] == ["Start", "Not now"]  # only the latest still applies
+    assert all(not k.startswith("_") for m in guide._for_model([{"role": "assistant", "content": "x", "_choices": ["a"]}]) for k in m)

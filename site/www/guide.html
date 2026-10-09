@@ -1,0 +1,63 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;1,9..144,300&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"><title>Guide — Casper</title></head><body><div class="wrap">
+<nav><a class="logo" href="${WWW_URL}/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C9.4 3 5 8 5 14.5V28l3.6-2.6L12 28l4-2.8L20 28l3.4-2.6L27 28V14.5C27 8 22.6 3 16 3z" fill="#2b1d14"/><circle cx="12.5" cy="14" r="1.8" fill="#f6efe4"/><circle cx="19.5" cy="14" r="1.8" fill="#f6efe4"/></svg> Casper</a><div class="links"><a href="#" id="signout">Sign out</a></div></nav>
+<section class="chat">
+<div class="eyebrow">Casper's guide</div>
+<div id="log" class="log"></div>
+<div id="choices" class="choices"></div>
+<form id="f" class="composer"><input id="t" placeholder="Message Casper's guide" autocomplete="off"><button class="btn" type="submit">Send</button></form>
+</section>
+<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
+if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
+const $ = id => document.getElementById(id);
+const GHOST = document.querySelector(".logo svg").outerHTML;
+let busy = false, msgs = [], announced = false;
+function bubble(role, text) {
+  const d = document.createElement("div"); d.className = "msg " + role;
+  d.innerHTML = (role === "assistant" ? '<span class="av">' + GHOST + "</span>" : "") + '<div class="body">' + Casper.render(text) + "</div>";
+  $("log").appendChild(d); window.scrollTo(0, document.body.scrollHeight); return d;
+}
+function setChoices(list) {
+  $("choices").innerHTML = "";
+  (list || []).forEach((c, i) => {
+    const b = document.createElement("button"); b.className = i === 0 ? "btn" : "btn ghost"; b.innerText = c;
+    b.onclick = () => send(c); $("choices").appendChild(b);
+  });
+}
+async function send(text) {
+  if (busy || !text.trim()) return; busy = true; setChoices([]);
+  bubble("user", text); msgs.push({ role: "user", text });
+  const thinking = bubble("assistant", "…"); thinking.classList.add("thinking");
+  try {
+    const r = await Casper.api("/guide/message", { method: "POST", body: { text } });
+    thinking.remove(); bubble("assistant", r.reply); msgs.push({ role: "assistant", text: r.reply }); setChoices(r.choices);
+  } catch (e) { thinking.remove(); bubble("assistant", e.message); }
+  busy = false; $("t").focus();
+}
+$("f").addEventListener("submit", ev => { ev.preventDefault(); const t = $("t").value; $("t").value = ""; send(t); });
+$("signout").onclick = ev => { ev.preventDefault(); Casper.signOut(); location.href = "/signin"; };
+(async () => {
+  try { msgs = (await Casper.api("/guide/history")).messages; } catch (e) { if (e.status === 401) return location.replace("/signin"); }
+  msgs.forEach(m => bubble(m.role, m.text));
+  const last = msgs[msgs.length - 1];
+  if (last && last.choices) setChoices(last.choices);
+  const invite = Casper.param("invite");
+  if (invite && !msgs.some(m => m.text.includes(invite))) send("A friend invited me to Casper -- my invite code is " + invite + ".");
+  else if (Casper.param("connected") && msgs.length) announce();
+  else if (!msgs.length) bubble("assistant", "Hi! I'm Casper's guide. Keep your files safe on a friend's computer, or offer space on yours?");
+  // When this person's Mac connects (they opened Casper and signed in, in
+  // another tab or here), carry on without them having to say so.
+  const bc = new BroadcastChannel("casper");
+  bc.onmessage = e => { if (e.data === "connected?") { bc.postMessage("guide-here"); announce(); } };
+  let seen = await Casper.connectedHosts();
+  setInterval(async () => {
+    const now = await Casper.connectedHosts();
+    if (now && seen && [...now].some(id => !seen.has(id))) announce();
+    if (now) seen = now;
+  }, 4000);
+})();
+async function announce() {
+  if (announced || !msgs.length) return; announced = true;
+  await waitIdle(); send("My Mac is connected.");
+}
+const waitIdle = () => new Promise(r => { const i = setInterval(() => { if (!busy) { clearInterval(i); r(); } }, 300); });
+</script></body></html>

@@ -402,7 +402,8 @@ CREATE TABLE IF NOT EXISTS invites (
     used_at TEXT,
     cancelled_at TEXT,
     group_id INTEGER REFERENCES groups(id),
-    delivered_via TEXT NOT NULL DEFAULT ''
+    delivered_via TEXT NOT NULL DEFAULT '',
+    completed_at TEXT
 );
 
 -- A person's named circle ("Mutual Aid"): the name an invite welcomes
@@ -574,6 +575,10 @@ def _add_group_columns_to_invites(db):
         db.execute("ALTER TABLE invites ADD COLUMN group_id INTEGER REFERENCES groups(id)")
     if "delivered_via" not in columns:
         db.execute("ALTER TABLE invites ADD COLUMN delivered_via TEXT NOT NULL DEFAULT ''")
+    if "completed_at" not in columns:
+        # An accepted invite stays usable (e.g. by the same person starting
+        # over) until their first mirror is running -- see trust.find_invite.
+        db.execute("ALTER TABLE invites ADD COLUMN completed_at TEXT")
 
 
 @contextlib.contextmanager

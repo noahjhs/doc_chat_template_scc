@@ -1,0 +1,53 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;1,9..144,300&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"><title>Sign in — Casper</title></head><body><div class="wrap">
+<nav><a class="logo" href="${WWW_URL}/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C9.4 3 5 8 5 14.5V28l3.6-2.6L12 28l4-2.8L20 28l3.4-2.6L27 28V14.5C27 8 22.6 3 16 3z" fill="#2b1d14"/><circle cx="12.5" cy="14" r="1.8" fill="#f6efe4"/><circle cx="19.5" cy="14" r="1.8" fill="#f6efe4"/></svg> Casper</a><div class="links"></div></nav>
+<section class="auth">
+<div class="eyebrow" id="eyebrow">Welcome back</div>
+<h2 id="title">Sign in</h2>
+<form id="f" class="panel form">
+<label>Username<input name="username" autocomplete="username" required autofocus></label>
+<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+<button class="btn" type="submit">Sign in</button>
+<p class="err" id="err"></p>
+<p class="muted small">New to Casper? <a id="toSignup" href="/signup">Create an account</a></p>
+</form>
+<div id="status" class="panel hide"><h3 id="statusTitle">Connecting this Mac…</h3><p class="muted" id="statusText">If your browser asks to open Casper, choose Open.</p><p id="statusAction"></p></div>
+</section>
+<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
+const fromApp = Casper.param("from") === "app";
+const next = Casper.param("next") || "/guide";
+if (Casper.param("invite")) document.getElementById("toSignup").href = "/signup?invite=" + encodeURIComponent(Casper.param("invite"));
+if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this Mac"; }
+const $ = id => document.getElementById(id);
+async function connect() {
+  $("f").classList.add("hide"); $("status").classList.remove("hide");
+  const before = (await Casper.connectedHosts()) || new Set();
+  Casper.pair();
+  if (await Casper.waitForNewHost(before)) {
+    $("statusTitle").innerText = "This Mac is connected."; $("statusText").innerText = "";
+    // An open guide tab carries on by itself; otherwise continue here.
+    const bc = new BroadcastChannel("casper"); let guideOpen = false;
+    bc.onmessage = e => { if (e.data === "guide-here") guideOpen = true; };
+    bc.postMessage("connected?");
+    setTimeout(() => {
+      if (guideOpen) { $("statusText").innerText = "Back to your guide tab; it's carrying on."; return; }
+      location.href = next + (next.includes("?") ? "&" : "?") + "connected=1";
+    }, 900);
+  } else {
+    $("statusTitle").innerText = "Casper didn't answer.";
+    $("statusText").innerText = "Make sure Casper is open on this Mac.";
+    $("statusAction").innerHTML = '<button class="btn" onclick="connect()">Try again</button>';
+  }
+}
+(async () => {
+  if (Casper.session()) {
+    try { await Casper.api("/hosts"); if (fromApp) return connect(); location.href = next; return; } catch (e) {}
+  }
+})();
+$("f").addEventListener("submit", async ev => {
+  ev.preventDefault(); $("err").innerText = "";
+  const d = Object.fromEntries(new FormData(ev.target));
+  try { Casper.saveSession(await Casper.api("/login", { method: "POST", body: d })); }
+  catch (e) { $("err").innerText = e.message; return; }
+  if (fromApp) connect(); else location.href = next;
+});
+</script></body></html>

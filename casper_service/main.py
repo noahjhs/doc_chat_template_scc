@@ -177,7 +177,10 @@ def check_rate_limit(ip: str):
 
 
 def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    """The visitor's own address: Cloudflare (in front of every deployment)
+    sets CF-Connecting-IP and overwrites any client-supplied value, while
+    request.client is just the tunnel or the www proxy -- shared by everyone."""
+    return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "unknown")
 
 
 # --- Helpers -------------------------------------------------------------
@@ -1632,6 +1635,14 @@ async def telegram_webhook(request: Request):
         chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
         callback_id = callback.get("id", "")
         action, _, approval_id = str(callback.get("data", "")).partition(":")
+        if action == "guide" and approval_id:  # one of the guide's buttons: the person's answer
+            with get_db() as db:
+                owner = db.execute("SELECT user_id FROM user_profile WHERE telegram_chat_id = ?", (chat_id,)).fetchone()
+            _telegram_answer_callback(callback_id, approval_id)
+            if owner is not None:
+                _telegram_send_text(chat_id, f"› {approval_id}")
+                _guide_via_telegram(chat_id, owner["user_id"], approval_id)
+            return {"ok": True}
         if action not in ("approve", "deny") or not approval_id:
             _telegram_answer_callback(callback_id, "Unrecognized action.")
             return {"ok": True}
@@ -2204,11 +2215,13 @@ def _mcp_my_casper(user_id: int) -> str:
                 each = "you approve each backup" if o["write_tier"] == "ask" else "any backup within a friend's share is allowed"
                 lines.append(f"  - backup space: up to {o['max_quota_gb']:g} GB per friend on {o['host']} ({each}) [offering {o['id']}]")
     if invites:
-        lines.append("Open invites (single-use, not yet redeemed):")
+        lines.append("Open invites (single-use; used up once the friend's first mirror runs):")
         for i in invites:
             with get_db() as db:
                 gname = trust.group_name(db, i["group_id"])
-            lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}{' to join ' + gname if gname else ''}, expires {i['expires_at'][:10]} [invite {i['id']}]")
+                who = trust.username(db, i["used_by_user_id"]) if i["used_by_user_id"] else None
+            state = f"accepted by {who}, still setting up" if who else f"expires {i['expires_at'][:10]}"
+            lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}{' to join ' + gname if gname else ''}, {state} [invite {i['id']}]")
     kinds = {"backup_peer": "backup", "mirror_peer": "mirror", "catcher_peer": "catcher"}
     if given:
         lines.append("Space you give friends (everything arrives encrypted; you can't read it):")
@@ -2771,6 +2784,7 @@ def _decide_mirror_consent(row, decision: str) -> str:
             db.execute("UPDATE mirror_folders SET status = 'declined', stopped_at = ? WHERE id = ?", (trust.now_iso(), folder_id))
             return f"Didn't start mirroring {f['label']}."
         db.execute("UPDATE mirror_folders SET status = 'active', activated_at = ? WHERE id = ?", (trust.now_iso(), folder_id))
+        trust.complete_invites(db, f["owner_user_id"])
         f = mirroring.folder_row(db, folder_id)
         me = trust.username(db, f["owner_user_id"])
         targets = mirroring.peers_of(db, folder_id)
@@ -3058,8 +3072,7 @@ def _guide_reply(user_id: int, text: str) -> tuple[str, list[dict]]:
     if not os.environ.get("NOUS_API_KEY"):
         return "Casper's guide isn't available on this deployment yet.", []
     prompt = guide.system_prompt(
-        os.environ.get("GUIDE_DOWNLOAD_URL", "https://www.casperagent.dev/download"),
-        os.environ.get("GUIDE_SIGNIN_URL", "https://app.casperagent.dev/signin"),
+        os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos",
     )
     with _guide_lock(user_id):
         history = guide.load_history(user_id)
@@ -3081,8 +3094,8 @@ def guide_message(body: dict, authorization: str = Header(default="")):
     text = str(body.get("text", "")).strip()
     if not text:
         raise HTTPException(status_code=400, detail="Say something.")
-    reply, _ = _guide_reply(user_id, text)
-    return {"reply": reply}
+    reply, messages = _guide_reply(user_id, text)
+    return {"reply": reply, "choices": (messages[-1].get("_choices") or []) if messages else []}
 
 
 @app.get("/guide/history")
@@ -3094,7 +3107,17 @@ def guide_history(authorization: str = Header(default="")):
 
 def _guide_via_telegram(chat_id: str, user_id: int, text: str):
     def work():
-        reply, _ = _guide_reply(user_id, text)
-        _telegram_send_text(chat_id, reply[:4000])
+        reply, messages = _guide_reply(user_id, text)
+        choices = (messages[-1].get("_choices") or []) if messages else []
+        if not choices:
+            _telegram_send_text(chat_id, reply[:4000])
+            return
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        try:  # the guide's buttons, as inline buttons; a tap is that answer
+            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
+                "chat_id": chat_id, "text": reply[:4000],
+                "reply_markup": {"inline_keyboard": [[{"text": c, "callback_data": f"guide:{c}"[:64]} for c in choices]]}}, timeout=10)
+        except requests.RequestException as e:
+            print(f"Couldn't send Telegram message to chat {chat_id}: {e}")
 
     threading.Thread(target=work, daemon=True).start()

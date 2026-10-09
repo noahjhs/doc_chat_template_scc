@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
@@ -273,13 +274,28 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 		systray.Quit()
 	}()
 
-	// Prompted once per cold launch (not gated behind whether the user
-	// happened to open the menu), unless it's already a login item, the
-	// user previously checked "Don't ask again", or this is a
-	// non-interactive dev/CI run (CONTROL_TOOL_KEY set, same env check
-	// main() uses to skip pairing dialogs entirely).
-	if !isLoginItem && os.Getenv("CONTROL_TOOL_KEY") == "" && !config.LoginItemPromptDismissed() {
-		go promptAddToLoginItems(mStartup, logf)
+	// Nothing paired on this Mac yet (a fresh install): the next step is
+	// signing in, so take the person straight there -- the sign-in page
+	// connects this Mac. Only then ask about login items, so the two never
+	// compete. Not in a non-interactive dev/CI run (CONTROL_TOOL_KEY set).
+	if os.Getenv("CONTROL_TOOL_KEY") == "" {
+		go func() {
+			if sessions, _ := config.LoadSessions(); len(sessions) == 0 {
+				time.Sleep(3 * time.Second) // a launch by a casper://pair link pairs in this window
+				if app := config.LoadAppDomain(); app != "" && state.identityCount() == 0 {
+					logf("Not signed in yet -- opening sign-in")
+					if err := exec.Command("open", config.BaseURL(app)+"/signin?from=app").Run(); err != nil {
+						logf("Couldn't open sign-in: %s", err)
+					}
+				}
+				for state.identityCount() == 0 {
+					time.Sleep(2 * time.Second)
+				}
+			}
+			if !isLoginItem && !config.LoginItemPromptDismissed() {
+				promptAddToLoginItems(mStartup, logf)
+			}
+		}()
 	}
 }
 

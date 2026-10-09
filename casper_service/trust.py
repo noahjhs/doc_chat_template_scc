@@ -489,9 +489,12 @@ def find_invite(db, code: str) -> dict:
         raise TrustError("That invite code isn't valid -- check it was copied exactly.", 404)
     if row["cancelled_at"] or row["offering_withdrawn"]:
         raise TrustError("That invite was cancelled by the person who sent it.", 410)
-    if row["used_at"]:
+    if row["completed_at"]:
         raise TrustError("That invite has already been used (invites are single-use) -- ask for a new one.", 410)
-    if row["expires_at"] < now_iso():
+    # Accepted but not finished (no mirror running yet): still usable, with
+    # no time limit -- someone who stalls or starts over (a new account, a
+    # new Mac) uses the same invite again. Only a never-accepted invite expires.
+    if not row["used_at"] and row["expires_at"] < now_iso():
         raise TrustError("That invite has expired -- ask for a new one.", 410)
     return dict(row)
 
@@ -504,13 +507,18 @@ def redeem_invite(db, user_id: int, code: str) -> dict:
     if owner_id == user_id:
         raise TrustError("That's your own invite -- send it to the friend it's for.")
     relation = RELATION_BY_KIND[inv["kind"]]
+    if inv["used_by_user_id"] == user_id:
+        return inv  # accepting again is a no-op
+    if inv["used_by_user_id"] is not None:
+        release_invite(db, inv)  # an earlier, unfinished start: this one replaces it
     if active_grant(db, user_id, inv["host_id"], owner_id, relation):
         raise TrustError(f"You already have {KIND_NAMES[inv['kind']]} there.", 409)
+    tag = json.dumps({"invite_id": inv["id"]})
     if not are_friends(db, user_id, owner_id):
         for a, b in ((user_id, owner_id), (owner_id, user_id)):
             db.execute(
-                "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id) VALUES ('user', ?, 'friend', 'user', ?)",
-                (a, b),
+                "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, 'friend', 'user', ?, ?)",
+                (a, b, tag),
             )
     attrs = {"owner_user_id": owner_id, "quota_bytes": inv["quota_bytes"], "write_tier": inv["write_tier"], "offering_id": inv["offering_id"], "invite_id": inv["id"]}
     db.execute(
@@ -522,16 +530,37 @@ def redeem_invite(db, user_id: int, code: str) -> dict:
         (user_id, inv["group_id"]),
     ).fetchone():
         db.execute(
-            "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id) VALUES ('user', ?, 'member', 'group', ?)",
-            (user_id, inv["group_id"]),
+            "INSERT INTO relation_tuples (subject_type, subject_id, relation, object_type, object_id, attrs) VALUES ('user', ?, 'member', 'group', ?, ?)",
+            (user_id, inv["group_id"], tag),
         )
     db.execute("UPDATE invites SET used_by_user_id = ?, used_at = ? WHERE id = ?", (user_id, now_iso(), inv["id"]))
     return inv
 
 
+def release_invite(db, inv: dict):
+    """Undoes an unfinished acceptance -- everything that invite created for
+    whoever accepted it (the grant, and the friendship and group membership
+    if the invite made them) -- so the invite can be accepted afresh."""
+    earlier = inv["used_by_user_id"]
+    ts = now_iso()
+    for row in db.execute(
+        "SELECT id, attrs FROM relation_tuples WHERE revoked_at IS NULL AND (subject_id = ? OR (relation = 'friend' AND object_id = ?))",
+        (earlier, earlier),
+    ).fetchall():
+        if json.loads(row["attrs"] or "{}").get("invite_id") == inv["id"]:
+            db.execute("UPDATE relation_tuples SET revoked_at = ? WHERE id = ?", (ts, row["id"]))
+    db.execute("UPDATE invites SET used_by_user_id = NULL, used_at = NULL WHERE id = ?", (inv["id"],))
+
+
+def complete_invites(db, user_id: int):
+    """The person's first mirror is running: invites they accepted are now
+    used up."""
+    db.execute("UPDATE invites SET completed_at = ? WHERE used_by_user_id = ? AND completed_at IS NULL", (now_iso(), user_id))
+
+
 def cancel_invite(db, owner_id: int, invite_id: int):
     cur = db.execute(
-        "UPDATE invites SET cancelled_at = ? WHERE id = ? AND owner_user_id = ? AND used_at IS NULL AND cancelled_at IS NULL",
+        "UPDATE invites SET cancelled_at = ? WHERE id = ? AND owner_user_id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
         (now_iso(), invite_id, owner_id),
     )
     if cur.rowcount == 0:
@@ -540,7 +569,7 @@ def cancel_invite(db, owner_id: int, invite_id: int):
 
 def open_invites(db, owner_id: int) -> list[dict]:
     rows = db.execute(
-        "SELECT * FROM invites WHERE owner_user_id = ? AND used_at IS NULL AND cancelled_at IS NULL AND expires_at > ? ORDER BY id",
+        "SELECT * FROM invites WHERE owner_user_id = ? AND completed_at IS NULL AND cancelled_at IS NULL AND (used_at IS NOT NULL OR expires_at > ?) ORDER BY id",
         (owner_id, now_iso()),
     ).fetchall()
     return [dict(r) for r in rows]

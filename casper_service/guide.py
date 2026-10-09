@@ -14,6 +14,7 @@ passes tests/guide_eval.py's scripted conversations."""
 
 import json
 import os
+import re
 from typing import Callable
 
 from db import get_db
@@ -36,11 +37,11 @@ like you've always known it.
 - You can't confirm their own decisions. After starting a mirror, say: "Click
   Allow in the Casper dialog on your Mac." Never say it's protected until
   protection_status says so.
-- You can't run anything on their Mac. Installing and connecting are clicks:
-    1. Download Casper: {download_url} -- open it (if macOS asks about opening
-       at login: Allow).
-    2. Sign in at {signin_url} on that Mac -- that connects it.
-  list_hosts shows whether their Mac is connected (role owner, connected true).
+- You can't run anything on their Mac. If it isn't connected yet (list_hosts:
+  no machine with role owner and connected true), say exactly this and
+  nothing more: "Download Casper and open it: {download_url}". Opening it
+  signs them in and connects the Mac; this page tells you when ("My Mac is
+  connected."). No steps, no warnings about macOS prompts.
 - An invite code (CASPER-XXXX-XXXX-XXXX) can be accepted (redeem_invite)
   before their Mac is connected; mirroring needs the Mac. After accepting,
   one line: "Offer <friend> space back? Not expected."
@@ -124,17 +125,34 @@ def _call_tool(services, user_id: int, name: str, args: dict) -> str:
     return out if isinstance(out, str) else json.dumps(out)
 
 
-def system_prompt(download_url: str, signin_url: str) -> str:
-    return SYSTEM_PROMPT.format(download_url=download_url, signin_url=signin_url)
+def system_prompt(download_url: str, signin_url: str = "") -> str:
+    return SYSTEM_PROMPT.format(download_url=download_url)
+
+
+def choices_for(reply: str, proposed: bool) -> list[str]:
+    """Buttons instead of typing: a turn that proposed something (a preview)
+    and ends with a short question ("Accept?", "Send?") gets that answer
+    and "Not now" as buttons."""
+    last = reply.strip().splitlines()[-1].strip() if reply.strip() else ""
+    m = re.search(r"(?:^|[.!:]\s+|\u2014\s*|--\s*)([A-Z][A-Za-z']*(?: [a-z']+){0,2})\?$", last)
+    if not proposed or not m:
+        return []
+    return [m.group(1), "Not now"]
+
+
+def _for_model(messages: list[dict]) -> list[dict]:
+    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
 
 
 def run(client, model: str, services, user_id: int, history: list[dict], user_text: str, prompt: str,
         on_tool: Callable[[str, dict], None] | None = None) -> tuple[str, list[dict]]:
     """One person-turn: the model may call tools for several rounds before
-    answering. Returns (reply, the new history including this turn)."""
+    answering. Returns (reply, the new history including this turn); the
+    final assistant message carries any buttons as "_choices"."""
     messages = list(history) + [{"role": "user", "content": user_text}]
+    proposed = False
     for _ in range(MAX_TOOL_ROUNDS):
-        resp = client.chat.completions.create(model=model, messages=[{"role": "system", "content": prompt}] + messages,
+        resp = client.chat.completions.create(model=model, messages=[{"role": "system", "content": prompt}] + _for_model(messages),
                                               tools=TOOLS, temperature=0.2)
         msg = resp.choices[0].message
         calls = msg.tool_calls or []
@@ -143,7 +161,10 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
             entry["tool_calls"] = [{"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"}} for c in calls]
         messages.append(entry)
         if not calls:
-            return (msg.content or "").strip(), messages
+            reply = (msg.content or "").strip()
+            if choices := choices_for(reply, proposed):
+                entry["_choices"] = choices
+            return reply, messages
         for c in calls:
             try:
                 args = json.loads(c.function.arguments or "{}")
@@ -152,6 +173,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
             if on_tool:
                 on_tool(c.function.name, args)
             result = _call_tool(services, user_id, c.function.name, args)
+            proposed = proposed or result.startswith("PREVIEW")
             messages.append({"role": "tool", "tool_call_id": c.id, "content": result[:6000]})
     return "Sorry -- I got stuck working on that. Could you say it another way?", messages
 
@@ -180,8 +202,11 @@ def save_new(user_id: int, before: int, messages: list[dict]):
 
 def visible(messages: list[dict]) -> list[dict]:
     """What a person sees: their messages and the guide's replies."""
-    return [{"role": m["role"], "text": m["content"]} for m in messages
-            if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")]
+    shown = [{"role": m["role"], "text": m["content"], **({"choices": m["_choices"]} if m.get("_choices") else {})}
+             for m in messages if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")]
+    for m in shown[:-1]:  # only the latest message's buttons still apply
+        m.pop("choices", None)
+    return shown
 
 
 def client_from_env():

@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;1,9..144,300&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"><title>Create your account — Casper</title></head><body><div class="wrap">
+<nav><a class="logo" href="${WWW_URL}/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C9.4 3 5 8 5 14.5V28l3.6-2.6L12 28l4-2.8L20 28l3.4-2.6L27 28V14.5C27 8 22.6 3 16 3z" fill="#2b1d14"/><circle cx="12.5" cy="14" r="1.8" fill="#f6efe4"/><circle cx="19.5" cy="14" r="1.8" fill="#f6efe4"/></svg> Casper</a><div class="links"></div></nav>
+<section class="auth">
+<div class="eyebrow" id="eyebrow">Get started</div>
+<h2>Create your account</h2>
+<form id="f" class="panel form">
+<label>Username<span class="muted small">Friends will see it.</span><input name="username" autocomplete="username" required autofocus></label>
+<label>Password<input name="password" type="password" autocomplete="new-password" required minlength="8"></label>
+<button class="btn" type="submit">Create account</button>
+<p class="err" id="err"></p>
+<p class="muted small">Already have an account? <a id="toSignin" href="/signin">Sign in</a></p>
+</form>
+</section>
+<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
+const invite = Casper.param("invite");
+const fromApp = Casper.param("from") === "app";
+if (invite) { document.getElementById("eyebrow").innerText = "You're invited"; document.getElementById("toSignin").href = "/signin?invite=" + encodeURIComponent(invite); }
+const guide = "/guide" + (invite ? "?invite=" + encodeURIComponent(invite) : "");
+if (Casper.session()) Casper.api("/hosts").then(() => location.href = guide).catch(() => {});
+document.getElementById("f").addEventListener("submit", async ev => {
+  ev.preventDefault(); const err = document.getElementById("err"); err.innerText = "";
+  const d = Object.fromEntries(new FormData(ev.target));
+  try { Casper.saveSession(await Casper.api("/signup", { method: "POST", body: d })); }
+  catch (e) { err.innerText = e.message; return; }
+  // Opened from the Casper app: connect this Mac on the way to the guide.
+  location.href = fromApp ? "/signin?from=app&next=" + encodeURIComponent(guide) : guide;
+});
+</script></body></html>

@@ -143,8 +143,9 @@ def scenario_invite_to_protected(run):
     r = run(fake, f"Hi! My friend Sam sent me a Casper invite: {CODE}. I've already installed Casper and signed in on my Mac.")
     t = _turn_calls(fake, c0)
     checks.append(("previews the invite first", _did(t, "redeem_invite", preview=True) and not _did(t, "redeem_invite", preview=False)))
+    checks.append(("ends the plan with a one-word question (buttons)", bool(guide.choices_for(r, True))))
     c0 = len(fake.calls)
-    r = run(fake, "Yes, go ahead.")
+    r = run(fake, guide.choices_for(r, True)[0] if guide.choices_for(r, True) else "Yes, go ahead.")
     t = _turn_calls(fake, c0)
     checks.append(("redeems after yes", _did(t, "redeem_invite", preview=False)))
     checks.append(("doesn't start a mirror unasked", not _did(t, "mirror_folder", preview=False)))
@@ -171,7 +172,10 @@ def scenario_invite_to_protected(run):
 def scenario_no_mac(run):
     fake = FakeCasper(has_mac=False)
     r = run(fake, "Hi, I'd like to keep my files safe with Casper, but I haven't installed anything yet.")
-    return [("points to the download", DOWNLOAD in r or "download" in r.lower()),
+    print(f"     no-mac: {r!r}")
+    return [("points to the download", DOWNLOAD in r),
+            ("just download and open (under 20 words)", len(r.split()) < 20),
+            ("no steps or coaching", not any(w in r.lower() for w in ("sign in", "allow", "1.", "security", "login"))),
             ("doesn't try to mirror", not _did(fake.calls, "mirror_folder"))]
 
 
@@ -244,7 +248,7 @@ def evaluate(client, model, prices):
             return resp
 
     counted = Counting(client)
-    prompt = guide.system_prompt(DOWNLOAD, SIGNIN)
+    prompt = guide.system_prompt(DOWNLOAD)
     t0 = time.time()
     for sc in SCENARIOS:
         history = []
