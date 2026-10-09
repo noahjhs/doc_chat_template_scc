@@ -15,7 +15,10 @@
 <footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
 const fromApp = Casper.param("from") === "app";
 const next = Casper.param("next") || "/guide";
-if (Casper.param("invite")) document.getElementById("toSignup").href = "/signup?invite=" + encodeURIComponent(Casper.param("invite"));
+const carry = new URLSearchParams();
+if (Casper.param("invite")) carry.set("invite", Casper.param("invite"));
+if (fromApp) carry.set("from", "app");
+if ([...carry].length) document.getElementById("toSignup").href = "/signup?" + carry;
 if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this Mac"; }
 const $ = id => document.getElementById(id);
 async function connect() {

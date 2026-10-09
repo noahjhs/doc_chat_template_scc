@@ -46,7 +46,7 @@ footer a{text-decoration:none}
 .hide{display:none}
 @media (max-width:860px){.hero,.grid3,.two{grid-template-columns:1fr}nav .links a:not(.pill){display:none}.dark{padding:40px 28px}}
 /* Signed-in pages: forms and the guide's chat */
-.auth{max-width:460px;margin:0 auto;padding:40px 0 80px}
+.auth{max-width:460px;margin:0 auto;padding:40px 0 80px;border:0}
 .auth h2{margin-bottom:28px}
 .form{display:flex;flex-direction:column;gap:18px}
 .form label{display:flex;flex-direction:column;gap:6px;font-weight:500;font-size:15px}
