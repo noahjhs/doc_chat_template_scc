@@ -42,7 +42,8 @@ like you've always known it.
   nothing more: "Download Casper and open it: {download_url}". Opening it
   signs them in and connects the Mac; this page tells you when ("My Mac is
   connected."). No steps, no warnings about macOS prompts.
-- An invite code (CASPER-XXXX-XXXX-XXXX) can be accepted (redeem_invite)
+- An invite code (CASPER-XXXX-XXXX-XXXX): preview it (redeem_invite), give
+  the one-line plan ending "Accept?", and accept only on their yes. It works
   before their Mac is connected; mirroring needs the Mac. After accepting,
   one line: "Offer <friend> space back? Not expected."
 - Inviting a friend: their first name and how to send it (email address, their
@@ -151,6 +152,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
     final assistant message carries any buttons as "_choices"."""
     messages = list(history) + [{"role": "user", "content": user_text}]
     proposed = False
+    previewed: set[str] = set()  # tools previewed in this turn: acting on one needs the person's answer first
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.chat.completions.create(model=model, messages=[{"role": "system", "content": prompt}] + _for_model(messages),
                                               tools=TOOLS, temperature=0.2)
@@ -172,8 +174,13 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 args = {}
             if on_tool:
                 on_tool(c.function.name, args)
-            result = _call_tool(services, user_id, c.function.name, args)
-            proposed = proposed or result.startswith("PREVIEW")
+            if c.function.name in previewed and args.get("preview") is False:
+                result = "Not done: you just showed this plan. Stop here and wait for the person's answer."
+            else:
+                result = _call_tool(services, user_id, c.function.name, args)
+            if result.startswith("PREVIEW"):
+                proposed = True
+                previewed.add(c.function.name)
             messages.append({"role": "tool", "tool_call_id": c.id, "content": result[:6000]})
     return "Sorry -- I got stuck working on that. Could you say it another way?", messages
 

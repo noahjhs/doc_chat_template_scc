@@ -142,6 +142,7 @@ def scenario_invite_to_protected(run):
     c0 = len(fake.calls)
     r = run(fake, f"Hi! My friend Sam sent me a Casper invite: {CODE}. I've already installed Casper and signed in on my Mac.")
     t = _turn_calls(fake, c0)
+    print(f"     invite turn: calls={[(n, a.get('preview')) for n, a in t]} reply={r!r}")
     checks.append(("previews the invite first", _did(t, "redeem_invite", preview=True) and not _did(t, "redeem_invite", preview=False)))
     checks.append(("ends the plan with a one-word question (buttons)", bool(guide.choices_for(r, True))))
     c0 = len(fake.calls)

@@ -723,3 +723,37 @@ def test_guide_offers_buttons_only_for_a_proposal_ending_in_a_short_question(app
     ])
     assert "choices" not in shown[0] and shown[-1]["choices"] == ["Start", "Not now"]  # only the latest still applies
     assert all(not k.startswith("_") for m in guide._for_model([{"role": "assistant", "content": "x", "_choices": ["a"]}]) for k in m)
+
+
+def test_guide_cant_act_on_a_plan_in_the_same_reply_it_showed_it(app_env):
+    """The person answers a preview before anything happens -- enforced by
+    the guide's loop, not left to the model."""
+    import guide
+
+    class Svc:
+        calls = []
+
+        def redeem_invite(self, uid, code, preview):
+            self.calls.append(preview)
+            return "PREVIEW (nothing changed yet): Accept." if preview else "Done."
+
+    class Call:
+        def __init__(self, i, name, args):
+            self.id, self.function = f"c{i}", type("F", (), {"name": name, "arguments": json.dumps(args)})()
+
+    script = [[Call(1, "redeem_invite", {"code": "C", "preview": True}), Call(2, "redeem_invite", {"code": "C", "preview": False})], "Accept?"]
+
+    class Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    step = script.pop(0)
+                    msg = type("M", (), {"content": step if isinstance(step, str) else "", "tool_calls": None if isinstance(step, str) else step})()
+                    return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+
+    svc = Svc()
+    reply, messages = guide.run(Client(), "m", svc, 1, [], "Here's my invite code C", "p")
+    assert svc.calls == [True]  # never acted
+    assert any("wait for the person's answer" in m.get("content", "") for m in messages if m["role"] == "tool")
+    assert messages[-1]["_choices"] == ["Accept", "Not now"]
