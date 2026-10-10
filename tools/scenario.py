@@ -18,6 +18,8 @@ the dev deployment's .env). Optional: ~/.config/casper-vm/quit-apps, apps to
 quit before starting (one per line) to free memory."""
 
 import json
+import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -32,6 +34,8 @@ CONFIG_DIR = Path.home() / ".config" / "casper-vm"
 CASPER = "/Applications/CasperGo/Casper.app/Contents/MacOS/Casper"
 VM_CPU, VM_MEMORY_MB, VM_DISPLAY = 4, 4096, "1440x900"
 _print_lock = threading.Lock()
+# python.org's Python ships without root certificates; macOS has its own bundle.
+_TLS = ssl.create_default_context(cafile="/etc/ssl/cert.pem" if os.path.exists("/etc/ssl/cert.pem") else None)
 
 
 def say(who: str, text: str):
@@ -79,7 +83,7 @@ def dev(method: str, path: str) -> dict:
     token = (CONFIG_DIR / "dev-admin-token").read_text().strip()
     req = urllib.request.Request(CONF["deployment"]["auth_url"] + path, method=method,
                                  headers={"X-Dev-Admin": token, "User-Agent": "casper-scenario"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=30, context=_TLS) as r:
         return json.loads(r.read() or b"{}")
 
 
@@ -90,7 +94,7 @@ def mcp(token: str, tool: str, **arguments):
     req = urllib.request.Request(CONF["deployment"]["auth_url"] + "/mcp", data=body, method="POST", headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream", "User-Agent": "casper-scenario"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=60, context=_TLS) as r:
         result = json.loads(r.read())["result"]
     if result.get("isError"):
         raise RuntimeError(f"{tool}: {result}")
@@ -99,6 +103,18 @@ def mcp(token: str, tool: str, **arguments):
 
 
 # --- Steps ------------------------------------------------------------------------------
+def step_name_mac(p, ctx, *name):
+    """Gives the persona's Mac a real name (what friends see), e.g.
+    name_mac Riley's MacBook. Needs the VM's admin password."""
+    pretty = " ".join(name)
+    local = "".join(c if c.isalnum() else "-" for c in pretty.replace("'", "")).strip("-")
+    pw = (CONFIG_DIR / "password").read_text().strip()
+    vm_exec(p["vm"], f"""for k in ComputerName HostName LocalHostName; do
+        v={json.dumps(pretty)}; [ $k = ComputerName ] || v={json.dumps(local)}
+        echo {json.dumps(pw)} | sudo -S -p '' scutil --set $k "$v"; done""")
+    return f"{pretty} ({local})"
+
+
 def step_install_casper(p, ctx):
     url = CONF["deployment"]["download_url"]
     vm_exec(p["vm"], f"""
@@ -138,6 +154,7 @@ def step_publish_offering(p, ctx, gb="20"):
 
 
 STEPS = {
+    "name_mac": step_name_mac,
     "install_casper": step_install_casper,
     "create_account": step_create_account,
     "pair": step_pair,
