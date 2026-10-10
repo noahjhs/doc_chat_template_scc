@@ -1,0 +1,62 @@
+# Test scenarios for tools/scenario.py: personas, checkpoints, scenarios.
+#
+# A persona is one test person: their own VM, started from a snapshot, and
+# their dev account. Snapshots hold only what's local to a Mac (apps,
+# Gmail/Telegram/Claude sign-ins) -- never anything tied to a Casper account.
+# A checkpoint is a recipe: reset the persona's VM from its snapshot, delete
+# their dev account, then replay steps to reach a known point. `extends`
+# builds on another checkpoint. A scenario starts several checkpoints at once,
+# e.g. both sides of an invite.
+#
+# Steps (see STEPS in scenario.py): install_casper, create_account, pair,
+# connect_claude, publish_offering <GB>, chat_folder.
+
+[deployment]
+auth_url = "https://dev-auth.casperagent.dev"
+download_url = "https://dev-auth.casperagent.dev/download/casper/macos"
+
+[snapshots]
+# Local-only starting points (see `scenario.py snapshots`).
+casper-base = "Chrome (default), Gmail and Telegram signed in, realistic Documents; no sleep/lock or update nags; copy/paste. No AI agent."
+casper-base-claude = "casper-base plus Claude Code, installed and signed in."
+
+[personas.riley]
+vm = "riley-mac"
+snapshot = "casper-base-claude"
+username = "riley"
+
+[personas.noah]
+vm = "noah-mac"
+snapshot = "casper-base"
+username = "noah"
+
+[checkpoints.riley-before-publish]
+persona = "riley"
+about = "Riley: Casper installed and connected, Claude connected to Casper; nothing offered yet."
+steps = ["install_casper", "create_account", "pair", "connect_claude", "chat_folder"]
+
+[checkpoints.riley-before-invite]
+extends = "riley-before-publish"
+about = "Riley: offers 20 GB of mirror space on their Mac; no invites yet."
+steps = ["publish_offering 20"]
+
+[checkpoints.noah-fresh]
+persona = "noah"
+about = "Noah: a Mac that's never seen Casper, and no Casper account."
+steps = []
+
+[scenarios.publish]
+about = "Riley offers space and invites Noah, from scratch."
+checkpoints = ["riley-before-publish", "noah-fresh"]
+next = """
+In riley-mac: open Terminal, run `cd ~/chat && claude`, and say
+"Offer space to friends, and invite my friend Noah to Mutual Aid."
+Then follow the invitation in noah-mac."""
+
+[scenarios.invite]
+about = "Riley already offers space; Riley invites Noah, who sets up with Casper's guide."
+checkpoints = ["riley-before-invite", "noah-fresh"]
+next = """
+In riley-mac: open Terminal, run `cd ~/chat && claude`, and say
+"Invite my friend Noah to Mutual Aid."
+Then follow the invitation in noah-mac."""

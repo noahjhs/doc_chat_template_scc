@@ -278,11 +278,14 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 	// signing in, so take the person straight there -- the sign-in page
 	// connects this Mac. Only then ask about login items, so the two never
 	// compete. Not in a non-interactive dev/CI run (CONTROL_TOOL_KEY set).
+	// CASPER_SCRIPTED_SETUP: launched by tools/scenario.py, which signs in
+	// and pairs by itself -- no sign-in page, no login-items question.
+	scripted := os.Getenv("CASPER_SCRIPTED_SETUP") != ""
 	if os.Getenv("CONTROL_TOOL_KEY") == "" {
 		go func() {
 			if sessions, _ := config.LoadSessions(); len(sessions) == 0 {
 				time.Sleep(3 * time.Second) // a launch by a casper://pair link pairs in this window
-				if app := config.LoadAppDomain(); app != "" && state.identityCount() == 0 {
+				if app := config.LoadAppDomain(); app != "" && state.identityCount() == 0 && !scripted {
 					logf("Not signed in yet -- opening sign-in")
 					if err := exec.Command("open", config.BaseURL(app)+"/signin?from=app").Run(); err != nil {
 						logf("Couldn't open sign-in: %s", err)
@@ -292,7 +295,7 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 					time.Sleep(2 * time.Second)
 				}
 			}
-			if !isLoginItem && !config.LoginItemPromptDismissed() {
+			if !isLoginItem && !scripted && !config.LoginItemPromptDismissed() {
 				promptAddToLoginItems(mStartup, logf)
 			}
 		}()

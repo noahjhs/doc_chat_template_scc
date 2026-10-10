@@ -3121,3 +3121,37 @@ def _guide_via_telegram(chat_id: str, user_id: int, text: str):
             print(f"Couldn't send Telegram message to chat {chat_id}: {e}")
 
     threading.Thread(target=work, daemon=True).start()
+
+
+# =============================================================================
+# Dev-only: scripted test scenarios (tools/scenario.py) -- see devtools.py.
+# Exist only when DEV_ADMIN_TOKEN is set (never on prod).
+# =============================================================================
+import devtools  # noqa: E402
+from fastapi import Depends  # noqa: E402
+
+
+@app.delete("/dev/users/{username}", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
+def dev_delete_user(username: str):
+    with get_db() as db:
+        row = db.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+        if row is None:
+            return {"deleted": {}, "existed": False}
+        hosts = [r["host_id"] for r in db.execute("SELECT host_id FROM user_hosts WHERE user_id = ?", (row["id"],)).fetchall()]
+        peers = {(r["owner_user_id"], r["host_id"]) for r in db.execute(
+            "SELECT owner_user_id, host_id FROM offerings WHERE id IN (SELECT offering_id FROM invites WHERE used_by_user_id = ?)", (row["id"],)).fetchall()}
+        out = devtools.delete_user(db, row["id"])
+    for owner, host in peers:  # friends' Macs stop holding space for them
+        _refresh_daemon_grants(owner, host)
+    return {**out, "existed": True, "hosts": hosts}
+
+
+@app.post("/dev/users/{username}/agent-token", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
+def dev_agent_token(username: str):
+    token = "cas_" + secrets.token_urlsafe(32)
+    with get_db() as db:
+        row = db.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="No such user.")
+        db.execute("INSERT INTO agent_tokens (user_id, name, token_hash) VALUES (?, ?, ?)", (row["id"], "scenario script", hash_token(token)))
+    return {"token": token}

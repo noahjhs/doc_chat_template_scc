@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
-_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide")
+_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide", "mailer", "devtools")
 
 
 @pytest.fixture()
@@ -757,3 +757,37 @@ def test_guide_cant_act_on_a_plan_in_the_same_reply_it_showed_it(app_env):
     assert svc.calls == [True]  # never acted
     assert any("wait for the person's answer" in m.get("content", "") for m in messages if m["role"] == "tool")
     assert messages[-1]["_choices"] == ["Accept", "Not now"]
+
+
+def test_dev_endpoints_reset_a_persona_and_exist_only_with_the_dev_token(app_env, monkeypatch):
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        assert client.delete("/dev/users/riley").status_code == 404  # no DEV_ADMIN_TOKEN: no such endpoint
+        monkeypatch.setenv("DEV_ADMIN_TOKEN", "t0ken")
+        assert client.delete("/dev/users/riley", headers={"X-Dev-Admin": "wrong"}).status_code == 403
+        admin = {"X-Dev-Admin": "t0ken"}
+
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", for_whom="Riley", group="Mutual Aid", preview=False)).group(0)
+        _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+
+        # Act as riley via a scenario token, then delete riley entirely.
+        token = client.post("/dev/users/riley/agent-token", headers=admin).json()["token"]
+        assert "Casper account: riley" in _mcp(client, token, "my_casper")
+        out = client.delete("/dev/users/riley", headers=admin).json()
+        assert out["existed"] and out["deleted"]["users"] == 1
+        with main.get_db() as db:
+            rid = [r[0] for r in db.execute("SELECT id FROM users").fetchall()]
+            assert len(rid) == 1  # only sam
+            for table in ("relation_tuples", "agent_tokens", "user_profile", "guide_messages"):
+                cols = [c[1] for c in db.execute(f"PRAGMA table_info({table})")]
+                key = "subject_id" if table == "relation_tuples" else "user_id"
+                assert all(r[0] in rid for r in db.execute(f"SELECT {key} FROM {table}").fetchall()), table
+        assert client.get("/friends", headers=sam).json()["friends"] == []
+        assert client.get("/invites/info", params={"code": code}).json()["valid"] is True  # sam's invite is free again
+        assert client.post("/signup", json={"username": "riley", "password": "longenough1"}).status_code == 201  # the name is reusable
+
+        # Deleting sam takes sam's offering, invite and group too.
+        assert client.delete("/dev/users/sam", headers=admin).json()["deleted"]["offerings"] == 1
+        assert client.get("/invites/info", params={"code": code}).json()["valid"] is False
