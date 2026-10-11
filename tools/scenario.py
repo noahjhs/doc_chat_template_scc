@@ -307,8 +307,9 @@ def prepare_host(keep: set[str], stop_others: bool = True):
     if have < need:
         heavy = subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True).stdout.splitlines()
         top = sorted(((int(l.split(None, 1)[0]), l.split(None, 1)[1]) for l in heavy if l.strip()), reverse=True)[:5]
+        label = lambda c: "a running VM" if "Virtualization.VirtualMachine" in c else Path(c.split(".app/")[0]).name  # noqa: E731
         say("mac", "tight on memory -- the VMs may lag. Biggest users: " + ", ".join(
-            f"{Path(c).name.split('.app')[0]} ({r / 1024 / 1024:.1f} GB)" for r, c in top))
+            f"{label(c)} ({r / 1024 / 1024:.1f} GB)" for r, c in top))
 
 
 # --- CLI ----------------------------------------------------------------------------------
