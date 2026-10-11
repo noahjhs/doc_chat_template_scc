@@ -7,6 +7,7 @@
     tools/scenario.py stop                 shut every test VM down
     tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
+    tools/scenario.py copy <from> <to> ["what it is"]   duplicate a starting snapshot (instant, no extra disk until changed)
 
 How it works: each persona's VM is cloned fresh from a local snapshot
 (copy-on-write, instant), their dev account is deleted, and the checkpoint's
@@ -276,6 +277,28 @@ def main(argv: list[str]) -> int:
             time.sleep(2)
         say("mac", f"{snap} didn't shut down (an app may be asking to save something) -- answer it in the VM, then run save again")
         return 1
+    if cmd == "copy" and len(argv) > 3:
+        src, dst = argv[2], argv[3]
+        about = argv[4] if len(argv) > 4 else f"A copy of {src}."
+        if src not in CONF["snapshots"]:
+            print(f"No snapshot {src!r}; known: {', '.join(CONF['snapshots'])}")
+            return 2
+        if dst in CONF["snapshots"] or tart("list", "-q").stdout.split().count(dst):
+            print(f"{dst!r} already exists.")
+            return 2
+        if src in running_vms():
+            print(f"{src} is running -- save it first (tools/scenario.py save {src}).")
+            return 2
+        tart("clone", src, dst)
+        toml = HERE / "scenarios.toml"
+        text = toml.read_text()
+        at = text.index("[snapshots]")
+        end = text.find("\n\n", at)
+        text = text[:end] + f"\n{dst} = {json.dumps(about)}" + text[end:]
+        toml.write_text(text)
+        say("mac", f"{dst} is a copy of {src}. To change it: tools/scenario.py edit {dst}; to use it, set a persona's "
+                   f"snapshot = \"{dst}\" in tools/scenarios.toml")
+        return 0
     if cmd == "stop":
         for p in CONF["personas"].values():
             if p["vm"] in running_vms():
