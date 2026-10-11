@@ -68,10 +68,58 @@ def vm_exec(vm: str, script: str, timeout: int = 300) -> str:
     return r.stdout.strip()
 
 
+def _guest_agent_up(vm: str) -> bool:
+    try:
+        return subprocess.run(["tart", "exec", vm, "true"], capture_output=True, timeout=8).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _wait_stopped(vm: str, seconds: int) -> bool:
+    for _ in range(seconds // 2):
+        if vm not in running_vms():
+            return True
+        time.sleep(2)
+    return vm not in running_vms()
+
+
+def shutdown_vm(vm: str) -> str:
+    """Shuts a VM down without anything inside it blocking: ends whatever is
+    running in a terminal (e.g. claude) and quits Terminal -- whose "terminate
+    running processes?" question otherwise stalls shutdown -- then asks macOS
+    to shut down normally, so apps save their state. If something still
+    holds out, it's forced from inside (shutdown -h now), and only as a last
+    resort is the power cut (tart stop). Returns how it went."""
+    if vm not in running_vms():
+        return "already stopped"
+    if _guest_agent_up(vm):
+        ended = subprocess.run(["tart", "exec", vm, "/bin/sh", "-c", """
+            pids=$(ps -U "$(id -u)" -o pid=,tty= | awk '$2 != "??" {print $1}')
+            names=$(ps -U "$(id -u)" -o tty=,comm= | awk '$1 != "??" {print $2}' | xargs -n1 basename 2>/dev/null | grep -v -x -e zsh -e bash -e sh -e login | sort -u | tr '\\n' ' ')
+            [ -n "$pids" ] && kill -TERM $pids 2>/dev/null; sleep 1
+            [ -n "$pids" ] && kill -KILL $pids 2>/dev/null
+            defaults write com.apple.Terminal NSQuitAlwaysKeepsWindows -bool false
+            osascript -e 'if application "Terminal" is running then tell application "Terminal" to quit' 2>/dev/null
+            echo "$names"
+        """], capture_output=True, text=True, timeout=30).stdout.strip()
+        subprocess.run(["tart", "exec", vm, "osascript", "-e", 'tell application "System Events" to shut down'],
+                       capture_output=True, timeout=30)
+        if _wait_stopped(vm, 60):
+            return "shut down" + (f" (ended {ended} in Terminal)" if ended else "")
+        pw = (CONFIG_DIR / "password").read_text().strip() if (CONFIG_DIR / "password").exists() else ""
+        if pw:
+            subprocess.run(["tart", "exec", "-i", vm, "sudo", "-S", "-p", "", "shutdown", "-h", "now"],
+                           input=pw + "\n", capture_output=True, text=True, timeout=30)
+            if _wait_stopped(vm, 40):
+                return "shut down (an app was holding out, so it was forced from inside)"
+    tart("stop", vm, "--timeout", "10", check=False)
+    return "stopped (power cut: the VM didn't respond)"
+
+
 def fresh_vm(persona: dict):
     vm = persona["vm"]
     if vm in running_vms():
-        tart("stop", vm, check=False)
+        tart("stop", vm, "--timeout", "5", check=False)  # about to be deleted: nothing to keep
     tart("delete", vm, check=False)
     tart("clone", persona["snapshot"], vm)
     tart("set", vm, "--cpu", str(VM_CPU), "--memory", str(VM_MEMORY_MB), "--display", VM_DISPLAY)
@@ -209,8 +257,7 @@ def prepare_host(keep: set[str], stop_others: bool = True):
     the apps listed in ~/.config/casper-vm/quit-apps, and purges disk caches
     if allowed."""
     for vm in (running_vms() - keep) if stop_others else ():
-        say("mac", f"stopping {vm}")
-        tart("stop", vm, check=False)
+        say("mac", f"{vm}: {shutdown_vm(vm)}")  # may be a snapshot being edited: shut it down properly
     quit_list = CONFIG_DIR / "quit-apps"
     if quit_list.exists():
         for app in (a.strip() for a in quit_list.read_text().splitlines()):
@@ -415,14 +462,12 @@ def main(argv: list[str]) -> int:
         if snap not in running_vms():
             say("mac", f"{snap} isn't running -- nothing to save (it's saved whenever it's shut down).")
             return 0
-        subprocess.run(["tart", "exec", snap, "osascript", "-e", 'tell application "System Events" to shut down'], capture_output=True)
-        for _ in range(60):
-            if snap not in running_vms():
-                say("mac", f"saved {snap}; every reset from it now starts here")
-                return 0
-            time.sleep(2)
-        say("mac", f"{snap} didn't shut down (an app may be asking to save something) -- answer it in the VM, then run save again")
-        return 1
+        how = shutdown_vm(snap)
+        if snap in running_vms() or how.startswith("stopped"):
+            say("mac", f"{snap}: {how} -- changes since its last clean shutdown may be lost")
+            return 1
+        say("mac", f"saved {snap} ({how}); every reset from it now starts here")
+        return 0
     if cmd == "copy" and len(argv) > 3:
         src, dst = argv[2], argv[3]
         about = argv[4] if len(argv) > 4 else f"A copy of {src}."
@@ -448,8 +493,7 @@ def main(argv: list[str]) -> int:
     if cmd == "stop":
         for p in CONF["personas"].values():
             if p["vm"] in running_vms():
-                tart("stop", p["vm"], check=False)
-                say("mac", f"stopped {p['vm']}")
+                say("mac", f"{p['vm']}: {shutdown_vm(p['vm'])}")
         return 0
     if cmd in ("start", "reset") and len(argv) > 2:
         # Either takes a scenario (every persona in it) or one checkpoint.
