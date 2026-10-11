@@ -493,7 +493,7 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         emails = []
         monkeypatch.setattr(main.mailer, "send", lambda to, subject, text, html: emails.append((to, subject, text, html)))
         plan = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com")
-        assert plan == ("PREVIEW (nothing changed yet): Invite Riley to Mutual Aid -- 10 GB of mirror space on sam-mini, "
+        assert plan == ("PREVIEW (nothing changed yet): Invite Riley to Mutual Aid: 10 GB of mirror space on sam-mini, "
                         "by email to riley@example.com. Single-use, expires in 7 days.") and not emails
         assert "isn't a valid email address" in _mcp(client, sam_agent, "create_invite", quota_gb=10, email="riley@x", preview=False)
         assert "Telegram isn't linked" in _mcp(client, sam_agent, "create_invite", quota_gb=10, send_telegram=True, preview=False)
@@ -636,7 +636,7 @@ def test_catcher_on_a_mirrors_machine_is_refused(app_env):
                    mirrors=["sam/sam-mini"], catcher="sam/sam-mini", preview=True)
         assert "already one of the mirrors" in out
         ok = _mcp(client, riley_agent, "mirror_folder", source_host="riley-laptop", path="Documents", mirrors=["sam/sam-mini"], preview=True)
-        assert ok.startswith("PREVIEW") and ok.endswith("no catcher -- encrypted, 30 days of history.")
+        assert ok.startswith("PREVIEW") and ok.endswith("no catcher. Encrypted, 30 days of history.")
 
 
 # --- Casper's guide ---------------------------------------------------------------------

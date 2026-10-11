@@ -174,7 +174,7 @@ def test_mirroring_end_to_end(world):
     (docs / "taxes" / "return.pdf").write_bytes(big)
 
     plan = world.mcp("riley", "mirror_folder", source_host="riley-mac", path="Documents", mirrors=["sam/sam-mac"], catcher="cat/cat-server")
-    assert plan.startswith("PREVIEW") and "encrypted, 30 days of history" in plan
+    assert plan.startswith("PREVIEW") and "Encrypted, 30 days of history." in plan
     out = world.mcp("riley", "mirror_folder", source_host="riley-mac", path="Documents", mirrors=["sam/sam-mac"], catcher="cat/cat-server", preview=False)
     assert "can't confirm it for them" in out
 
@@ -186,7 +186,7 @@ def test_mirroring_end_to_end(world):
                       headers={"Authorization": f"Bearer {riley['pair']['device_token']}"})
     assert r.status_code == 200
 
-    _wait(lambda: "every change is on at least one mirror" in world.mcp("riley", "protection_status"), "the first full mirror", timeout=180)
+    _wait(lambda: "Every change is on at least one mirror" in world.mcp("riley", "protection_status"), "the first full mirror", timeout=180)
     assert not _leaks(sam["data"] / "mirror" / "held", b"receipts", b"notes.txt", b"taxes", big[:64])
 
     # An accident: an edit we want to undo.

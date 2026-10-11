@@ -2308,10 +2308,10 @@ def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_b
 def _publish_mirror_offering(user_id: int, host: str, host_id: int, max_gb: float, kind: str, preview: bool) -> str:
     if kind == "mirror":
         plan = (f"Offer mirror space on {host}: up to {max_gb:g} GB per friend, with 30 days of history. "
-                "It arrives encrypted -- you can never read it. Nothing asked in return.")
+                "It arrives encrypted, so you can never read it. Nothing asked in return.")
     else:
         plan = (f"Offer catcher space on {host}: holds friends' newest changes while their mirrors sleep (up to {max_gb:g} GB each), "
-                "encrypted -- you can never read it. Nothing asked in return.")
+                "encrypted, so you can never read it. Nothing asked in return.")
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
     try:
@@ -2379,7 +2379,7 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     what = {"mirror_space": f"{quota_gb:g} GB of mirror space", "catcher_space": "a catcher"}.get(kind, f"{quota_gb:g} GB of backup space")
     into = f" to {group}" if group else ""
     via = " and ".join(v for v in (f"email to {email}" if email else "", "your Telegram to forward" if send_telegram else "") if v)
-    plan = (f"Invite {who}{into} -- {what} on {where}" + (f", by {via}" if via else "") + ". Single-use, expires in "
+    plan = (f"Invite {who}{into}: {what} on {where}" + (f", by {via}" if via else "") + ". Single-use, expires in "
             f"{trust.INVITE_TTL_DAYS} days."
             + (f" (Also sets up mirror space on {where}: up to {quota_gb:g} GB per friend, nothing asked in return.)" if new_offering_host else ""))
     if preview:
@@ -2479,7 +2479,7 @@ def _mcp_redeem_invite(user_id: int, code: str, preview: bool) -> str:
     }.get(inv["kind"], f"{_gb(inv['quota_bytes'])} of backup space on {owner}/{label}")
     plan = (
         f"Accept {owner}'s invite{f' to {group}' if group else ''}: {what}{'' if already else f'; you and {owner} become friends'}. "
-        f"Encrypted -- {owner} can never read it. Either of you can end it any time."
+        f"Encrypted, so {owner} can never read it. Either of you can end it any time."
     )
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
@@ -2848,8 +2848,8 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
     if preview:  # the one-line version; the Casper dialog shows the full plan
         short_catch = (f", catcher {catcher_grant['owner']}/{catcher_grant['host']}" if catcher_grant
                        else ", Casper's catcher" if use_casper_catcher else ", no catcher")
-        return (f"PREVIEW (nothing changed yet): Mirror {label} ({backups.human(size)}) to {where}{short_catch} -- "
-                "encrypted, 30 days of history.")
+        return (f"PREVIEW (nothing changed yet): Mirror {label} ({backups.human(size)}) to {where}{short_catch}. "
+                "Encrypted, 30 days of history.")
     with get_db() as db:
         folder_id = mirroring.create_folder(db, user_id, config["host_id"], abs_path, label, mirror_grants, catcher_grant, use_casper_catcher)
     description = f"Start mirroring {label} ({backups.human(size)}) to {where}?"
@@ -2858,7 +2858,7 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
     backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"{plan}\n\nStart mirroring?")
     return (
-        f"NOT protected yet -- nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
+        f"NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
         "click Allow (or answer in Telegram). You can't confirm it for them. Once they say they've allowed it, check "
         "protection_status before telling them they're protected."
     )
@@ -2875,7 +2875,7 @@ def _status_text(db, f) -> str:
     if cd:
         names[cd["device_id"]] = "Casper's catcher"
     if f["status"] == "awaiting_consent":
-        return f"{f['label']}: NOT protected yet -- waiting for the person to click Allow in the Casper dialog (or Telegram)."
+        return f"{f['label']}: NOT protected yet, waiting for the person to click Allow in the Casper dialog (or Telegram)."
     if f["restore_host_id"] and st.get("restoring"):
         state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
         return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
@@ -2893,9 +2893,9 @@ def _status_text(db, f) -> str:
             more = f" (and {unprotected - min(len(files), 10)} more)" if unprotected > min(len(files), 10) else ""
             lines.append("  not yet protected: " + ", ".join(files[:10]) + more)
     elif st.get("at_risk_files"):
-        lines.append(f"{f['label']}: protected -- {st['at_risk_files']} recent change(s) are held by the catcher until a mirror wakes up.")
+        lines.append(f"{f['label']}: protected. {st['at_risk_files']} recent change(s) are held by the catcher until a mirror wakes up.")
     else:
-        lines.append(f"{f['label']}: protected -- every change is on at least one mirror.")
+        lines.append(f"{f['label']}: protected. Every change is on at least one mirror.")
     for p in st.get("peers", []):
         who = names.get(p["device_id"], p["device_id"][:7])
         state = "up to date" if p.get("completion") == 100 and p.get("connected") else ("connected, catching up" if p.get("connected") else f"offline (last seen {(p.get('last_seen') or '?')[:16]})")
@@ -3108,6 +3108,7 @@ def guide_history(authorization: str = Header(default="")):
 def _guide_via_telegram(chat_id: str, user_id: int, text: str):
     def work():
         reply, messages = _guide_reply(user_id, text)
+        reply = guide.plain(reply)
         choices = (messages[-1].get("_choices") or []) if messages else []
         if not choices:
             _telegram_send_text(chat_id, reply[:4000])

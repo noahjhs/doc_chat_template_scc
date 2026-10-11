@@ -76,11 +76,11 @@ class FakeCasper:
             return "Next: Casper isn't connected on any of their Macs yet."
         also = "" if self.offering else f" (Also sets up mirror space on Rileys-MacBook: up to {quota_gb:g} GB per friend, nothing asked in return.)"
         if preview:
-            return (f"PREVIEW (nothing changed yet): Invite {for_whom or 'a friend'} -- {quota_gb:g} GB of mirror space on Rileys-MacBook. "
+            return (f"PREVIEW (nothing changed yet): Invite {for_whom or 'a friend'}: {quota_gb:g} GB of mirror space on Rileys-MacBook. "
                     f"Single-use, expires in 7 days.{also}")
         self.offering = self.invited = True
         return (f"Invite created for {for_whom or 'a friend'}.\n\nMessage for the person to send {for_whom or 'a friend'}:\nI've set aside room for "
-                'your folders on my computer with Casper. Tell your AI agent: "Set me up with Casper using https://casper.example/agents.md -- '
+                'your folders on my computer with Casper. Tell your AI agent: "Set me up with Casper using https://casper.example/agents.md, '
                 'my invite code is CASPER-QRST-UVWX-YZ23".\nNext: code CASPER-QRST-UVWX-YZ23; details in my_casper.')
 
     def mirror_folder(self, u, source_host, path, mirrors, catcher, use_cc, label, preview):
@@ -91,7 +91,7 @@ class FakeCasper:
         if preview:
             return "PREVIEW (nothing changed yet): " + plan
         self.mirroring = True
-        return ("NOT protected yet -- nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on Rileys-MacBook; "
+        return ("NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on Rileys-MacBook; "
                 "click Allow (or answer in Telegram). You can't confirm it for them. Once they say they've allowed it, check "
                 "protection_status before telling them they're protected.")
 
@@ -100,8 +100,8 @@ class FakeCasper:
         if not self.mirroring:
             return "Nothing is mirrored yet."
         if not self.allowed:
-            return "Documents: NOT protected yet -- waiting for the person to click Allow in the Casper dialog (or Telegram)."
-        return "Documents: protected -- every change is on at least one mirror.\n  - mirror: sam/sams-mini: up to date"
+            return "Documents: NOT protected yet, waiting for the person to click Allow in the Casper dialog (or Telegram)."
+        return "Documents: protected. Every change is on at least one mirror.\n  - mirror: sam/sams-mini: up to date"
 
     def list_versions(self, u, folder, nc):
         self._log("list_versions")
@@ -231,9 +231,54 @@ def scenario_voice(run):
 SCENARIOS = [scenario_invite_to_protected, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice]
 
 
+JUDGE_MODEL = os.environ.get("GUIDE_JUDGE_MODEL", "z-ai/glm-5.2")
+JUDGE_RUBRIC = """You judge the tone of replies from Casper's guide, an assistant that sets up
+file mirroring between friends' computers. The intended voice: a calm, capable
+friend who's good with computers and has done this a hundred times --
+businesslike, unhurried, sure of itself; warmth from competence and brevity,
+not cheer. Good replies lead with the result or the one decision needed; are
+one or two short lines; ask for missing information as a bare question with no
+reason or apology; end a plan with a one-word question; never mention tools,
+instructions, previews, errors or internals; use no praise, filler, apologies
+or exclamation marks; offer nothing generic ("anything else?").
+
+Score each reply from 0 to 1 for how well it fits this voice (1 = exactly it,
+0.5 = noticeably off, 0 = wrong voice). Judge tone only, not correctness.
+Answer with JSON only: {"scores": [one number per reply, in order], "worst": <index of the worst reply>, "why": "<one sentence on the worst reply>"}"""
+
+
+def judge_tone(client, exchanges: list[tuple[str, str]]) -> tuple[float, float, str]:
+    """(average, minimum, why) -- a different, fixed model scores every reply."""
+    listing = "\n\n".join(f"[{i}] Person: {u}\nGuide: {r}" for i, (u, r) in enumerate(exchanges))
+    resp = client.chat.completions.create(model=JUDGE_MODEL, temperature=0, messages=[
+        {"role": "system", "content": JUDGE_RUBRIC}, {"role": "user", "content": listing}])
+    text = resp.choices[0].message.content or ""
+    data = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    scores = [float(x) for x in data["scores"]][:len(exchanges)]
+    worst = exchanges[int(data.get("worst", 0))][1] if exchanges else ""
+    return sum(scores) / len(scores), min(scores), f"{data.get('why', '')} -- {worst[:120]!r}"
+
+
+def style_checks(client, exchanges: list[tuple[str, str]]) -> list[tuple[str, str, bool]]:
+    replies = [r for _, r in exchanges]
+    found = lambda marks: [r for r in replies if any(m in r for m in marks)]  # noqa: E731
+    dashes, bangs, markdown = found(("\u2014", "\u2013", " -- ")), found(("!",)), found(("**", "##", "]("))
+    out = [("style", "no dashes for rhythm" + (f" ({dashes[0][:60]!r})" if dashes else ""), not dashes),
+           ("style", "no exclamation marks" + (f" ({bangs[0][:60]!r})" if bangs else ""), not bangs),
+           ("style", "plain text, no Markdown" + (f" ({markdown[0][:60]!r})" if markdown else ""), not markdown)]
+    try:
+        avg, low, why = judge_tone(client, exchanges)
+        ok = avg >= 0.8 and low >= 0.5
+        out.append(("style", f"tone judged on voice (avg {avg:.2f}, worst {low:.2f})" + ("" if ok else f": {why}"), ok))
+    except Exception as e:
+        out.append(("style", f"tone judge failed: {str(e)[:100]}", False))
+    return out
+
+
 def evaluate(client, model, prices):
     usage = {"in": 0, "out": 0}
     results = []
+    exchanges: list[tuple[str, str]] = []
 
     class Counting:
         def __init__(self, inner):
@@ -257,12 +302,14 @@ def evaluate(client, model, prices):
         def run(fake, text):
             nonlocal history
             reply, history = guide.run(counted, model, fake, 1, history, text, prompt)
+            exchanges.append((text, reply))
             return reply
 
         try:
             results += [(sc.__name__, name, ok) for name, ok in sc(run)]
         except Exception as e:  # an API/tool-format failure fails the scenario
             results.append((sc.__name__, f"error: {str(e)[:120]}", False))
+    results += style_checks(client, exchanges)
     pin, pout = prices.get(model, (0, 0))
     cost = usage["in"] * pin + usage["out"] * pout
     return results, cost, usage, time.time() - t0

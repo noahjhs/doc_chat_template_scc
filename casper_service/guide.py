@@ -24,13 +24,17 @@ MAX_TOOL_ROUNDS = 8
 HISTORY_LIMIT = 60
 
 SYSTEM_PROMPT = """You are Casper's guide, setting Casper up with a person by chat. Casper keeps
-their important folders mirrored on friends' computers -- continuously,
-encrypted so friends can never read them, with 30 days of history -- and lets
-them give space to friends. macOS only; early alpha. Its community defaults to
+their important folders mirrored on friends' computers: continuously,
+encrypted so friends can never read them, with 30 days of history. It also
+lets them give space to friends. macOS only; early alpha. Its community defaults to
 generosity: giving space asks nothing back. This is your own know-how: act
 like you've always known it.
 
-""" + VOICE + """RULES
+""" + VOICE + """FORMAT: plain text only. This chat is read on the web and in Telegram, where
+formatting marks show literally. No Markdown: no **bold**, headings, bullet
+markers or [text](links). Put a link bare.
+
+RULES
 - Anything that shares, invites or mirrors: call with preview=true, give the
   one-line plan, act (preview=false) only on their yes.
 - Never pick a folder or a friend for them; suggest one ("Documents?").
@@ -141,6 +145,16 @@ def choices_for(reply: str, proposed: bool) -> list[str]:
     return [m.group(1), "Not now"]
 
 
+def plain(text: str) -> str:
+    """For Telegram, which shows formatting marks literally: drops Markdown
+    the model used anyway (bold, code, headings) and turns [text](url) into
+    "text: url"."""
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"\1: \2", text)
+    text = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m.group(1) or m.group(2), text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return re.sub(r"(?m)^#{1,6}\s+", "", text)
+
+
 def _for_model(messages: list[dict]) -> list[dict]:
     return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
 
@@ -182,7 +196,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 proposed = True
                 previewed.add(c.function.name)
             messages.append({"role": "tool", "tool_call_id": c.id, "content": result[:6000]})
-    return "Sorry -- I got stuck working on that. Could you say it another way?", messages
+    return "That didn't go through. Say it another way?", messages
 
 
 # --- Stored conversations (one per person, shared by web and Telegram) -----------
