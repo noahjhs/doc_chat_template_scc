@@ -5,6 +5,8 @@
     tools/scenario.py start <scenario>     prepare this Mac, then reset and start every persona in it
     tools/scenario.py reset <checkpoint>   reset and start one persona at one checkpoint
     tools/scenario.py stop                 shut every test VM down
+    tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
+    tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
 
 How it works: each persona's VM is cloned fresh from a local snapshot
 (copy-on-write, instant), their dev account is deleted, and the checkpoint's
@@ -252,6 +254,28 @@ def main(argv: list[str]) -> int:
         for name, c in CONF["checkpoints"].items():
             print(f"  {name:<22} {c['about']}")
         return 0
+    if cmd == "edit" and len(argv) > 2:
+        snap = argv[2]
+        if snap not in CONF["snapshots"]:
+            print(f"No snapshot {snap!r}; known: {', '.join(CONF['snapshots'])}")
+            return 2
+        subprocess.Popen(["tart", "run", snap], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        say("mac", f"{snap} is opening. Changes you make in it are kept; it holds only what's local to a Mac -- "
+                   f"no Casper account. When done: tools/scenario.py save {snap}")
+        return 0
+    if cmd == "save" and len(argv) > 2:
+        snap = argv[2]
+        if snap not in running_vms():
+            say("mac", f"{snap} isn't running -- nothing to save (it's saved whenever it's shut down).")
+            return 0
+        subprocess.run(["tart", "exec", snap, "osascript", "-e", 'tell application "System Events" to shut down'], capture_output=True)
+        for _ in range(60):
+            if snap not in running_vms():
+                say("mac", f"saved {snap}; every reset from it now starts here")
+                return 0
+            time.sleep(2)
+        say("mac", f"{snap} didn't shut down (an app may be asking to save something) -- answer it in the VM, then run save again")
+        return 1
     if cmd == "stop":
         for p in CONF["personas"].values():
             if p["vm"] in running_vms():
