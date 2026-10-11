@@ -2,8 +2,8 @@
 """Reset test VMs and their dev Casper accounts together, to known points.
 
     tools/scenario.py list                 what's defined (tools/scenarios.toml)
-    tools/scenario.py start <scenario>     prepare this Mac, then reset and start every persona in it
-    tools/scenario.py reset <checkpoint>   reset and start one persona at one checkpoint
+    tools/scenario.py start <name>         stop other VMs, free memory, then reset a scenario (every persona in it) or one checkpoint
+    tools/scenario.py reset <name>         the same, but leave other running VMs alone
     tools/scenario.py stop                 shut every test VM down
     tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
@@ -204,10 +204,11 @@ def available_gb() -> float:
     return free * page / 1024**3
 
 
-def prepare_host(keep: set[str]):
-    """Frees memory for the test VMs: stops other VMs, quits the apps listed
-    in ~/.config/casper-vm/quit-apps, and purges disk caches if allowed."""
-    for vm in running_vms() - keep:
+def prepare_host(keep: set[str], stop_others: bool = True):
+    """Frees memory for the test VMs: stops other VMs (for `start`), quits
+    the apps listed in ~/.config/casper-vm/quit-apps, and purges disk caches
+    if allowed."""
+    for vm in (running_vms() - keep) if stop_others else ():
         say("mac", f"stopping {vm}")
         tart("stop", vm, check=False)
     quit_list = CONFIG_DIR / "quit-apps"
@@ -451,16 +452,22 @@ def main(argv: list[str]) -> int:
                 say("mac", f"stopped {p['vm']}")
         return 0
     if cmd in ("start", "reset") and len(argv) > 2:
+        # Either takes a scenario (every persona in it) or one checkpoint.
         name = argv[2]
-        checkpoints = CONF["scenarios"][name]["checkpoints"] if cmd == "start" else [name]
-        vms = {checkpoint_plan(cp)[0]["vm"] for cp in checkpoints}
-        if cmd == "start":
-            prepare_host(keep=vms)
+        if name in CONF["scenarios"]:
+            checkpoints = CONF["scenarios"][name]["checkpoints"]
+        elif name in CONF["checkpoints"]:
+            checkpoints = [name]
+        else:
+            print(f"No scenario or checkpoint called {name!r}.\n"
+                  f"  scenarios:   {', '.join(CONF['scenarios'])}\n  checkpoints: {', '.join(CONF['checkpoints'])}")
+            return 2
+        prepare_host(keep={checkpoint_plan(cp)[0]["vm"] for cp in checkpoints}, stop_others=cmd == "start")
         errors = run_parallel(checkpoints)
         if errors:
             print("\nNot ready:\n  " + "\n  ".join(errors))
             return 1
-        if cmd == "start" and CONF["scenarios"][name].get("next"):
+        if name in CONF["scenarios"] and CONF["scenarios"][name].get("next"):
             print("\nReady.\n" + CONF["scenarios"][name]["next"].strip())
         return 0
     print(__doc__)
