@@ -336,8 +336,10 @@ def rename(old: str, new: str) -> int:
     out = []
     for line in toml.read_text().splitlines(keepends=True):
         if kind == "snapshot":
-            line = re.sub(rf"^{q} = ", f"{new} = ", line)
-            line = re.sub(rf'^(snapshot = )"{q}"', rf'\1"{new}"', line)
+            # Snapshot names are distinctive, so mentions in descriptions and
+            # comments follow too -- whole names only (renaming casper-base
+            # leaves casper-base-claude alone).
+            line = re.sub(rf"(?<![\w-]){q}(?![\w-])", new, line)
         else:
             table = {"persona": "personas", "checkpoint": "checkpoints", "scenario": "scenarios"}[kind]
             line = re.sub(rf"^\[{table}\.{q}\]", f"[{table}.{new}]", line)
