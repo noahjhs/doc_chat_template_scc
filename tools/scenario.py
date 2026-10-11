@@ -9,6 +9,7 @@
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
     tools/scenario.py copy <from> <to> ["what it is"]   duplicate a starting snapshot (instant, no extra disk until changed)
     tools/scenario.py delete <snapshot>    delete a starting snapshot (asks first; refuses if a persona uses it)
+    tools/scenario.py rename <old> <new>   rename a starting snapshot (personas using it follow)
     tools/scenario.py show <name>          detail on a scenario, checkpoint, persona or snapshot
 
 How it works: each persona's VM is cloned fresh from a local snapshot
@@ -319,6 +320,29 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "show" and len(argv) > 2:
         print(describe(argv[2]))
+        return 0
+    if cmd == "rename" and len(argv) > 3:
+        old, new = argv[2], argv[3]
+        existing = tart("list", "-q").stdout.split()
+        if old not in existing:
+            print(f"No snapshot {old!r}.")
+            return 2
+        if new in existing or new in CONF["snapshots"]:
+            print(f"{new!r} already exists.")
+            return 2
+        if old in running_vms():
+            print(f"{old} is running -- save it first (tools/scenario.py save {old}).")
+            return 2
+        tart("rename", old, new)
+        toml = HERE / "scenarios.toml"
+        lines = []
+        for line in toml.read_text().splitlines(keepends=True):
+            if line.startswith(f"{old} = "):
+                line = f"{new} = " + line[len(old) + 3:]
+            lines.append(line.replace(f'snapshot = "{old}"', f'snapshot = "{new}"'))
+        toml.write_text("".join(lines))
+        users = [n for n, p in CONF["personas"].items() if p["snapshot"] == old]
+        say("mac", f"renamed {old} to {new}" + (f"; {', '.join(users)} now start from {new}" if users else ""))
         return 0
     if cmd == "delete" and len(argv) > 2:
         snap = argv[2]
