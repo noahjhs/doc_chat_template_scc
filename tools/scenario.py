@@ -9,7 +9,7 @@
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
     tools/scenario.py copy <from> <to> ["what it is"]   duplicate a starting snapshot (instant, no extra disk until changed)
     tools/scenario.py delete <snapshot>    delete a starting snapshot (asks first; refuses if a persona uses it)
-    tools/scenario.py rename <old> <new>   rename a starting snapshot (personas using it follow)
+    tools/scenario.py rename <old> <new>   rename a snapshot, persona, checkpoint or scenario (references follow)
     tools/scenario.py show <name>          detail on a scenario, checkpoint, persona or snapshot
 
 How it works: each persona's VM is cloned fresh from a local snapshot
@@ -301,6 +301,61 @@ def describe(name: str) -> str:
     return "\n".join(lines)
 
 
+def rename(old: str, new: str) -> int:
+    """Renames a snapshot, persona, checkpoint or scenario, and every
+    reference to it in scenarios.toml."""
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", new):
+        print("Names are letters, digits, - and _.")
+        return 2
+    kinds = [k for k, table in (("snapshot", CONF["snapshots"]), ("persona", CONF["personas"]),
+                                ("checkpoint", CONF["checkpoints"]), ("scenario", CONF["scenarios"])) if old in table]
+    if not kinds:
+        print(f"Nothing called {old!r}. Try: tools/scenario.py list")
+        return 2
+    if len(kinds) > 1:
+        print(f"{old!r} is a {' and a '.join(kinds)} -- rename it in tools/scenarios.toml by hand.")
+        return 2
+    kind = kinds[0]
+    if new in {"snapshot": CONF["snapshots"], "persona": CONF["personas"], "checkpoint": CONF["checkpoints"], "scenario": CONF["scenarios"]}[kind]:
+        print(f"There's already a {kind} called {new!r}.")
+        return 2
+    if kind == "snapshot":
+        existing = tart("list", "-q").stdout.split()
+        if new in existing:
+            print(f"A VM called {new!r} already exists.")
+            return 2
+        if old in running_vms():
+            print(f"{old} is running -- save it first (tools/scenario.py save {old}).")
+            return 2
+        if old in existing:
+            tart("rename", old, new)
+    toml = HERE / "scenarios.toml"
+    q = re.escape(old)
+    out = []
+    for line in toml.read_text().splitlines(keepends=True):
+        if kind == "snapshot":
+            line = re.sub(rf"^{q} = ", f"{new} = ", line)
+            line = re.sub(rf'^(snapshot = )"{q}"', rf'\1"{new}"', line)
+        else:
+            table = {"persona": "personas", "checkpoint": "checkpoints", "scenario": "scenarios"}[kind]
+            line = re.sub(rf"^\[{table}\.{q}\]", f"[{table}.{new}]", line)
+            if kind == "persona":
+                line = re.sub(rf'^(persona = )"{q}"', rf'\1"{new}"', line)
+            if kind == "checkpoint" and re.match(r"^(extends|checkpoints) = ", line):
+                line = re.sub(rf'"{q}"', f'"{new}"', line)
+        out.append(line)
+    text = "".join(out)
+    tomllib.loads(text)  # never write a config that doesn't parse
+    toml.write_text(text)
+    say("mac", f"renamed {kind} {old} to {new}")
+    if kind == "persona":
+        p = CONF["personas"][old]
+        say("mac", f"(its VM is still {p['vm']} and its dev account still {p['username']} -- change those in tools/scenarios.toml if you like)")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "list"
     if cmd == "list":
@@ -322,28 +377,7 @@ def main(argv: list[str]) -> int:
         print(describe(argv[2]))
         return 0
     if cmd == "rename" and len(argv) > 3:
-        old, new = argv[2], argv[3]
-        existing = tart("list", "-q").stdout.split()
-        if old not in existing:
-            print(f"No snapshot {old!r}.")
-            return 2
-        if new in existing or new in CONF["snapshots"]:
-            print(f"{new!r} already exists.")
-            return 2
-        if old in running_vms():
-            print(f"{old} is running -- save it first (tools/scenario.py save {old}).")
-            return 2
-        tart("rename", old, new)
-        toml = HERE / "scenarios.toml"
-        lines = []
-        for line in toml.read_text().splitlines(keepends=True):
-            if line.startswith(f"{old} = "):
-                line = f"{new} = " + line[len(old) + 3:]
-            lines.append(line.replace(f'snapshot = "{old}"', f'snapshot = "{new}"'))
-        toml.write_text("".join(lines))
-        users = [n for n, p in CONF["personas"].items() if p["snapshot"] == old]
-        say("mac", f"renamed {old} to {new}" + (f"; {', '.join(users)} now start from {new}" if users else ""))
-        return 0
+        return rename(argv[2], argv[3])
     if cmd == "delete" and len(argv) > 2:
         snap = argv[2]
         users = [n for n, p in CONF["personas"].items() if p["snapshot"] == snap]
