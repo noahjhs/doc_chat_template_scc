@@ -11,10 +11,14 @@
     tools/scenario.py delete <snapshot>    delete a starting snapshot (asks first; refuses if a persona uses it)
     tools/scenario.py rename <old> <new>   rename a snapshot, persona, checkpoint or scenario (references follow)
     tools/scenario.py show <name>          detail on a scenario, checkpoint, persona or snapshot
+    tools/scenario.py capture <name>       save a checkpoint (or every one in a scenario) as it is right now -- VM and server together
+    tools/scenario.py uncapture <checkpoint>  forget a capture: back to replaying its steps
 
 How it works: each persona's VM is cloned fresh from a local snapshot
 (copy-on-write, instant), their dev account is deleted, and the checkpoint's
-steps are replayed -- inside the VM through the Tart guest agent (`tart
+steps are replayed. A captured checkpoint is restored instead: its VM
+snapshot (cp-<checkpoint>) and its server state, exported at the same moment
+-- so tweaks made by hand are kept. Steps are replayed -- inside the VM through the Tart guest agent (`tart
 exec`), and on the server through dev-only endpoints (casper_service/
 devtools.py). Snapshots never hold account state, so a VM and the server can
 never disagree.
@@ -133,11 +137,12 @@ def fresh_vm(persona: dict):
 
 
 # --- The dev deployment ----------------------------------------------------------------
-def dev(method: str, path: str) -> dict:
+def dev(method: str, path: str, body: dict | None = None) -> dict:
     token = (CONFIG_DIR / "dev-admin-token").read_text().strip()
     req = urllib.request.Request(CONF["deployment"]["auth_url"] + path, method=method,
-                                 headers={"X-Dev-Admin": token, "User-Agent": "casper-scenario"})
-    with urllib.request.urlopen(req, timeout=30, context=_TLS) as r:
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"X-Dev-Admin": token, "User-Agent": "casper-scenario", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60, context=_TLS) as r:
         return json.loads(r.read() or b"{}")
 
 
@@ -172,6 +177,7 @@ def step_name_mac(p, ctx, *name):
 def step_install_casper(p, ctx):
     url = CONF["deployment"]["download_url"]
     vm_exec(p["vm"], f"""
+        pkill -f CasperGo/Casper.app/Contents/MacOS/Casper; sleep 1
         curl -fsSL '{url}' -o /tmp/casper.zip && rm -rf /Applications/CasperGo &&
         unzip -oq /tmp/casper.zip -d /Applications &&
         open --env CASPER_SCRIPTED_SETUP=1 /Applications/CasperGo/Casper.app""")
@@ -227,14 +233,42 @@ def checkpoint_plan(name: str) -> tuple[dict, list[str]]:
     return CONF["personas"][cp["persona"]], list(cp.get("steps", []))
 
 
+CAPTURES = CONFIG_DIR / "captures"
+
+
+def capture_of(checkpoint: str) -> dict | None:
+    f = CAPTURES / f"{checkpoint}.json"
+    return json.loads(f.read_text()) if f.exists() else None
+
+
+def capture_snapshot(checkpoint: str) -> str:
+    return f"cp-{checkpoint}"
+
+
 def reset_checkpoint(name: str):
-    persona, steps = checkpoint_plan(name)
+    persona, _ = checkpoint_plan(name)
     who = persona["username"]
     t0 = time.time()
-    gone = dev("DELETE", f"/dev/users/{who}")
-    say(who, "dev account deleted" if gone.get("existed") else "no dev account yet")
-    say(who, f"{persona['vm']}: fresh from {persona['snapshot']}, starting…")
-    fresh_vm(persona)
+    chain = checkpoint_chain(name)
+    # The deepest captured checkpoint on the way here, if any: restore it,
+    # then replay only the steps after it.
+    at = max((i for i, (cp, _) in enumerate(chain) if capture_of(cp)), default=None)
+    if at is not None:
+        cp = chain[at][0]
+        cap = capture_of(cp)
+        dev("POST", "/dev/users/import", {"exports": [cap["export"]]})
+        say(who, f"server state restored from the {cp} capture ({cap['captured_at'][:16]})")
+        say(who, f"{persona['vm']}: from {cap['snapshot']}, starting…")
+        fresh_vm({**persona, "snapshot": cap["snapshot"]})
+        steps = [s for _, steps in chain[at + 1:] for s in steps]
+        if any("install_casper" in s for _, steps_ in chain[:at + 1] for s in steps_):
+            steps = ["install_casper"] + steps  # keep the app current; its sign-in survives
+    else:
+        gone = dev("DELETE", f"/dev/users/{who}")
+        say(who, "dev account deleted" if gone.get("existed") else "no dev account yet")
+        say(who, f"{persona['vm']}: fresh from {persona['snapshot']}, starting…")
+        fresh_vm(persona)
+        steps = [s for _, steps in chain for s in steps]
     ctx: dict = {}
     for step in steps:
         fn, *args = step.split()
@@ -317,8 +351,15 @@ def describe(name: str) -> str:
                f"{indent}  persona  {persona['username']} (VM {persona['vm']}, dev account {persona['username']})",
                f"{indent}  starts   {snapshot_line(persona['snapshot'])}",
                f"{indent}  then     delete the dev account, and:"]
+        chain = checkpoint_chain(cp)
+        at = max((i for i, (c, _) in enumerate(chain) if capture_of(c)), default=None)
+        if at is not None:
+            cap = capture_of(chain[at][0])
+            out[-2:] = [f"{indent}  starts   the {chain[at][0]} capture ({cap['captured_at'][:16]}): VM {cap['snapshot']} and its server state",
+                        f"{indent}  then     update Casper to the latest build" + (", and:" if any(s for _, s in chain[at + 1:]) else "")]
+            chain = chain[at + 1:]
         n = 0
-        for src, steps in checkpoint_chain(cp):
+        for src, steps in chain:
             for step in steps:
                 n += 1
                 out.append(f"{indent}    {n}. {step}" + (f"   (from {src})" if src != cp else ""))
@@ -399,10 +440,61 @@ def rename(old: str, new: str) -> int:
     text = "".join(out)
     tomllib.loads(text)  # never write a config that doesn't parse
     toml.write_text(text)
+    if kind == "checkpoint" and (cap := capture_of(old)):
+        tart("rename", capture_snapshot(old), capture_snapshot(new), check=False)
+        cap.update(checkpoint=new, snapshot=capture_snapshot(new))
+        (CAPTURES / f"{new}.json").write_text(json.dumps(cap))
+        os.chmod(CAPTURES / f"{new}.json", 0o600)
+        (CAPTURES / f"{old}.json").unlink()
     say("mac", f"renamed {kind} {old} to {new}")
     if kind == "persona":
         p = CONF["personas"][old]
         say("mac", f"(its VM is still {p['vm']} and its dev account still {p['username']} -- change those in tools/scenarios.toml if you like)")
+    return 0
+
+
+def capture(name: str) -> int:
+    """Saves checkpoints as they are now: each persona's VM (shut down
+    cleanly, then snapshotted) and their server state, exported while the
+    VMs are off so nothing changes in between. Then starts the VMs again."""
+    checkpoints = CONF["scenarios"][name]["checkpoints"] if name in CONF["scenarios"] else [name]
+    if any(cp not in CONF["checkpoints"] for cp in checkpoints):
+        print(f"No scenario or checkpoint called {name!r}.")
+        return 2
+    existing = tart("list", "-q").stdout.split()
+    personas = [(cp, checkpoint_plan(cp)[0]) for cp in checkpoints]
+    missing = [p["vm"] for _, p in personas if p["vm"] not in existing]
+    if missing:
+        print(f"Nothing to capture: {', '.join(missing)} doesn't exist (start the scenario first).")
+        return 2
+    for _, p in personas:
+        say(p["username"], f"{p['vm']}: {shutdown_vm(p['vm'])}")
+    when = time.strftime("%Y-%m-%dT%H:%M:%S")
+    exports = {cp: dev("GET", f"/dev/users/{p['username']}/export") for cp, p in personas}
+    CAPTURES.mkdir(parents=True, exist_ok=True)
+    os.chmod(CAPTURES, 0o700)
+    for cp, p in personas:
+        snap = capture_snapshot(cp)
+        tart("delete", snap, check=False)
+        tart("clone", p["vm"], snap)
+        f = CAPTURES / f"{cp}.json"
+        f.write_text(json.dumps({"checkpoint": cp, "persona": p["username"], "captured_at": when, "group": when,
+                                 "snapshot": snap, "export": exports[cp]}))
+        os.chmod(f, 0o600)  # holds the persona's credential hashes
+        say(p["username"], f"captured {cp}: VM as {snap}, plus its server state")
+    for _, p in personas:
+        subprocess.Popen(["tart", "run", p["vm"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    say("mac", "VMs starting again; resets of these checkpoints now restore this moment")
+    return 0
+
+
+def uncapture(checkpoint: str) -> int:
+    if not capture_of(checkpoint):
+        print(f"{checkpoint} isn't captured.")
+        return 2
+    tart("delete", capture_snapshot(checkpoint), check=False)
+    (CAPTURES / f"{checkpoint}.json").unlink()
+    say("mac", f"{checkpoint}: capture forgotten; resets replay its steps again")
     return 0
 
 
@@ -414,7 +506,8 @@ def main(argv: list[str]) -> int:
             print(f"  {name:<22} {s['about']}")
         print("Checkpoints:")
         for name, c in CONF["checkpoints"].items():
-            print(f"  {name:<22} {c['about']}")
+            cap = capture_of(name)
+            print(f"  {name:<22} {c['about']}" + (f"  [captured {cap['captured_at'][:16]}]" if cap else ""))
         print("Personas:")
         for name, p in CONF["personas"].items():
             print(f"  {name:<22} VM {p['vm']}, from snapshot {p['snapshot']}")
@@ -423,6 +516,10 @@ def main(argv: list[str]) -> int:
             print(f"  {name:<22} {about}")
         print("\nDetail on any of these: tools/scenario.py show <name>")
         return 0
+    if cmd == "capture" and len(argv) > 2:
+        return capture(argv[2])
+    if cmd == "uncapture" and len(argv) > 2:
+        return uncapture(argv[2])
     if cmd == "show" and len(argv) > 2:
         print(describe(argv[2]))
         return 0
@@ -430,6 +527,9 @@ def main(argv: list[str]) -> int:
         return rename(argv[2], argv[3])
     if cmd == "delete" and len(argv) > 2:
         snap = argv[2]
+        if snap.startswith("cp-") and capture_of(snap[3:]):
+            print(f"{snap} is the capture of {snap[3:]} -- use: tools/scenario.py uncapture {snap[3:]}")
+            return 2
         users = [n for n, p in CONF["personas"].items() if p["snapshot"] == snap]
         if users:
             print(f"{snap} is the starting point for {', '.join(users)} -- point them elsewhere in tools/scenarios.toml first.")

@@ -3156,3 +3156,38 @@ def dev_agent_token(username: str):
             raise HTTPException(status_code=404, detail="No such user.")
         db.execute("INSERT INTO agent_tokens (user_id, name, token_hash) VALUES (?, ?, ?)", (row["id"], "scenario script", hash_token(token)))
     return {"token": token}
+
+
+@app.get("/dev/users/{username}/export", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
+def dev_export_user(username: str):
+    with get_db() as db:
+        row = db.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+        if row is None:
+            return {"username": username, "user_id": None, "tables": {}}
+        return {"username": username, "user_id": row["id"], **devtools.export_user(db, row["id"])}
+
+
+@app.post("/dev/users/import", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
+def dev_import_users(body: dict):
+    """Restores captured personas (exports from /dev/users/{name}/export,
+    taken together): deletes each one's current account first, then puts
+    every captured row back. Their Macs, Claude and browsers, restored from
+    the same moment's VM snapshots, find their credentials valid again."""
+    exports = body.get("exports") or []
+    with get_db() as db:
+        for ex in exports:
+            for uid in {ex.get("user_id")} | {r["id"] for r in db.execute(
+                    "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (ex["username"],)).fetchall()}:
+                if uid is not None:
+                    devtools.delete_user(db, uid)
+        counts = {}
+        for ex in exports:
+            for table, n in devtools.import_rows(db, ex.get("tables") or {}).items():
+                counts[table] = counts.get(table, 0) + n
+        hosts = {(r["user_id"], r["host_id"]) for ex in exports for r in (ex.get("tables") or {}).get("user_hosts", [])}
+    for owner, host in hosts:  # their Macs (and friends') pick up the restored grants
+        try:
+            _refresh_daemon_grants(owner, host)
+        except Exception as e:
+            print(f"dev import: refresh for host {host} failed: {e}")
+    return {"restored": counts}

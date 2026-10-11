@@ -791,3 +791,39 @@ def test_dev_endpoints_reset_a_persona_and_exist_only_with_the_dev_token(app_env
         # Deleting sam takes sam's offering, invite and group too.
         assert client.delete("/dev/users/sam", headers=admin).json()["deleted"]["offerings"] == 1
         assert client.get("/invites/info", params={"code": code}).json()["valid"] is False
+
+
+def test_dev_capture_and_restore_brings_personas_back_exactly(app_env, monkeypatch):
+    """A checkpoint capture: both personas' server state exported at one
+    moment, later restored after anything has changed -- with the same ids,
+    so the credentials their VMs hold (session, Mac, Claude's token) work."""
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    monkeypatch.setenv("DEV_ADMIN_TOKEN", "t0ken")
+    admin = {"X-Dev-Admin": "t0ken"}
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", for_whom="Riley", group="Mutual Aid", preview=False)).group(0)
+        _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        before = {who: _mcp(client, tok, "my_casper") for who, tok in (("sam", sam_agent), ("riley", riley_agent))}
+        hosts_before = client.get("/hosts", headers=sam).json()
+
+        capture = [client.get(f"/dev/users/{u}/export", headers=admin).json() for u in ("sam", "riley")]
+        assert capture[0]["tables"]["users"][0]["username"] == "sam" and "offerings" in capture[0]["tables"]
+
+        # Things move on: more offered, then both accounts are gone (a reset).
+        _mcp(client, sam_agent, "create_invite", for_whom="Ana", preview=False)
+        for u in ("riley", "sam"):
+            client.delete(f"/dev/users/{u}", headers=admin)
+        assert client.get("/friends", headers=sam).status_code == 401
+
+        out = client.post("/dev/users/import", json={"exports": capture}, headers=admin).json()
+        assert out["restored"]["users"] == 2
+        assert {who: _mcp(client, tok, "my_casper") for who, tok in (("sam", sam_agent), ("riley", riley_agent))} == before
+        assert client.get("/hosts", headers=sam).json() == hosts_before  # the Mac's pairing is back
+        assert client.get("/friends", headers=riley).json()["friends"] == ["sam"]  # the browser session too
+        assert "Ana" not in _mcp(client, sam_agent, "my_casper")
+
+        # Restoring over the live state again (no reset in between) is the same.
+        client.post("/dev/users/import", json={"exports": capture}, headers=admin)
+        assert _mcp(client, riley_agent, "my_casper") == before["riley"]
