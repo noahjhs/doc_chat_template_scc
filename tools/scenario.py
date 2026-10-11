@@ -8,6 +8,8 @@
     tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
     tools/scenario.py copy <from> <to> ["what it is"]   duplicate a starting snapshot (instant, no extra disk until changed)
+    tools/scenario.py delete <snapshot>    delete a starting snapshot (asks first; refuses if a persona uses it)
+    tools/scenario.py show <name>          detail on a scenario, checkpoint, persona or snapshot
 
 How it works: each persona's VM is cloned fresh from a local snapshot
 (copy-on-write, instant), their dev account is deleted, and the checkpoint's
@@ -245,6 +247,59 @@ def run_parallel(checkpoints: list[str]):
     return errors
 
 
+def checkpoint_chain(name: str) -> list[tuple[str, list[str]]]:
+    """[(checkpoint, its own steps)], base first."""
+    cp = CONF["checkpoints"][name]
+    return (checkpoint_chain(cp["extends"]) if "extends" in cp else []) + [(name, list(cp.get("steps", [])))]
+
+
+def describe(name: str) -> str:
+    lines = []
+    snapshots, personas = CONF["snapshots"], CONF["personas"]
+    vms = {v["Name"]: v for v in json.loads(tart("list", "--format", "json").stdout)}
+
+    def snapshot_line(snap):
+        state = "missing!" if snap not in vms else ("running" if vms[snap].get("Running") else "saved")
+        return f"{snap} ({state}) -- {snapshots.get(snap, 'not in scenarios.toml')}"
+
+    def checkpoint_lines(cp, indent="  "):
+        persona, _ = checkpoint_plan(cp)
+        out = [f"{indent}{cp}: {CONF['checkpoints'][cp]['about']}",
+               f"{indent}  persona  {persona['username']} (VM {persona['vm']}, dev account {persona['username']})",
+               f"{indent}  starts   {snapshot_line(persona['snapshot'])}",
+               f"{indent}  then     delete the dev account, and:"]
+        n = 0
+        for src, steps in checkpoint_chain(cp):
+            for step in steps:
+                n += 1
+                out.append(f"{indent}    {n}. {step}" + (f"   (from {src})" if src != cp else ""))
+        if not n:
+            out.append(f"{indent}    (no steps)")
+        return out
+
+    if name in CONF["scenarios"]:
+        sc = CONF["scenarios"][name]
+        lines += [f"scenario {name}: {sc['about']}", "starts, in parallel:"]
+        for cp in sc["checkpoints"]:
+            lines += checkpoint_lines(cp)
+        if sc.get("next"):
+            lines += ["then:"] + ["  " + l for l in sc["next"].strip().splitlines()]
+    elif name in CONF["checkpoints"]:
+        lines += ["checkpoint"] + checkpoint_lines(name, "")
+        used = [s for s, sc in CONF["scenarios"].items() if name in sc["checkpoints"]]
+        lines.append(f"in scenarios: {', '.join(used) or 'none'}")
+    elif name in personas:
+        p = personas[name]
+        lines += [f"persona {name}: VM {p['vm']}, dev account {p['username']}", f"starts {snapshot_line(p['snapshot'])}",
+                  "checkpoints: " + ", ".join(c for c in CONF["checkpoints"] if checkpoint_plan(c)[0] is p)]
+    elif name in snapshots or name in vms:
+        users = [n for n, p in personas.items() if p["snapshot"] == name]
+        lines += [f"snapshot {snapshot_line(name)}", f"used by: {', '.join(users) or 'no persona'}"]
+    else:
+        lines.append(f"Nothing called {name!r}. Try: tools/scenario.py list")
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "list"
     if cmd == "list":
@@ -254,6 +309,36 @@ def main(argv: list[str]) -> int:
         print("Checkpoints:")
         for name, c in CONF["checkpoints"].items():
             print(f"  {name:<22} {c['about']}")
+        print("Personas:")
+        for name, p in CONF["personas"].items():
+            print(f"  {name:<22} VM {p['vm']}, from snapshot {p['snapshot']}")
+        print("Snapshots:")
+        for name, about in CONF["snapshots"].items():
+            print(f"  {name:<22} {about}")
+        print("\nDetail on any of these: tools/scenario.py show <name>")
+        return 0
+    if cmd == "show" and len(argv) > 2:
+        print(describe(argv[2]))
+        return 0
+    if cmd == "delete" and len(argv) > 2:
+        snap = argv[2]
+        users = [n for n, p in CONF["personas"].items() if p["snapshot"] == snap]
+        if users:
+            print(f"{snap} is the starting point for {', '.join(users)} -- point them elsewhere in tools/scenarios.toml first.")
+            return 2
+        if snap in running_vms():
+            print(f"{snap} is running -- save or stop it first.")
+            return 2
+        if snap not in tart("list", "-q").stdout.split():
+            print(f"No snapshot {snap!r}.")
+            return 2
+        if input(f"Delete snapshot {snap}? This can't be undone. Type its name to confirm: ").strip() != snap:
+            print("Not deleted.")
+            return 1
+        tart("delete", snap)
+        toml = HERE / "scenarios.toml"
+        toml.write_text("".join(l for l in toml.read_text().splitlines(keepends=True) if not l.startswith(f"{snap} = ")))
+        say("mac", f"deleted {snap}")
         return 0
     if cmd == "edit" and len(argv) > 2:
         snap = argv[2]
@@ -316,7 +401,7 @@ def main(argv: list[str]) -> int:
             print("\nNot ready:\n  " + "\n  ".join(errors))
             return 1
         if cmd == "start" and CONF["scenarios"][name].get("next"):
-            print("\nReady." + CONF["scenarios"][name]["next"])
+            print("\nReady.\n" + CONF["scenarios"][name]["next"].strip())
         return 0
     print(__doc__)
     return 2
