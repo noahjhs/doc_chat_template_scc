@@ -9,6 +9,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -231,6 +233,10 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 	// visible, since "launch Casper at login" is a system-level preference
 	// a user might want set before ever pairing a host.
 	mStartup := systray.AddMenuItemCheckbox("Include in startup items", "", isLoginItem)
+	// The recovery kit, for people without a technical agent: the same step
+	// as `Casper setup recovery-kit`, which asks for the passphrase in
+	// macOS dialogs.
+	mKit := systray.AddMenuItem("Make Recovery Kit…", "")
 	systray.AddSeparator()
 	// Restart, not just Quit -- a manual fallback for cases the automatic
 	// refresh triggers (pairing/resume, and the Resources page's own
@@ -262,6 +268,11 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 					mStartup.Uncheck() // revert the visual state -- the add itself failed
 				}
 			}
+		}
+	}()
+	go func() {
+		for range mKit.ClickedCh {
+			makeRecoveryKit(logf)
 		}
 	}()
 	go func() {
@@ -299,6 +310,44 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 				promptAddToLoginItems(mStartup, logf)
 			}
 		}()
+	}
+}
+
+// makeRecoveryKit runs this app's own `setup recovery-kit` (passphrase
+// dialogs included), then offers to show the saved file.
+func makeRecoveryKit(logf func(format string, args ...any)) {
+	exe, err := os.Executable()
+	if err != nil {
+		dialog.ShowError("Couldn't make the recovery kit: " + err.Error())
+		return
+	}
+	out, _ := exec.Command(exe, "setup", "recovery-kit", "--json").Output()
+	var result struct {
+		OK    bool   `json:"ok"`
+		Path  string `json:"path"`
+		Error string `json:"error"`
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &result); err != nil || !result.OK {
+		msg := result.Error
+		switch {
+		case strings.Contains(msg, "didn't match"):
+			msg = "The passphrases didn't match. Choose Make Recovery Kit again."
+		case strings.Contains(msg, "cancelled"):
+			return
+		case strings.Contains(msg, "no keys or mirrored folders"):
+			msg = "Nothing to put in a recovery kit yet. Make one after your first folder is mirrored."
+		case msg == "":
+			msg = "Couldn't make the recovery kit."
+		}
+		logf("Recovery kit: %s", result.Error)
+		dialog.ShowError(msg)
+		return
+	}
+	logf("Recovery kit saved to %s", result.Path)
+	if show, _ := dialog.Confirm("Recovery kit saved in Documents. Keep a copy, and your passphrase, somewhere other than this Mac.",
+		"Show in Finder", "Done", 10*time.Minute); show {
+		_ = exec.Command("open", "-R", result.Path).Run()
 	}
 }
 

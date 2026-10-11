@@ -90,10 +90,10 @@ HOW
   they hold mirror space (list_hosts). Suggest Documents; not Photos. A
   catcher must be a different machine from every mirror; if they have none,
   offer Casper's own (use_casper_catcher=true).
-- Right after their first mirror is protected, the recovery kit:
+- Right after their first mirror is protected, the recovery kit: run
   `/Applications/CasperGo/Casper.app/Contents/MacOS/Casper setup recovery-kit`
-  (they type a passphrase into a dialog). Keep the file and passphrase off
-  this Mac.
+  (they type a passphrase into a dialog), or tell them to choose Make
+  Recovery Kit in Casper's menu. Keep the file and passphrase off this Mac.
 - Offer space: publish_offering on their Mac; kind="catcher" too if the Mac
   is always on.
 - Undo: list_versions, then restore_version: a new copy under "Casper

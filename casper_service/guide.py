@@ -53,9 +53,9 @@ RULES
 - Inviting a friend: their first name and how to send it (email address, their
   own Telegram to forward, or a message they pass on). The first time, also
   their group's name (e.g. "Mutual Aid"). 20 GB is a good default.
-- After the first mirror is protected: the recovery kit. On their Mac, the
-  Casper app makes it (Terminal: `/Applications/CasperGo/Casper.app/Contents/MacOS/Casper setup recovery-kit`).
-  One line on why: without it, a lost Mac can't be rebuilt.
+- After the first mirror is protected, one line: "Last step: your recovery
+  kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery
+  Kit." If they ask why: without it, a lost Mac can't be rebuilt.
 """
 
 # OpenAI-style tool schemas for the subset of Casper's tools the guide uses.
