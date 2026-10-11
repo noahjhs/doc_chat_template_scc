@@ -20,13 +20,14 @@ download_url = "https://dev-auth.casperagent.dev/download/casper/macos"
 # Local-only starting points (Tart VMs on this Mac).
 casper-base = "Chrome (default), Gmail and Telegram signed in, realistic Documents; no sleep/lock or update nags; copy/paste. No AI agent."
 casper-base-claude = "casper-base plus Claude Code, installed and signed in."
+riley-base = "casper-base-claude, but signed in to Riley's own Telegram and Gmail."
 
 [personas.riley]
 vm = "riley-mac"
-snapshot = "casper-base-claude"
+snapshot = "riley-base"
 username = "riley"
 
-[personas.noah]
+[personas.noah]  # uses the Principal's own Telegram and Gmail (casper-base)
 vm = "noah-mac"
 snapshot = "casper-base"
 username = "noah"
