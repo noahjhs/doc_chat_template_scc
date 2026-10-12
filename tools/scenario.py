@@ -241,6 +241,16 @@ def step_claude_token(p, ctx):
     return "Claude Code signed in with the test token"
 
 
+def step_quiet_apps(p, ctx, *names):
+    """Quits apps a snapshot happens to reopen at login (use _ for spaces), so
+    a walkthrough starts with a clean desktop -- and the Principal's own
+    Telegram chats and Gmail tabs aren't on screen."""
+    names = [n.replace("_", " ") for n in names]
+    for name in names:
+        subprocess.run(["tart", "exec", p["vm"], "pkill", "-x", name], capture_output=True)
+    return "quit " + ", ".join(names)
+
+
 def step_install_casper(p, ctx):
     url = CONF["deployment"]["download_url"]
     vm_exec(p["vm"], f"""
@@ -282,6 +292,7 @@ def step_publish_offering(p, ctx, gb="20"):
 
 STEPS = {
     "name_mac": step_name_mac,
+    "quiet_apps": step_quiet_apps,
     "claude_token": step_claude_token,
     "install_casper": step_install_casper,
     "create_account": step_create_account,

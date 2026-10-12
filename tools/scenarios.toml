@@ -10,7 +10,7 @@
 # builds on another checkpoint. A scenario starts several checkpoints at once,
 # e.g. both sides of an invite.
 #
-# Steps (see STEPS in scenario.py): name_mac <name>, claude_token, install_casper,
+# Steps (see STEPS in scenario.py): name_mac <name>, quiet_apps <apps>, claude_token, install_casper,
 # create_account, pair,
 # connect_claude, publish_offering <GB>, chat_folder.
 
@@ -49,7 +49,7 @@ steps = ["publish_offering 20"]
 [checkpoints.noah-fresh]
 persona = "noah"
 about = "Noah: a Mac that's never seen Casper, and no Casper account."
-steps = ["name_mac Noah's MacBook Air"]
+steps = ["name_mac Noah's MacBook Air", "quiet_apps Telegram Safari System_Settings"]
 
 [scenarios.publish]
 about = "Riley offers space and invites Noah, from scratch."

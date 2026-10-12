@@ -20,6 +20,9 @@ import (
 // they agree, copy it, start the copy, and quit this one. Returns only if
 // nothing was moved.
 func moveToApplications(logf func(format string, args ...any)) {
+	if os.Getenv("CASPER_MOVED") != "" {
+		return // the copy we just started: never offer twice
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -52,7 +55,12 @@ func moveToApplications(logf func(format string, args ...any)) {
 		dialog.ShowError("Couldn't move Casper to " + filepath.Dir(dest) + ". It will keep working from here.")
 		return
 	}
-	if err := exec.Command("open", "-n", dest).Start(); err != nil {
+	// The copy still carries macOS's "downloaded from the internet" flag, which
+	// would make macOS run it from a temporary location all over again (and ask
+	// to move it again, forever). They already approved Casper when they opened
+	// it, so clear the flag on the copy.
+	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", dest).Run()
+	if err := exec.Command("open", "-n", "--env", "CASPER_MOVED=1", dest).Start(); err != nil {
 		logf("Couldn't start the moved copy: %s", err)
 		return
 	}

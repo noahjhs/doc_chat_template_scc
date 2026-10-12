@@ -45,6 +45,30 @@ def vnc(vm: str, *args: str) -> str:
     return out.stdout
 
 
+# Over this VNC a shifted character typed as itself arrives unshifted (":" as ";",
+# "@" as "2"), so shifted characters are sent as an explicit Shift chord.
+SHIFTED = {"~": "`", "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+           "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";", '"': "'", "<": ",", ">": ".", "?": "/"}
+
+
+def keystrokes(text: str) -> list[str]:
+    """vncdo arguments that type `text`: runs of plain characters, and
+    shift-down / key / shift-up for capitals and shifted symbols (a "shift--"
+    chord would be parsed as an empty key)."""
+    out, run = [], ""
+    for ch in text:
+        if ch.isupper() or ch in SHIFTED:
+            if run:
+                out += ["type", run]
+                run = ""
+            out += ["keydown", "shift", "key", ch.lower() if ch.isalpha() else SHIFTED[ch], "keyup", "shift", "pause", "0.03"]
+        else:
+            run += ch
+    if run:
+        out += ["type", run]
+    return out
+
+
 def native_width(png: str) -> int:
     out = subprocess.run(["sips", "-g", "pixelWidth", png], capture_output=True, text=True).stdout
     return int(out.split("pixelWidth:")[1].split()[0])
@@ -86,7 +110,7 @@ def main(argv: list[str]) -> int:
         x, y = round(float(rest[0]) * f), round(float(rest[1]) * f)
         vnc(vm, "move", str(x), str(y), "pause", "0.2", "click", "1", *(["click", "1"] if cmd == "dclick" else []))
     elif cmd == "type":
-        vnc(vm, "type", rest[0])
+        vnc(vm, *keystrokes(rest[0]))
     elif cmd == "key":
         vnc(vm, "key", rest[0])
     elif cmd == "scroll":
