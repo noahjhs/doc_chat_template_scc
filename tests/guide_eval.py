@@ -211,6 +211,7 @@ def scenario_offer_space(run):
     checks = []
     c0 = len(fake.calls)
     r = run(fake, "I'd like to offer some space on my Mac for my friend Mira to keep her files.")
+    print(f"     offer 1: {r!r}")
     t = _turn_calls(fake, c0)
     checks.append(("doesn't publish unasked", not _did(t, "publish_offering", preview=False)))
     c0 = len(fake.calls)
@@ -223,6 +224,7 @@ def scenario_offer_space(run):
             break
         c0 = len(fake.calls)
         r = run(fake, "Yes, please go ahead with both.")
+        print(f"     offer yes: {r!r}")
     checks.append(("creates the invite after yes", fake.invited))
     checks.append(("hands over the invite message", "CASPER-QRST-UVWX-YZ23" in r))
     return checks
