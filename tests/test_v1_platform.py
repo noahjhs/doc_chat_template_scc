@@ -493,8 +493,8 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         emails = []
         monkeypatch.setattr(main.mailer, "send", lambda to, subject, text, html: emails.append((to, subject, text, html)))
         plan = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com")
-        assert plan == ("PREVIEW (nothing changed yet): Invite Riley to Mutual Aid: 10 GB of mirror space on sam-mini, "
-                        "by email to riley@example.com. Single-use, expires in 7 days.") and not emails
+        assert plan == ("PREVIEW (nothing changed yet): Send Riley an invite to Mutual Aid: 10 GB of mirror space on sam-mini, "
+                        "by email to riley@example.com. It stays good until they're set up; unused, it lapses after 7 days.") and not emails
         assert "isn't a valid email address" in _mcp(client, sam_agent, "create_invite", quota_gb=10, email="riley@x", preview=False)
         assert "Telegram isn't linked" in _mcp(client, sam_agent, "create_invite", quota_gb=10, send_telegram=True, preview=False)
         out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com", preview=False)

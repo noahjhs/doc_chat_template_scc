@@ -53,7 +53,7 @@ def invite_email(name: str, inviter: str, group: str, gift: str, link: str, prom
         f"{hello} {joined}\n\n{inviter} has set aside {gift}. Your files are encrypted on your computer before they "
         f"leave it, so {inviter} can never read them.\n\nStart here: {link}\n\n"
         f"Already use an AI agent like Claude Code? Tell it: \"{prompt}\"\n\n"
-        f"The invitation works once and expires in a week.\n\nCasper -- held by friends, read by no one."
+        f"If you don't start within a week, the invitation lapses.\n\nCasper -- held by friends, read by no one."
     )
     e = html.escape
     body = f"""<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#f6efe4;font-family:Inter,-apple-system,Helvetica,Arial,sans-serif;color:#2b1d14">
@@ -63,6 +63,6 @@ def invite_email(name: str, inviter: str, group: str, gift: str, link: str, prom
 <tr><td style="padding:16px 40px 0;font-family:Georgia,serif;font-size:30px;line-height:1.2">{e(hello)}<br><span style="color:#b4572e;font-style:italic">{e(joined)}</span></td></tr>
 <tr><td style="padding:20px 40px 0;font-size:16px;line-height:1.6;color:#6f5a4a">{e(inviter)} has set aside {e(gift)}. Your files are encrypted on your computer before they leave it, so {e(inviter)} can never read them.</td></tr>
 <tr><td style="padding:28px 40px"><a href="{e(link)}" style="display:inline-block;background:#2b1d14;color:#f6efe4;text-decoration:none;border-radius:999px;padding:13px 24px;font-weight:500">Accept the invitation</a></td></tr>
-<tr><td style="padding:0 40px 32px;font-size:14px;line-height:1.6;color:#6f5a4a">Already use an AI agent like Claude Code? Tell it:<br><code style="font-family:Menlo,monospace;font-size:13px;color:#2b1d14">{e(prompt)}</code><br><br>The invitation works once and expires in a week.</td></tr>
+<tr><td style="padding:0 40px 32px;font-size:14px;line-height:1.6;color:#6f5a4a">Already use an AI agent like Claude Code? Tell it:<br><code style="font-family:Menlo,monospace;font-size:13px;color:#2b1d14">{e(prompt)}</code><br><br>If you don't start within a week, the invitation lapses.</td></tr>
 </table><p style="font-size:13px;color:#6f5a4a">Casper &mdash; held by friends, read by no one.</p></td></tr></table></body></html>"""
     return subject, text, body

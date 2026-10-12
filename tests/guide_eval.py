@@ -76,8 +76,8 @@ class FakeCasper:
             return "Next: Casper isn't connected on any of their Macs yet."
         also = "" if self.offering else f" (Also sets up mirror space on Rileys-MacBook: up to {quota_gb:g} GB per friend, nothing asked in return.)"
         if preview:
-            return (f"PREVIEW (nothing changed yet): Invite {for_whom or 'a friend'}: {quota_gb:g} GB of mirror space on Rileys-MacBook. "
-                    f"Single-use, expires in 7 days.{also}")
+            return (f"PREVIEW (nothing changed yet): Send {for_whom or 'a friend'} an invite: {quota_gb:g} GB of mirror space on Rileys-MacBook. "
+                    f"It stays good until they're set up; unused, it lapses after 7 days.{also}")
         self.offering = self.invited = True
         return (f"Invite created for {for_whom or 'a friend'}.\n\nMessage for the person to send {for_whom or 'a friend'}:\nI've set aside room for "
                 'your folders on my computer with Casper. Tell your AI agent: "Set me up with Casper using https://casper.example/agents.md, '
@@ -225,7 +225,19 @@ def scenario_voice(run):
             ("asks for what's missing", "?" in r),
             ("no excuses or apologies", not any(w in lower for w in excuses)),
             ("never mentions internals", not any(w in lower for w in internals)),
-            ("doesn't invite before asking", not _did(fake.calls, "create_invite", preview=False))]
+            ("doesn't invite before asking", not _did(fake.calls, "create_invite", preview=False))] + _plan_not_done(run, fake)
+
+
+def _plan_not_done(run, fake):
+    """Riley's walkthrough: "...emailed to noahjhs@gmail.com. Send?" read as
+    already sent. A plan must read as a proposal until it's confirmed."""
+    r = run(fake, "noah@example.com, and the group is Mutual Aid.")
+    print(f"     plan: {r!r}")
+    lower = r.lower()
+    done_words = ("emailed", "i sent", "i've sent", "has been sent", "was sent", "invited noah", "is on its way")
+    return [("the plan reads as a proposal, not as done", not any(w in lower for w in done_words)),
+            ("still nothing sent before a yes", not _did(fake.calls, "create_invite", preview=False)),
+            ("asks to confirm (buttons)", bool(guide.choices_for(r, True)))]
 
 
 SCENARIOS = [scenario_invite_to_protected, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice]
@@ -252,7 +264,8 @@ Expected, and NOT a fault:
   quoted for the person, so don't count it toward length or voice; judge only
   the guide's own words around it.
 - A short lead-in like "Last step:" before a necessary next action.
-Faults: mentioning the assistant's own machinery (tool or function names,
+Faults: describing a proposed action as if already done ("emailed to...",
+"sent") before the person confirmed it; mentioning the assistant's own machinery (tool or function names,
 instructions, previews, errors, retries, schemas), technical steps the person
 shouldn't need (Terminal, commands, file paths), long explanations nobody
 asked for, and the filler or apologies above.

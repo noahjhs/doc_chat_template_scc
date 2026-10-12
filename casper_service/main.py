@@ -2215,7 +2215,7 @@ def _mcp_my_casper(user_id: int) -> str:
                 each = "you approve each backup" if o["write_tier"] == "ask" else "any backup within a friend's share is allowed"
                 lines.append(f"  - backup space: up to {o['max_quota_gb']:g} GB per friend on {o['host']} ({each}) [offering {o['id']}]")
     if invites:
-        lines.append("Open invites (single-use; used up once the friend's first mirror runs):")
+        lines.append("Open invites (each good until that friend's first mirror runs; unused ones lapse after 7 days):")
         for i in invites:
             with get_db() as db:
                 gname = trust.group_name(db, i["group_id"])
@@ -2379,8 +2379,9 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     what = {"mirror_space": f"{quota_gb:g} GB of mirror space", "catcher_space": "a catcher"}.get(kind, f"{quota_gb:g} GB of backup space")
     into = f" to {group}" if group else ""
     via = " and ".join(v for v in (f"email to {email}" if email else "", "your Telegram to forward" if send_telegram else "") if v)
-    plan = (f"Invite {who}{into}: {what} on {where}" + (f", by {via}" if via else "") + ". Single-use, expires in "
-            f"{trust.INVITE_TTL_DAYS} days."
+    # Worded as a proposal (verb first), never as something already done.
+    plan = (f"Send {who} an invite{into}: {what} on {where}" + (f", by {via}" if via else "") + ". It stays good until "
+            f"they're set up; unused, it lapses after {trust.INVITE_TTL_DAYS} days."
             + (f" (Also sets up mirror space on {where}: up to {quota_gb:g} GB per friend, nothing asked in return.)" if new_offering_host else ""))
     if preview:
         return "PREVIEW (nothing changed yet): " + plan
@@ -2406,7 +2407,7 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
         f"before they leave your machine, so I can't read them. "
         + (f"Start here: {page} -- or, if you use an AI agent (e.g. Claude Code), tell it: \"{prompt}\". " if page
            else f"To use it, tell your AI agent (e.g. Claude Code): \"{prompt}\". ")
-        + f"(From {me}; the code works once and expires in {trust.INVITE_TTL_DAYS} days.)"
+        + f"(From {me}. It's yours until you're set up; if you don't start within {trust.INVITE_TTL_DAYS} days, it lapses.)"
     )
     sent, problems, channels = [], [], []
     if email:

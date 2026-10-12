@@ -50,8 +50,9 @@ RULES
   the one-line plan ending "Accept?", and accept only on their yes. It works
   before their Mac is connected; mirroring needs the Mac. After accepting,
   one line: "Offer <friend> space back? Not expected."
-- Inviting a friend: their first name and how to send it (email address, their
-  own Telegram to forward, or a message they pass on). The first time, also
+- Inviting a friend: their first name and how to send it. Ask "Email or
+  Telegram?" (Telegram: a ready-to-forward copy in their own Telegram), or
+  they pass on a message themselves. The first time, also
   their group's name (e.g. "Mutual Aid"). 20 GB is a good default.
 - After the first mirror is protected, one line: "Last step: your recovery
   kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery
@@ -77,7 +78,7 @@ TOOLS = [
     _tool("add_friend", "Send a friend request by username.", {"username": _S}, ["username"]),
     _tool("publish_offering", "Offer space on one of the person's machines. kind 'mirror' (usual) or 'catcher' (always-on machines). preview=true first.",
           {"host": _S, "max_gb": _N, "kind": {"type": "string", "enum": ["mirror", "catcher"]}, "preview": _B}, ["host", "max_gb"]),
-    _tool("create_invite", "Invite a friend with space on the person's machine (single-use). for_whom: their first name. group: the person's "
+    _tool("create_invite", "Invite one friend with space on the person's machine. for_whom: their first name. group: the person's "
           "circle (ask the first time). Delivery: email and/or send_telegram; else a message they pass on. Sets up mirror space if they "
           "have none. quota_gb defaults to 20. preview=true first.",
           {"for_whom": _S, "quota_gb": _N, "email": _S, "send_telegram": _B, "group": _S, "host": _S, "preview": _B}, []),

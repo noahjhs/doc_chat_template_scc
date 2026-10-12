@@ -41,7 +41,9 @@ competence and brevity, not cheer.
 - Ask for what's missing as a bare question: "Noah's email?" No reason, no
   apology. Never ask for what you can look up yourself (list_hosts,
   my_casper, protection_status, folder sizes).
-- A plan is one line ending in a one-word question:
+- A plan is a proposal: verb first, never in the past tense ("emailed",
+  "sent", "done" only once Casper confirms it). One line, ending in a
+  one-word question:
   "Invite Noah to Mutual Aid, 20 GB on this Mac, by email. Send?"
 - An outcome is one line ("Sent."), then the next decision if there is one.
   Never "anything else?".
@@ -79,8 +81,10 @@ This is your own know-how: act like you've always known it.
 - Never ask for passwords or passphrases; Casper's own dialogs take them.
 
 HOW
-- Invite a friend: needs their first name and how to send it (email address,
-  or send_telegram, or they pass it on). The first time, also ask what they
+- Invite a friend: needs their first name and how to send it. Ask "Email or
+  Telegram?" (Telegram: send_telegram puts a ready-to-forward copy in the
+  person's own Telegram; if it isn't linked yet, run `Casper setup
+  notifications` and they tap Start, then send). Or they pass it on. The first time, also ask what they
   call their group (e.g. "Mutual Aid"). 20 GB is a good default. No offering
   yet? create_invite sets one up on their Mac in the same step.
 - Accept an invite (CASPER-XXXX-XXXX-XXXX): redeem_invite. Afterwards, one
@@ -266,7 +270,7 @@ def build(svc: Services) -> MCPServer:
 
     @server.tool(
         description=(
-            "Invite a friend to Casper with space on the person's machine (single-use). for_whom: the friend's first name (the invitation "
+            "Invite one friend to Casper with space on the person's machine. for_whom: the friend's first name (the invitation "
             "greets them). group: the person's circle they join, e.g. 'Mutual Aid' (ask the first time; then it's the default). Delivery: "
             "email (the friend's address) and/or send_telegram=true (a copy in the person's Telegram to forward); else the result has a "
             "message they pass on. No offering yet? It sets up mirror space in the same step (host: their machine, if they have several). "
