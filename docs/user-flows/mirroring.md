@@ -62,18 +62,23 @@ in the integration test.
   up to 10 unprotected files are named. The names are fetched live from the
   owner's own Mac when status is requested, and never stored on
   `casper_service`.
-- ~~**No relay yet.**~~ **Fixed 2026-10-02:** Casper's own private relay
-  (`strelaysrv` on the mini, not joined to the public pool) is published
-  through Tailscale Funnel on port 10000. Every Mac and the catcher listen
-  on it and advertise it. Verified with two Macs given only the relay
-  address: they connected as `relay-client` and mirrored through it.
-  *Still to confirm:* the relay's public DNS name didn't resolve outside
-  Tailscale yet when checked (a Funnel DNS publication delay); recheck it
-  from a non-tailnet network.
+- ~~**No relay yet.**~~ **Fixed 2026-10-02, then redone 2026-10-12.** Casper's
+  own private relay (`strelaysrv` on the mini, not joined to the public
+  pool) was first published through Tailscale Funnel. That only ever worked
+  between tailnet machines. Funnel routes by TLS name (SNI), and a relay
+  session sends none (its connect request is TLS without a name; the
+  session itself isn't TLS), so peers elsewhere couldn't connect. This was
+  found when Noah's first copy never reached Riley. Now the home router
+  forwards port 22067 to the relay. `casper_service` keeps that open with
+  NAT-PMP and gives every Mac the router's current public address.
+  Verified from another network: Riley's and Noah's Macs connected as
+  `relay-server`/`relay-client`, and Noah's Documents copied through it.
+  `tools/relaycheck` tests any relay address end to end.
 - ~~**The consent endpoint accepts this Mac's device token.**~~ **Fixed
   2026-10-02:** daemon sessions moved from `session.json` into the login
   Keychain, with a one-time migration that deletes the file (verified on the
   mini). Other programs reading the item get macOS's own access prompt.
 - **Prod's Compose file is a locally edited copy** (it renames containers
-  for prod). Adding the catcher, the relay and the Funnel there needs doing
-  by hand at promotion.
+  for prod). Adding the catcher and the relay (with its NAT-PMP settings)
+  there needs doing by hand at promotion. Dev and prod can share the one
+  relay and its port.
