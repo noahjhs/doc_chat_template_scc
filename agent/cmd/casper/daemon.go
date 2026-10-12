@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -387,11 +388,20 @@ func (d *daemonState) handlePairURL(rawURL string) {
 		d.logf("casper:// pair URL missing token/username")
 		return
 	}
+	if d.pairWith(bootstrapToken, username) {
+		// Re-foregrounds the browser the hand-off came from (see below).
+		d.refocusBrowser()
+	}
+}
+
+// pairWith exchanges a one-time bootstrap token for this installation's own
+// credentials and connects -- shared by casper:// links and pairing by code.
+func (d *daemonState) pairWith(bootstrapToken, username string) bool {
 	deviceToken, commandKey, _, err := config.ExchangePairingToken(d.authDomain, bootstrapToken, d.routingKey)
 	if err != nil {
-		d.logf("casper:// pair: couldn't exchange pairing token: %s", err)
+		d.logf("pairing: couldn't exchange the pairing token: %s", err)
 		config.SaveLastPairingResult("error", err.Error())
-		return
+		return false
 	}
 	d.addOrReplaceIdentity(username, deviceToken, commandKey)
 	d.logf("Paired as %s", username)
@@ -400,17 +410,48 @@ func (d *daemonState) handlePairURL(rawURL string) {
 	// through the sign-in flow expects to end up connected, regardless of
 	// whatever the toggle was left at before.
 	d.setEnabled(true)
-	// Re-foregrounds the browser -- see internal/activate's doc comment for
+	return true
+}
+
+// refocusBrowser: after a casper:// hand-off, re-foregrounds the browser -- see internal/activate's doc comment for
 	// why this exists (a JS-only fix from the browser side didn't hold up).
 	// A short delay first, off the goroutine handling this event, so it
 	// doesn't compete with whatever's still settling right after the OS
 	// just delivered this Apple Event (and so a slow/failing activation
 	// attempt can never block pairing itself).
+func (d *daemonState) refocusBrowser() {
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		activate.DefaultBrowser()
 		d.logf("Attempted to re-foreground the default browser")
 	}()
+}
+
+// pairByCode is the first-launch sign-in: get a code, open the sign-in page
+// with it, and wait (up to the code's lifetime) for the signed-in page to
+// approve it. No casper:// link, so the browser never asks to open Casper.
+func (d *daemonState) pairByCode(appDomain string) {
+	code, secret, err := config.StartPairing(d.authDomain)
+	if err != nil {
+		d.logf("pairing: couldn't start (%s); opening plain sign-in", err)
+		_ = exec.Command("open", config.BaseURL(appDomain)+"/signin?from=app").Run()
+		return
+	}
+	d.logf("Not signed in yet -- opening sign-in")
+	if err := exec.Command("open", config.BaseURL(appDomain)+"/signin?from=app&pair="+url.QueryEscape(code)).Run(); err != nil {
+		d.logf("Couldn't open sign-in: %s", err)
+	}
+	for deadline := time.Now().Add(15 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+		if d.identityCount() > 0 {
+			return // paired some other way meanwhile
+		}
+		approved, token, username, err := config.CodePairingStatus(d.authDomain, code, secret)
+		if err != nil || !approved {
+			continue
+		}
+		d.pairWith(token, username)
+		return
+	}
 }
 
 // resumeIdentity is called at startup for each still-valid cached session

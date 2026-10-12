@@ -166,14 +166,30 @@ function run() {
 // ChooseFolder shows the standard folder panel, starting in the home
 // folder: the chosen folder's path, or false if they cancelled.
 func ChooseFolder() (string, bool) {
-	script := `tell application "System Events" to activate
-tell application "System Events" to set f to choose folder with prompt "Choose a folder for Casper to keep safe" default location (path to home folder)
-return POSIX path of f`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil {
+	// The standard Open panel, run in its own small process: no Automation
+	// permission needed (asking System Events to show it would prompt
+	// "Casper wants to control System Events").
+	script := `
+ObjC.import('Cocoa');
+function run() {
+    $.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    var panel = $.NSOpenPanel.openPanel;
+    panel.canChooseFiles = false;
+    panel.canChooseDirectories = true;
+    panel.allowsMultipleSelection = false;
+    panel.message = "Choose a folder for Casper to keep safe";
+    panel.prompt = "Choose";
+    panel.directoryURL = $.NSURL.fileURLWithPath($.NSHomeDirectory());
+    if (panel.runModal != $.NSModalResponseOK) return "";
+    return ObjC.unwrap(panel.URLs.objectAtIndex(0).path);
+}`
+	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
+	path := strings.TrimSpace(string(out))
+	if err != nil || path == "" {
 		return "", false
 	}
-	return strings.TrimRight(strings.TrimSpace(string(out)), "/"), true
+	return strings.TrimRight(path, "/"), true
 }
 
 func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {

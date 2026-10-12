@@ -23,6 +23,7 @@ document.getElementById("f").addEventListener("submit", async ev => {
   try { Casper.saveSession(await Casper.api("/signup", { method: "POST", body: d })); }
   catch (e) { err.innerText = e.message; return; }
   // Opened from the Casper app: connect this Mac on the way to the guide.
-  location.href = fromApp ? "/signin?from=app&next=" + encodeURIComponent(guide) : guide;
+  const pair = Casper.param("pair") ? "&pair=" + encodeURIComponent(Casper.param("pair")) : "";
+  location.href = fromApp ? "/signin?from=app" + pair + "&next=" + encodeURIComponent(guide) : guide;
 });
 </script></body></html>

@@ -18,6 +18,7 @@ const next = Casper.param("next") || "/guide";
 const carry = new URLSearchParams();
 if (Casper.param("invite")) carry.set("invite", Casper.param("invite"));
 if (fromApp) carry.set("from", "app");
+if (Casper.param("pair")) carry.set("pair", Casper.param("pair"));
 if ([...carry].length) document.getElementById("toSignup").href = "/signup?" + carry;
 if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this Mac"; }
 const $ = id => document.getElementById(id);
@@ -40,10 +41,19 @@ async function waitForConnected(before, seconds = 40) {
   }
   return false;
 }
+const pairCode = Casper.param("pair");
 async function connect() {
-  showStatus("Connecting this Mac…", "If your browser asks to open Casper, choose Open.");
   const before = (await Casper.connectedHosts()) || new Set();
-  Casper.pair();
+  if (pairCode) {
+    // Casper on this Mac is waiting for this code: approving it connects the
+    // Mac directly -- no "Open Casper?" question from the browser.
+    showStatus("Connecting this Mac…");
+    try { await Casper.api("/pairing/approve", { method: "POST", body: { code: pairCode } }); }
+    catch (e) { showStatus("This link has expired.", "Open Casper again and it'll bring you back here."); return; }
+  } else {
+    showStatus("Connecting this Mac…", "If your browser asks to open Casper, choose Open.");
+    Casper.pair();
+  }
   if (await waitForConnected(before)) {
     showStatus("This Mac is connected.");
     // The guide (this tab, or one already open) carries on by itself.

@@ -10,7 +10,7 @@
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
-let busy = false, rendered = -1, waitingNote = "";
+let busy = false, rendered = -1, waitDots = null;
 
 function bubble(role, html, extra = "") {
   const d = document.createElement("div"); d.className = "msg " + role + " " + extra;
@@ -38,11 +38,20 @@ async function refresh() {
   let msgs;
   try { msgs = (await Casper.api("/guide/history")).messages; } catch (e) { if (e.status === 401) location.replace("/signin"); return; }
   if (msgs.length === rendered) return;
-  rendered = msgs.length; $("log").innerHTML = ""; waitingNote = "";
+  rendered = msgs.length; $("log").innerHTML = ""; waitDots = null;
   if (!msgs.length) bubble("assistant", Casper.render("Hi! I'm Casper's guide. Keep your files safe on a friend's computer, or offer space on yours?"));
   msgs.forEach(m => bubble(m.role, Casper.render(m.text)));
   const last = msgs[msgs.length - 1];
   setChoices(last && last.role === "assistant" ? last.choices : []);
+  // A button in the message itself (Download Casper) is the call to action too.
+  if (last && last.role === "assistant" && last.text.includes(Casper.DOWNLOAD_URL)) $("f").classList.add("hide");
+}
+
+// Casper is waiting on something on their Mac (its dialog, the folder panel):
+// the guide shows it's waiting, and there's nothing to type.
+function waiting(on) {
+  if (on && !waitDots) { waitDots = thinking(); $("f").classList.add("hide"); $("choices").innerHTML = ""; }
+  if (!on && waitDots) { waitDots.remove(); waitDots = null; }
 }
 
 async function send(text) {
@@ -58,8 +67,8 @@ async function act(action) {
   setChoices([]); $("f").classList.add("hide");
   try {
     const r = await Casper.api("/guide/action", { method: "POST", body: { action } });
-    bubble("assistant", Casper.render(r.message), "note-bubble");
-    if (!r.opened) { rendered = -1; await refresh(); }
+    if (r.opened) waiting(true);
+    else { bubble("assistant", Casper.render(r.message)); rendered = -1; await refresh(); }
   } catch (e) { bubble("assistant", Casper.render(e.message)); }
 }
 
@@ -70,6 +79,7 @@ async function tick() {
   try {
     const st = await Casper.api("/guide/state");
     if (st.count !== rendered) await refresh();
+    waiting(st.waiting);
     if (st.due) {
       busy = true; const t = thinking();
       try { await Casper.api("/guide/continue", { method: "POST" }); } finally { t.remove(); busy = false; }

@@ -314,6 +314,14 @@ func (c *cli) agent(client string) error {
 
 func (c *cli) notifications() error {
 	return c.authed(func(token string) error {
+		var profile struct {
+			ChatID  string `json:"telegram_chat_id"`
+			Enabled bool   `json:"telegram_notifications_enabled"`
+		}
+		if err := c.call("GET", "/profile", token, nil, &profile); err == nil && profile.ChatID != "" && profile.Enabled {
+			c.emit("Telegram is already linked.", map[string]any{"ok": true, "available": true, "linked": true, "already": true})
+			return nil
+		}
 		var link struct {
 			LinkURL string `json:"link_url"`
 		}
@@ -329,8 +337,16 @@ func (c *cli) notifications() error {
 			return err
 		}
 		_ = openURL(link.LinkURL)
-		c.emit("Opened Telegram. The person taps Start in the Casper bot's chat -- that's all. (Link, if it didn't open: "+link.LinkURL+")",
-			map[string]any{"ok": true, "available": true, "link_url": link.LinkURL})
+		// Wait for them to tap Start, so the agent carries on by itself
+		// instead of waiting to be told.
+		for deadline := time.Now().Add(3 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+			if err := c.call("GET", "/profile", token, nil, &profile); err == nil && profile.ChatID != "" {
+				c.emit("Linked: Telegram is connected. Carry on.", map[string]any{"ok": true, "available": true, "linked": true})
+				return nil
+			}
+		}
+		c.emit("Opened Telegram, but Start wasn't tapped yet. When it is, run this again to confirm. (Link: "+link.LinkURL+")",
+			map[string]any{"ok": true, "available": true, "linked": false, "link_url": link.LinkURL})
 		return nil
 	})
 }

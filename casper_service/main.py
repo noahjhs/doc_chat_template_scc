@@ -520,10 +520,70 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
 
 
 # --- Host pairing / presence (daemon-initiated, device_token-gated) ------
+# --- Pairing by code (no casper:// hand-off) ---------------------------------
+# The app, opened with nothing paired, asks for a code and opens the sign-in
+# page with it; the signed-in page approves it; the app, polling with a
+# secret only it knows, collects a one-time token and pairs with it. No
+# browser-to-app hand-off, so no "Open Casper?" question from the browser.
+PAIRING_CODE_SECONDS = 15 * 60
+_pairing_codes: dict[str, dict] = {}
+_pair_tokens: dict[str, tuple[int, float]] = {}  # hash -> (user, expiry): one-time, for /hosts/pair
+_pairing_lock = threading.Lock()
+
+
+def _prune_pairing(now: float):
+    for code in [c for c, e in _pairing_codes.items() if e["expires"] < now]:
+        del _pairing_codes[code]
+    for h in [h for h, (_, exp) in _pair_tokens.items() if exp < now]:
+        del _pair_tokens[h]
+
+
+@app.post("/pairing/start")
+def pairing_start(request: Request):
+    check_rate_limit("pairing:" + client_ip(request))
+    code, secret = secrets.token_urlsafe(12), secrets.token_urlsafe(24)
+    with _pairing_lock:
+        _prune_pairing(time.time())
+        _pairing_codes[code] = {"secret": hash_token(secret), "expires": time.time() + PAIRING_CODE_SECONDS, "token": None, "username": None}
+    return {"code": code, "secret": secret, "expires_in": PAIRING_CODE_SECONDS}
+
+
+@app.post("/pairing/approve")
+def pairing_approve(body: dict, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        username = trust.username(db, user_id)
+    token = secrets.token_urlsafe(32)
+    with _pairing_lock:
+        _prune_pairing(time.time())
+        entry = _pairing_codes.get(str(body.get("code", "")))
+        if entry is None:
+            raise HTTPException(status_code=404, detail="This link has expired. Open Casper again.")
+        entry.update(token=token, username=username)
+        _pair_tokens[hash_token(token)] = (user_id, time.time() + 300)
+    return {"ok": True}
+
+
+@app.post("/pairing/status")
+def pairing_status(body: dict):
+    with _pairing_lock:
+        _prune_pairing(time.time())
+        code = str(body.get("code", ""))
+        entry = _pairing_codes.get(code)
+        if entry is None or not secrets.compare_digest(entry["secret"], hash_token(str(body.get("secret", "")))):
+            raise HTTPException(status_code=404, detail="No such pairing code.")
+        if not entry["token"]:
+            return {"approved": False}
+        del _pairing_codes[code]
+    return {"approved": True, "token": entry["token"], "username": entry["username"]}
+
+
 @app.post("/hosts/pair", response_model=HostPairResponse, status_code=201)
 def pair_host(body: HostPairRequest, authorization: str = Header(default="")):
+    with _pairing_lock:  # a one-time token from pairing by code, if that's what this is
+        held = _pair_tokens.pop(hash_token(authorization.removeprefix("Bearer ").strip()), None)
     with get_db() as db:
-        user_id = _resolve_user_id(db, authorization)
+        user_id = held[0] if held and held[1] > time.time() else _resolve_user_id(db, authorization)
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         host_id, device_token, command_key, label, is_new = _pair_host(
@@ -1677,20 +1737,25 @@ async def telegram_webhook(request: Request):
                 _prune_telegram_link_tokens_locked()
                 entry = _telegram_link_tokens.pop(token, None)
             if entry is None:
-                _telegram_send_text(chat_id, "This link has expired -- request a new one from `harness profile telegram-link`.")
+                with get_db() as db:
+                    linked = db.execute("SELECT 1 FROM user_profile WHERE telegram_chat_id = ?", (chat_id,)).fetchone()
+                _telegram_send_text(chat_id, "This chat is already linked to Casper." if linked
+                                    else "This link has expired. Ask your agent to link Telegram again.")
                 return {"ok": True}
             user_id, _created_ts = entry
             with get_db() as db:
                 _get_or_create_profile(db, user_id)  # ensures the row exists before the UPDATE below
+                # One Casper account per chat: a chat re-linked elsewhere leaves the old one.
+                db.execute("UPDATE user_profile SET telegram_chat_id = '' WHERE telegram_chat_id = ? AND user_id != ?", (chat_id, user_id))
                 db.execute("UPDATE user_profile SET telegram_chat_id = ? WHERE user_id = ?", (chat_id, user_id))
-            _telegram_send_text(chat_id, "Linked! Casper approval requests will show up here -- and you can chat with Casper's guide here any time.")
+            _telegram_send_text(chat_id, "Linked. Casper will message you here when something needs you. Your agent is carrying on.")
             return {"ok": True}
         if text:
             # Anything else from a linked chat is a message for Casper's guide.
             with get_db() as db:
                 owner = db.execute("SELECT user_id FROM user_profile WHERE telegram_chat_id = ?", (chat_id,)).fetchone()
             if owner is None:
-                _telegram_send_text(chat_id, "This chat isn't linked to a Casper account yet -- link it with your agent or `harness profile telegram-link`.")
+                _telegram_send_text(chat_id, "This chat isn't linked to Casper yet. Ask your agent to link Telegram.")
             else:
                 _guide_via_telegram(chat_id, owner["user_id"], text)
         return {"ok": True}
@@ -2253,7 +2318,7 @@ def _mcp_my_casper(user_id: int) -> str:
     if others:
         lines.append(f"Waiting for your decision: {len(others)} request(s) from friends (list_approvals).")
     if own:
-        lines.append(f"Waiting for your own approval outside this agent: {own} (Telegram or `harness approvals`).")
+        lines.append(f"Waiting for your own approval outside this agent: {own} (in Telegram).")
     return "\n".join(lines)
 
 
@@ -2309,7 +2374,9 @@ def _mcp_publish_offering(user_id: int, host: str, max_gb: float, approve_each_b
 
 def _publish_mirror_offering(user_id: int, host: str, host_id: int, max_gb: float, kind: str, preview: bool) -> str:
     if kind == "mirror":
-        plan = (f"Offer mirror space on {host}: up to {max_gb:g} GB per friend, with 30 days of history. "
+        # The giver's view: disk used, privacy, effort. (History and restores
+        # are the keeper's concern, not theirs.)
+        plan = (f"Offer mirror space on {host}: up to {max_gb:g} GB of disk per friend. "
                 "It arrives encrypted, so you can never read it. Nothing asked in return.")
     else:
         plan = (f"Offer catcher space on {host}: holds friends' newest changes while their mirrors sleep (up to {max_gb:g} GB each), "
@@ -2436,9 +2503,13 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
         with get_db() as db:
             db.execute("UPDATE invites SET delivered_via = ? WHERE code_hash = ?", (",".join(channels), trust._invite_hash(code)))
     out = f"Sent: {'; '.join(sent)}." if sent else f"Invite created for {who}."
+    hears = ("in Telegram" if profile.telegram_chat_id and profile.telegram_notifications_enabled else None)
+    then = (f"Next: say they'll hear from Casper {hears} when {who} accepts. " if hears
+            else f"Next: say Casper will show it in 'what have I shared?' once {who} accepts. ")
+    then += "Then offer one next thing (keep their own files safe, if nothing of theirs is mirrored yet)."
     if problems or not sent:
         out += (f" ({' and '.join(problems)} delivery failed.)" if problems else "") + f"\n\nMessage for the person to send {who}:\n{message}"
-    return out + f"\nNext: code {code}; details in my_casper."
+    return out + f"\n{then}\nCode {code}; details in my_casper."
 
 
 @app.get("/invites/info")
@@ -2522,7 +2593,7 @@ def _mcp_list_approvals(user_id: int) -> str:
             f"  - [{r['id']}] from {r['requester_username']}: {r['description']}" for r in others
         )
     if own:
-        text += f"\n({own} of the person's own requests also wait for approval; those can only be decided outside this agent, in Telegram or `harness approvals`.)"
+        text += f"\n({own} of the person's own requests also wait for approval; those can only be decided outside this agent, in Telegram.)"
     return text
 
 
@@ -2535,7 +2606,7 @@ def _mcp_decide_approval(user_id: int, approval_id: str, approve: bool) -> str:
     if row is None:
         return "No such pending request."
     if row["requester_user_id"] in (None, user_id):
-        return "That's the person's own request; it can't be approved from their agent. They can decide it in Telegram or with `harness approvals`."
+        return "That's the person's own request; it can't be approved from their agent. They can decide it in Telegram."
     return _resume_pending_approval(row, "allow" if approve else "deny").message or "Done."
 
 
@@ -2849,7 +2920,9 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
     with get_db() as db:
         db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
     # The dialog says just the decision (Mirror / Cancel); the plan was already shown.
-    backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"Start mirroring {label}?")
+    backups.daemon_call(config, "ask_consent", approval_id=approval_id,
+                        text=f"Start mirroring {label}?\n\nmacOS may then ask whether Casper can reach devices on your network. "
+                             "That's how it finds your friend's Mac.")
     return (
         f"NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
         "click Mirror (or answer in Telegram). You can't confirm it for them. Once they say they have, check "
@@ -2876,7 +2949,15 @@ def _status_text(db, f) -> str:
         return f"{f['label']}: starting up (no report from {trust.host_label(db, f['owner_user_id'], f['owner_host_id'])} yet)."
     lines = []
     unprotected = st.get("unprotected_files", 0)
-    if unprotected:
+    peers = st.get("peers", [])
+    # Until a mirror has connected at least once, nothing can be "missing"
+    # from it yet -- so "no unprotected files" would falsely read as
+    # protected. After that, the per-file count below is the truth.
+    ever = any(p.get("role") == "mirror" and (p.get("connected") or not str(p.get("last_seen", "")).startswith("1969"))
+               for p in peers)
+    if st.get("local_files") and not ever:
+        lines.append(f"{f['label']}: NOT protected yet: no mirror has connected yet, so nothing has been copied.")
+    elif unprotected:
         import time as _t
 
         age = int((_t.time() - st.get("unprotected_oldest_unix", _t.time())) / 60)
@@ -3103,11 +3184,9 @@ def _guide_reply(user_id: int, text: str, event: bool = False,
 _STEP_NEWS = {
     "install": "Their invite is accepted.",
     "choose_folder": "Their Mac is connected now.",
-    "consent": "A Casper dialog is waiting on their Mac.",
     "syncing": "They clicked Mirror; the first copy is under way.",
     "recovery_kit": "Their folder is protected now.",
     "give_back": "Their recovery kit is done.",
-    "open": "Setup is complete.",
 }
 
 
@@ -3179,8 +3258,11 @@ def guide_state(authorization: str = Header(default="")):
         user_id = _require_user(db, authorization)
     history = guide.load_history(user_id)
     stage, spoken = _guide_stage(user_id, history).name, _spoken_stage(history)
+    picking = any(uid == user_id for uid, _ in _folder_requests.values())
     return {"stage": stage, "spoken": spoken, "count": len(guide.visible(history)),
-            "due": bool(history) and stage != spoken and stage in _STEP_NEWS}
+            "due": bool(history) and stage != spoken and stage in _STEP_NEWS,
+            # Casper is waiting on something on their Mac (a dialog, the folder panel): show it's waiting.
+            "waiting": picking or stage == "consent"}
 
 
 @app.post("/guide/continue")
@@ -3229,7 +3311,7 @@ def guide_action(body: dict, authorization: str = Header(default="")):
     if body.get("action") != "choose_folder":
         raise HTTPException(status_code=400, detail="Unknown action.")
     problem = _choose_folder(user_id)
-    return {"opened": not problem, "message": problem or "Choose a folder in the window Casper opened on your Mac."}
+    return {"opened": not problem, "message": problem}
 
 
 @app.post("/hosts/folder-chosen")

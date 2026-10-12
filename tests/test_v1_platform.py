@@ -863,10 +863,15 @@ def test_guide_setup_gates_go_one_step_at_a_time(app_env):
     assert step(F(**connected, folder="active")) == "syncing"
     assert step(F(**connected, folder="active", protected=True)) == "recovery_kit"
     asked_kit = [{"role": "assistant", "content": "...", "_stage": "recovery_kit"}]
-    assert step(F(**connected, folder="active", protected=True), asked_kit) == "give_back"  # asked once is enough
+    assert step(F(**connected, folder="active", protected=True), asked_kit) == "recovery_kit"  # asked isn't done
+    news = asked_kit + [{"role": "user", "content": "(From Casper ...)", "_event": True}]
+    assert step(F(**connected, folder="active", protected=True), news) == "recovery_kit"  # news from Casper isn't an answer
+    later = asked_kit + [{"role": "user", "content": "Later"}]
+    assert step(F(**connected, folder="active", protected=True), later) == "give_back"
     assert step(F(**connected, folder="active", protected=True, recovery_kit=True)) == "give_back"
-    asked_both = asked_kit + [{"role": "assistant", "content": "...", "_stage": "give_back"}]
-    assert step(F(**connected, folder="active", protected=True), asked_both) == "open"
+    answered_both = later + [{"role": "assistant", "content": "...", "_stage": "give_back"}, {"role": "user", "content": "No thanks"}]
+    assert step(F(**connected, folder="active", protected=True), answered_both) == "open"
+    assert guide.stage_for(F(**connected, folder="awaiting_consent"), [], url).silent  # Casper's dialog is up: just wait
     assert step(F(mac_connected=True)) == "open"  # no invite, nothing held: free to ask what they want
 
 
@@ -964,7 +969,8 @@ def test_another_folder_opens_the_macs_own_chooser_and_the_guide_carries_on(app_
         _, riley = _signup(client, "riley")
         device = _pair(client, riley, "rk-riley", "riley-mac", sd.url)
         out = client.post("/guide/action", json={"action": "choose_folder"}, headers=riley).json()
-        assert out == {"opened": True, "message": "Choose a folder in the window Casper opened on your Mac."}
+        assert out == {"opened": True, "message": ""}  # the panel is in front of them: the page just waits
+        assert client.get("/guide/state", headers=riley).json()["waiting"]
         (req,) = [b for b in asked if b.get("action") == "mirror_choose_folder"]
         # The person picks ~/Projects in the Mac's panel; Casper reports it.
         assert client.post("/hosts/folder-chosen", json={"request_id": req["approval_id"], "path": "Projects", "bytes": 2_000_000},
@@ -976,3 +982,38 @@ def test_another_folder_opens_the_macs_own_chooser_and_the_guide_carries_on(app_
         assert news[0][0] == _user_id(main, "riley") and news[0][2] is True and "They chose the folder Projects" in news[0][1]
         # The same request can't be answered twice, or by someone else.
         assert client.post("/hosts/folder-chosen", json={"request_id": req["approval_id"], "cancelled": True}, headers=device).status_code == 404
+
+
+def test_not_protected_until_a_mirror_has_ever_connected(app_env, monkeypatch):
+    """Noah's walkthrough: Riley's Mac never connected, nothing was missing
+    on paper (unprotected 0 before the first scan), and the guide said
+    'Protected.' A mirror must have connected at least once."""
+    main, _ = app_env
+    never = {"local_files": 5, "unprotected_files": 0, "at_risk_files": 0,
+             "peers": [{"device_id": "X", "role": "mirror", "completion": 0, "connected": False, "last_seen": "1969-12-31T16:00:00-08:00"}]}
+    copied = {**never, "peers": [{**never["peers"][0], "completion": 100, "connected": True, "last_seen": "2026-10-12T01:00:00Z"}]}
+    folder = {"id": "f1", "label": "Documents", "status": "active", "restore_host_id": None, "owner_user_id": 1, "owner_host_id": 1}
+    monkeypatch.setattr(main.mirroring, "peers_of", lambda db, fid: [])
+    monkeypatch.setattr(main.mirroring, "catcher_device", lambda: None)
+    for status, protected in ((never, False), (copied, True)):
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: st)
+        with main.get_db() as db:
+            assert (": protected." in main._status_text(db, folder)) is protected
+
+
+def test_pairing_by_code_needs_the_apps_secret_and_works_once(app_env):
+    main, client = app_env
+    _, sam = _signup(client, "sam")
+    start = client.post("/pairing/start").json()
+    code, secret = start["code"], start["secret"]
+    assert client.post("/pairing/status", json={"code": code, "secret": secret}).json() == {"approved": False}
+    assert client.post("/pairing/approve", json={"code": code}).status_code == 401  # must be signed in
+    assert client.post("/pairing/approve", json={"code": code}, headers=sam).json() == {"ok": True}
+    assert client.post("/pairing/status", json={"code": code, "secret": "guess"}).status_code == 404  # the link alone isn't enough
+    got = client.post("/pairing/status", json={"code": code, "secret": secret}).json()
+    assert got["approved"] and got["username"] == "sam"
+    assert client.post("/pairing/status", json={"code": code, "secret": secret}).status_code == 404  # collected once
+    paired = client.post("/hosts/pair", json={"routing_key": "rk-x", "hostname": "x"}, headers={"Authorization": f"Bearer {got['token']}"})
+    assert paired.status_code == 201
+    again = client.post("/hosts/pair", json={"routing_key": "rk-y", "hostname": "y"}, headers={"Authorization": f"Bearer {got['token']}"})
+    assert again.status_code == 401  # the token works once

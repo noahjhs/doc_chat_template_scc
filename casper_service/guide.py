@@ -144,6 +144,7 @@ class Stage:
     tools: tuple = ()  # what it may change ("*" = anything); the read-only tools are always there
     choices: tuple = ()  # its buttons, unless a plan was just proposed
     say: str = ""  # its exact line when the step begins -- written by Casper, not the model
+    silent: bool = False  # a waiting step: no message when it begins (the page shows it's waiting)
 
 
 READ_ONLY = ("my_casper", "list_hosts", "list_offerings", "protection_status", "list_versions", "list_approvals")
@@ -151,9 +152,9 @@ READ_ONLY = ("my_casper", "list_hosts", "list_offerings", "protection_status", "
 
 def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     """The setup gates, in order: one current step, decided by Casper's
-    state. Once-only asks (the recovery kit, giving back) count as done once
-    they've been asked."""
-    asked = {m.get("_stage") for m in history if m.get("role") == "assistant"}
+    state. A once-only ask (the recovery kit, giving back) is done once the
+    person has answered it -- not merely once it was asked."""
+    answered = _answered(history)
     inv = facts.invite
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
@@ -172,21 +173,34 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
                      ("Documents", {"label": "Another folder…", "action": "choose_folder"}),
                      say="Which folder should Casper keep safe? Documents is a good start.")
     if facts.folder == "awaiting_consent":
-        return Stage("consent", "A Casper dialog is waiting on their Mac. Say only: \"Click Mirror in the Casper dialog on your "
-                     "Mac.\" When they say it's done, check protection_status.", (), ("Done",),
-                     say="Click Mirror in the Casper dialog on your Mac.")
+        # Casper's own dialog is in front of them: nothing to say, just wait.
+        return Stage("consent", "Casper's dialog is in front of them asking to start mirroring; wait. If they ask, it's the "
+                     "Casper dialog on their Mac: Mirror starts it.", silent=True)
     if facts.folder == "active" and not facts.protected:
         return Stage("syncing", "The first copy is on its way. Check protection_status; say in one line how far along it is, "
                      "or \"Protected.\" once it is.")
-    if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in asked:
+    if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in answered:
         return Stage("recovery_kit", "Say only: \"Protected. Last step: your recovery kit. In Casper's menu (the ghost in the "
-                     "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Done", "Later"),
+                     "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Later",),
                      say="Protected. Last step: your recovery kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery Kit.")
-    if inv and not facts.offers_space and "give_back" not in asked:
+    if inv and not facts.offers_space and "give_back" not in answered:
         return Stage("give_back", f"Ask only: \"Want to offer {inv['inviter']} space on your Mac too?\" It's a gift, never owed. If yes, invite {inv['inviter']} "
                      "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"),
                      say=f"Want to offer {inv['inviter']} space on your Mac too?")
     return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
+
+
+def _answered(history: list[dict]) -> set[str]:
+    """Steps the person has replied to: a message of theirs (not news from
+    Casper) after the guide spoke for that step."""
+    done, pending = set(), None
+    for m in history:
+        if m.get("role") == "assistant" and m.get("_stage") and m.get("content"):
+            pending = m["_stage"]
+        elif m.get("role") == "user" and not m.get("_event") and pending:
+            done.add(pending)
+            pending = None
+    return done
 
 
 def system_prompt(download_url: str, signin_url: str = "") -> str:
@@ -263,7 +277,10 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
         messages.append(entry)
         if not calls:
             reply = (msg.content or "").strip()
-            if stage and stage.say and not proposed and _entering(stage, history) and "?" not in user_text:
+            if stage and stage.silent and not proposed and "?" not in user_text:
+                reply = ""  # a waiting step: the page shows the wait
+                entry["content"] = ""
+            elif stage and stage.say and not proposed and _entering(stage, history) and "?" not in user_text:
                 # A scripted step begins: Casper says its line. The model keeps
                 # at most a short note on what just happened (e.g. "Accepted.").
                 note = reply.split("\n")[0].strip() if acted else ""

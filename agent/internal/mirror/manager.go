@@ -178,7 +178,11 @@ func (m *Manager) Start() error {
 	}
 	return m.patch("/rest/config/options", map[string]any{
 		"globalAnnounceEnabled": false, // casper_service is the discovery service
-		"localAnnounceEnabled":  true,  // same-LAN peers find each other directly
+		// Off: Casper tells each Mac its peers' addresses (LAN ones included),
+		// so announcing isn't needed -- and it would set off macOS's "find
+		// devices on local networks" question the moment Casper launches,
+		// rather than when mirroring actually starts.
+		"localAnnounceEnabled":  false,
 		"relaysEnabled":         false, // until Casper runs its own relay
 		"natEnabled":            true,
 		"urAccepted":            -1,

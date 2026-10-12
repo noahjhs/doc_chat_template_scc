@@ -232,7 +232,6 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-casper-notarize}"
 # in the bundle at the time.
 codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_DIR"
 
-cp README_casper.md dist/CasperGo/README.md 2>/dev/null || true
 ZIP_NAME="Casper-macos-go${SUFFIX}.zip"
 rm -f "dist/$ZIP_NAME"
 ( cd dist && zip -r "$ZIP_NAME" CasperGo )

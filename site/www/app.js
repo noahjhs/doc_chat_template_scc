@@ -4,6 +4,7 @@
 const Casper = {
   PAIR_SCHEME: "${PAIR_SCHEME}",
   DOWNLOAD_URL: "${DOWNLOAD_URL}",
+  WWW_URL: "${WWW_URL}",
 
   session() {
     const token = localStorage.getItem("casper_token");
@@ -71,7 +72,8 @@ const Casper = {
     h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, label, url) => `<a href="${url}" target="_blank" rel="noopener">${label}</a>`);
     h = h.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (m, pre, url) => {
       const clean = url.replace(/[.,;:]+$/, ""), tail = url.slice(clean.length);
-      if (clean === Casper.DOWNLOAD_URL) return `${pre}<a class="btn inline" href="${clean}">Download Casper</a>${tail}`;
+      if (clean === Casper.DOWNLOAD_URL) return `${pre}<a class="btn inline" href="${clean}">Download Casper</a>` +
+        ` <a class="aside" href="${Casper.WWW_URL}/about-app" target="_blank" rel="noopener">What is it?</a>${tail}`;
       return `${pre}<a href="${clean}" target="_blank" rel="noopener">${clean}</a>${tail}`;
     });
     return h.replace(/\n/g, "<br>");

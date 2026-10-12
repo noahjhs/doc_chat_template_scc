@@ -297,10 +297,7 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 			if sessions, _ := config.LoadSessions(); len(sessions) == 0 {
 				time.Sleep(3 * time.Second) // a launch by a casper://pair link pairs in this window
 				if app := config.LoadAppDomain(); app != "" && state.identityCount() == 0 && !scripted {
-					logf("Not signed in yet -- opening sign-in")
-					if err := exec.Command("open", config.BaseURL(app)+"/signin?from=app").Run(); err != nil {
-						logf("Couldn't open sign-in: %s", err)
-					}
+					state.pairByCode(app)
 				}
 				for state.identityCount() == 0 {
 					time.Sleep(2 * time.Second)
