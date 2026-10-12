@@ -119,7 +119,7 @@ mkdir -p build/go_macos_dist
 ( cd agent && MACOSX_DEPLOYMENT_TARGET=11.0 GOOS=darwin GOARCH="$GOARCH" CGO_ENABLED=1 go build -o "../build/go_macos_dist/casper-bin" ./cmd/casper )
 
 APP_DIR="dist/CasperGo/Casper.app"
-rm -rf "$APP_DIR"
+rm -rf dist/CasperGo  # the whole folder: it ships as-is, so nothing stale may linger
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 # CFBundleExecutable -- what Finder actually double-click-launches. Runs
