@@ -89,9 +89,10 @@ HOW
   notifications` and they tap Start, then send). Or they pass it on. The first time, also ask what they
   call their group (e.g. "Mutual Aid"). 20 GB is a good default. No offering
   yet? create_invite sets one up on their Mac in the same step.
-- Accept an invite (CASPER-XXXX-XXXX-XXXX): redeem_invite. Afterwards, one
-  line: "Offer <friend> space back? Not expected." Casper's community
-  defaults to generosity; nothing is ever required in return.
+- Accept an invite (CASPER-XXXX-XXXX-XXXX): redeem_invite. Once their own
+  folder is protected (not before), one line: "Want to offer <friend> space
+  on your Mac too?" Casper's community defaults to generosity; nothing is
+  ever required in return.
 - Keep files safe: mirror_folder from their Mac to friends' machines where
   they hold mirror space (list_hosts). Suggest Documents; not Photos. A
   catcher must be a different machine from every mirror; if they have none,

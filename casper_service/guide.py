@@ -182,9 +182,9 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
                      "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Done", "Later"),
                      say="Protected. Last step: your recovery kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery Kit.")
     if inv and not facts.offers_space and "give_back" not in asked:
-        return Stage("give_back", f"Ask only: \"Offer {inv['inviter']} space back? Not expected.\" If yes, invite {inv['inviter']} "
+        return Stage("give_back", f"Ask only: \"Want to offer {inv['inviter']} space on your Mac too?\" It's a gift, never owed. If yes, invite {inv['inviter']} "
                      "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"),
-                     say=f"Offer {inv['inviter']} space back? Not expected.")
+                     say=f"Want to offer {inv['inviter']} space on your Mac too?")
     return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
 
 
@@ -262,7 +262,8 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 # at most a short note on what just happened (e.g. "Accepted.").
                 note = reply.split("\n")[0].strip() if acted else ""
                 keep = note and "?" not in note and len(note) <= 90 and stage.say not in note
-                reply = (note + "\n\n" if keep else "") + stage.say
+                note = note if keep else ("Done." if acted else "")
+                reply = (note + "\n\n" if note else "") + stage.say
                 entry["content"] = reply
             choices = choices_for(reply, proposed) or (list(stage.choices) if stage else [])
             if choices:

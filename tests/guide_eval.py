@@ -175,7 +175,7 @@ def scenario_invite_to_protected(run):
     checks.append(("confirms protected once it is", "protected" in r.lower()))
     checks.append(("then the recovery kit, from Casper's menu", "recovery kit" in r.lower() and "terminal" not in r.lower()))
     r = run(fake, "Done")
-    checks.append(("only then: offer space back", "space back" in r.lower() or "offer sam" in r.lower()))
+    checks.append(("only then: offer space back", "offer sam" in r.lower()))
     return checks
 
 
@@ -189,7 +189,7 @@ def scenario_invited_newcomer(run):
     r = run(fake, "Accept")
     print(f"     after accept: {r!r}")
     checks += [("accepted, then just the download", fake.redeemed and DOWNLOAD in r),
-               ("no give-back yet", "space back" not in r.lower() and "offer sam" not in r.lower())]
+               ("no give-back yet", "offer sam" not in r.lower())]
     fake.has_mac = True
     r = run(fake, "My Mac is connected.")
     checks.append(("then which folder", "documents" in r.lower() and not _did(fake.calls, "mirror_folder", preview=False)))
