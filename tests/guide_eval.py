@@ -26,7 +26,16 @@ class FakeCasper:
 
     def __init__(self, has_mac=True):
         self.has_mac, self.redeemed, self.mirroring, self.allowed, self.offering, self.invited = has_mac, False, False, False, False, False
+        self.kit = False
         self.calls = []
+
+    def facts(self, messages):
+        """What the real service's _guide_facts would report for this state."""
+        said = " ".join(m["content"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str))
+        invite = {"code": CODE, "inviter": "sam", "state": "accepted" if self.redeemed else "open"} if CODE in said.upper() else None
+        return guide.Facts(mac_connected=self.has_mac, invite=invite, mirror_hosts=["sam/sams-mini"] if self.redeemed else [],
+                           folder=("active" if self.allowed else "awaiting_consent") if self.mirroring else "none",
+                           protected=self.mirroring and self.allowed, recovery_kit=self.kit, offers_space=self.offering)
 
     def _log(self, name, **a):
         self.calls.append((name, a))
@@ -162,11 +171,28 @@ def scenario_invite_to_protected(run):
     checks.append(("sends the person to the Allow dialog", "allow" in r.lower()))
     checks.append(("doesn't claim protection yet", "is protected" not in r.lower() and "now protected" not in r.lower()))
     fake.allowed = True
-    c0 = len(fake.calls)
     r = run(fake, "OK, I clicked Allow.")
-    t = _turn_calls(fake, c0)
-    checks.append(("checks protection status", _did(t, "protection_status")))
-    checks.append(("confirms protected", "protected" in r.lower()))
+    checks.append(("confirms protected once it is", "protected" in r.lower()))
+    checks.append(("then the recovery kit, from Casper's menu", "recovery kit" in r.lower() and "terminal" not in r.lower()))
+    r = run(fake, "Done")
+    checks.append(("only then: offer space back", "space back" in r.lower() or "offer sam" in r.lower()))
+    return checks
+
+
+def scenario_invited_newcomer(run):
+    """Noah's walkthrough: invited, no Mac yet. One thing at a time --
+    accept, then download, then (once the Mac connects) a folder. Giving
+    back waits until the end."""
+    fake = FakeCasper(has_mac=False)
+    r = run(fake, f"A friend invited me to Casper -- my invite code is {CODE}.")
+    checks = [("asks to accept first", _did(fake.calls, "redeem_invite", preview=True) and "accept" in r.lower())]
+    r = run(fake, "Accept")
+    print(f"     after accept: {r!r}")
+    checks += [("accepted, then just the download", fake.redeemed and DOWNLOAD in r),
+               ("no give-back yet", "space back" not in r.lower() and "offer sam" not in r.lower())]
+    fake.has_mac = True
+    r = run(fake, "My Mac is connected.")
+    checks.append(("then which folder", "documents" in r.lower() and not _did(fake.calls, "mirror_folder", preview=False)))
     return checks
 
 
@@ -214,8 +240,8 @@ def scenario_consent_trap(run):
 def scenario_voice(run):
     """The tone is the experience: missing information is asked for tersely,
     with no reason, apology or talk of internals."""
-    fake = FakeCasper()
-    fake.redeemed = True
+    fake = FakeCasper()  # someone already set up: protected, kit made
+    fake.redeemed = fake.mirroring = fake.allowed = fake.kit = True
     r = run(fake, "Invite my friend Noah")
     print(f"     voice: {r!r}")
     lower = r.lower()
@@ -240,7 +266,7 @@ def _plan_not_done(run, fake):
             ("asks to confirm (buttons)", bool(guide.choices_for(r, True)))]
 
 
-SCENARIOS = [scenario_invite_to_protected, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice]
+SCENARIOS = [scenario_invite_to_protected, scenario_invited_newcomer, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice]
 
 
 JUDGE_MODEL = os.environ.get("GUIDE_JUDGE_MODEL", "z-ai/glm-5.2")
@@ -291,9 +317,11 @@ def style_checks(client, exchanges: list[tuple[str, str]]) -> list[tuple[str, st
     replies = [r for _, r in exchanges]
     found = lambda marks: [r for r in replies if any(m in r for m in marks)]  # noqa: E731
     dashes, bangs, markdown = found(("\u2014", "\u2013", " -- ")), found(("!",)), found(("**", "##", "]("))
+    two_asks = [r for r in replies if r.count("?") > 1]
     out = [("style", "no dashes for rhythm" + (f" ({dashes[0][:60]!r})" if dashes else ""), not dashes),
            ("style", "no exclamation marks" + (f" ({bangs[0][:60]!r})" if bangs else ""), not bangs),
-           ("style", "plain text, no Markdown" + (f" ({markdown[0][:60]!r})" if markdown else ""), not markdown)]
+           ("style", "plain text, no Markdown" + (f" ({markdown[0][:60]!r})" if markdown else ""), not markdown),
+           ("style", "one ask per message" + (f" ({two_asks[0][:80]!r})" if two_asks else ""), not two_asks)]
     try:
         avg, low, why = judge_tone(client, exchanges)
         ok = avg >= 0.8 and low >= 0.5
@@ -329,7 +357,8 @@ def evaluate(client, model, prices):
 
         def run(fake, text):
             nonlocal history
-            reply, history = guide.run(counted, model, fake, 1, history, text, prompt)
+            reply, history = guide.run(counted, model, fake, 1, history, text, prompt,
+                                       stage_fn=lambda msgs: guide.stage_for(fake.facts(msgs), msgs, DOWNLOAD))
             exchanges.append((text, reply))
             return reply
 

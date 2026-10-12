@@ -499,6 +499,10 @@ def _add_telegram_columns_to_user_profile(db):
         db.execute("ALTER TABLE user_profile ADD COLUMN telegram_chat_id TEXT NOT NULL DEFAULT ''")
     if "telegram_notifications_enabled" not in columns:
         db.execute("ALTER TABLE user_profile ADD COLUMN telegram_notifications_enabled INTEGER NOT NULL DEFAULT 0")
+    if "recovery_kit_at" not in columns:
+        # When the person last saved a recovery kit (Casper reports it), so
+        # the guide knows that step is done.
+        db.execute("ALTER TABLE user_profile ADD COLUMN recovery_kit_at TEXT")
 
 
 def _add_mock_tier_column_to_pending_approvals(db):

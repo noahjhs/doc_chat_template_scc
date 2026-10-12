@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -3075,17 +3076,68 @@ def _guide_reply(user_id: int, text: str) -> tuple[str, list[dict]]:
     prompt = guide.system_prompt(
         os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos",
     )
+    download_url = os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos"
     with _guide_lock(user_id):
         history = guide.load_history(user_id)
         before = len(history)
         try:
             reply, messages = guide.run(guide.client_from_env(), os.environ.get("GUIDE_MODEL", "deepseek/deepseek-v4.1-flash"),
-                                        _mcp_services, user_id, history, text[:4000], prompt)
+                                        _mcp_services, user_id, history, text[:4000], prompt,
+                                        stage_fn=lambda msgs: guide.stage_for(_guide_facts(user_id, msgs), msgs, download_url))
         except Exception as e:  # the model provider being down shouldn't 500 the page
             print(f"guide failed for user {user_id}: {e}")
             return "Sorry -- I'm having trouble thinking right now. Please try again in a minute.", []
         guide.save_new(user_id, before, messages)
     return reply, messages
+
+
+_CODE = re.compile(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", re.I)
+
+
+def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
+    """Where this person really is in setting up -- Casper's own state, for
+    the guide's gates (guide.stage_for)."""
+    said = " ".join(m["content"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str))
+    codes = _CODE.findall(said)
+    invite = None
+    with get_db() as db:
+        if codes:
+            code = codes[-1].upper()
+            row = db.execute("SELECT owner_user_id, used_by_user_id FROM invites WHERE code_hash = ?", (trust._invite_hash(code),)).fetchone()
+            if row and row["used_by_user_id"] == user_id:
+                invite = {"code": code, "inviter": trust.username(db, row["owner_user_id"]), "state": "accepted"}
+            elif row:
+                try:
+                    trust.find_invite(db, code)
+                    invite = {"code": code, "inviter": trust.username(db, row["owner_user_id"]), "state": "open"}
+                except trust.TrustError:
+                    pass  # cancelled, expired or someone else's: nothing to gate on
+        held = trust.grants_held(db, user_id)
+        f = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status IN ('active', 'awaiting_consent') "
+                       "ORDER BY created_at DESC LIMIT 1", (user_id,)).fetchone()
+        kit = db.execute("SELECT recovery_kit_at FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+        facts = guide.Facts(
+            invite=invite,
+            mirror_hosts=[f"{g['owner']}/{g['host']}" for g in held if g["relation"] == "mirror_peer"],
+            catcher_hosts=[f"{g['owner']}/{g['host']}" for g in held if g["relation"] == "catcher_peer"],
+            folder=f["status"] if f else "none",
+            protected=bool(f) and f["status"] == "active" and ": protected." in _status_text(db, f),
+            recovery_kit=bool(kit and kit["recovery_kit_at"]),
+            offers_space=bool(trust.list_offerings(db, user_id)["mine"]),
+        )
+    facts.mac_connected = any(h["role"] == "owner" and h["connected"] for h in _mcp_list_hosts(user_id))
+    return facts
+
+
+@app.post("/profile/recovery-kit")
+def recovery_kit_saved(authorization: str = Header(default="")):
+    """Casper tells us when the person saves a recovery kit (the kit itself
+    never leaves their Mac), so the guide knows that step is done."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        _get_or_create_profile(db, user_id)
+        db.execute("UPDATE user_profile SET recovery_kit_at = ? WHERE user_id = ?", (trust.now_iso(), user_id))
+    return {"ok": True}
 
 
 @app.post("/guide/message")

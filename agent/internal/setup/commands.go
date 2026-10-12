@@ -400,6 +400,9 @@ Make a new kit whenever you start mirroring another folder.
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		return err
 	}
+	// Tell Casper a kit was made (only that -- the kit stays here), so the
+	// guide knows the step is done. Best effort.
+	_ = c.authed(func(token string) error { return c.call("POST", "/profile/recovery-kit", token, nil, nil) })
 	c.emit(fmt.Sprintf("Saved the recovery kit (%d mirrored folder(s)) to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.", len(kit.MirrorPasswords), path),
 		map[string]any{"ok": true, "path": path, "mirrored_folders": len(kit.MirrorPasswords)})
 	return nil

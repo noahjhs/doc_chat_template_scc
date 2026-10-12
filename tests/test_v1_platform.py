@@ -838,3 +838,77 @@ def test_dev_lists_a_personas_accounts_by_pattern(app_env, monkeypatch):
     assert listed("noah_*") == ["Noah_walkthrough", "noah_walkthrough2"]  # case-insensitive, and not noahjhs
     assert listed("noah") == ["noah"]
     assert client.get("/dev/users", params={"glob": "*"}).status_code == 403  # without the dev token
+
+
+def test_guide_setup_gates_go_one_step_at_a_time(app_env):
+    """The guide's steps come from Casper's state, in a fixed order, one ask
+    each -- giving back comes only after everything else."""
+    import guide
+
+    F, url = guide.Facts, "https://x/dl"
+    inv_open = {"code": "CASPER-AAAA-BBBB-CCCC", "inviter": "riley", "state": "open"}
+    inv_done = {**inv_open, "state": "accepted"}
+    step = lambda facts, history=(): guide.stage_for(facts, list(history), url).name  # noqa: E731
+    assert step(F(invite=inv_open)) == "accept_invite"
+    assert step(F(invite=inv_done, mirror_hosts=["riley/Mac"])) == "install"
+    assert "Download Casper and open it: https://x/dl" in guide.stage_for(F(), [], url).now
+    connected = dict(mac_connected=True, invite=inv_done, mirror_hosts=["riley/Mac"])
+    assert step(F(**connected)) == "choose_folder"
+    assert step(F(**connected, folder="awaiting_consent")) == "consent"
+    assert step(F(**connected, folder="active")) == "syncing"
+    assert step(F(**connected, folder="active", protected=True)) == "recovery_kit"
+    asked_kit = [{"role": "assistant", "content": "...", "_stage": "recovery_kit"}]
+    assert step(F(**connected, folder="active", protected=True), asked_kit) == "give_back"  # asked once is enough
+    assert step(F(**connected, folder="active", protected=True, recovery_kit=True)) == "give_back"
+    asked_both = asked_kit + [{"role": "assistant", "content": "...", "_stage": "give_back"}]
+    assert step(F(**connected, folder="active", protected=True), asked_both) == "open"
+    assert step(F(mac_connected=True)) == "open"  # no invite, nothing held: free to ask what they want
+
+
+def test_guide_facts_come_from_caspers_state(app_env):
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", for_whom="Riley", preview=False)).group(0)
+        rid = _user_id(main, "riley")
+        said = [{"role": "user", "content": f"A friend invited me -- my invite code is {code}."}]
+        f = main._guide_facts(rid, said)
+        assert f.invite == {"code": code, "inviter": "sam", "state": "open"} and not f.mirror_hosts
+        _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        f = main._guide_facts(rid, said)
+        assert f.invite["state"] == "accepted" and f.mirror_hosts == ["sam/sam-mini"] and f.folder == "none"
+        assert not f.recovery_kit
+        assert client.post("/profile/recovery-kit", headers=riley).status_code == 200
+        assert main._guide_facts(rid, said).recovery_kit
+
+
+def test_guide_cant_use_another_steps_tools(app_env):
+    import guide
+
+    class Svc:
+        def mirror_folder(self, *a):
+            raise AssertionError("not this step")
+
+    class Call:
+        def __init__(self, i, name, args):
+            self.id, self.function = f"c{i}", type("F", (), {"name": name, "arguments": json.dumps(args)})()
+
+    script = [[Call(1, "mirror_folder", {"source_host": "m", "path": "Documents", "mirrors": ["x"], "preview": False})], "Download Casper and open it."]
+    seen_tools = []
+
+    class Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    seen_tools.append({t["function"]["name"] for t in kw["tools"]})
+                    step = script.pop(0)
+                    msg = type("M", (), {"content": step if isinstance(step, str) else "", "tool_calls": None if isinstance(step, str) else step})()
+                    return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+
+    install = guide.Stage("install", "Say exactly ...")
+    reply, messages = guide.run(Client(), "m", Svc(), 1, [], "hi", "p", stage_fn=lambda msgs: install)
+    assert "mirror_folder" not in seen_tools[0] and "redeem_invite" not in seen_tools[0]
+    assert any("Not now" in m.get("content", "") for m in messages if m["role"] == "tool")
+    assert messages[-1]["_stage"] == "install"
