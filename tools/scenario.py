@@ -63,8 +63,14 @@ def tart(*args, check=True, capture=True) -> subprocess.CompletedProcess:
 
 
 def running_vms() -> set[str]:
-    out = tart("list", "--format", "json").stdout
-    return {v["Name"] for v in json.loads(out) if v.get("Running") or v.get("State") == "running"}
+    # `tart list` can fail for a moment while another tart command (a clone
+    # starting in parallel) holds a VM's config: retry before giving up.
+    for attempt in range(8):
+        r = subprocess.run(["tart", "list", "--format", "json"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return {v["Name"] for v in json.loads(r.stdout) if v.get("Running") or v.get("State") == "running"}
+        time.sleep(1 + attempt)
+    raise RuntimeError(f"tart list kept failing: {r.stderr.strip()[-200:]}")
 
 
 def vm_exec(vm: str, script: str, timeout: int = 300) -> str:
@@ -217,6 +223,24 @@ def step_name_mac(p, ctx, *name):
     return f"{pretty} ({local})"
 
 
+def step_claude_token(p, ctx):
+    """Keeps Claude Code signed in however old the snapshot is. A sign-in
+    saved in a snapshot goes stale (the first clone to refresh it invalidates
+    the saved copy for every later one), so each reset hands the VM the
+    long-lived test token kept on the mini (~/.config/casper-test/claude-token)
+    through its environment (~/.zshenv, owner-only). Never saved in a
+    snapshot, never printed."""
+    token = subprocess.run(["ssh", "casper-mini", "cat ~/.config/casper-test/claude-token"], capture_output=True, text=True)
+    if token.returncode != 0 or not token.stdout.strip():
+        raise RuntimeError("couldn't read the Claude test token on the mini (~/.config/casper-test/claude-token)")
+    r = subprocess.run(["tart", "exec", "-i", p["vm"], "/bin/sh", "-c",
+                        'read -r T; umask 077; printf "export CLAUDE_CODE_OAUTH_TOKEN=%s\\n" "$T" > ~/.zshenv'],
+                       input=token.stdout.strip() + "\n", capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"couldn't give {p['vm']} the token: {r.stderr.strip()[-200:]}")
+    return "Claude Code signed in with the test token"
+
+
 def step_install_casper(p, ctx):
     url = CONF["deployment"]["download_url"]
     vm_exec(p["vm"], f"""
@@ -258,6 +282,7 @@ def step_publish_offering(p, ctx, gb="20"):
 
 STEPS = {
     "name_mac": step_name_mac,
+    "claude_token": step_claude_token,
     "install_casper": step_install_casper,
     "create_account": step_create_account,
     "pair": step_pair,

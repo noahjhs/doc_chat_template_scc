@@ -1,11 +1,12 @@
 //go:build darwin
 
-// Login-item helpers register/unregister Casper.app as a macOS Login Item
-// (System Settings > General > Login Items), via System Events over
-// osascript -- the same automation approach internal/dialog uses for native
-// modals. There's no cgo-free public API for this, and pulling in the
-// ServiceManagement framework (SMAppService) would mean a second, heavier
-// cgo surface just for this one feature.
+// Login-item helpers make Casper start when the person logs in. They write a
+// LaunchAgent (~/Library/LaunchAgents/<label>.plist) that opens the app, not
+// a System Settings "Login Item" made through System Events: asking System
+// Events needs the person's Automation approval, and macOS shows that question
+// ("Casper wants access to control System Events") the moment the app
+// launches, long before there's any context for it. A LaunchAgent needs no
+// permission; macOS only shows a passing "background item added" notice.
 package config
 
 import (
@@ -16,21 +17,10 @@ import (
 	"strings"
 )
 
-// loginItemName matches Info.plist's CFBundleName (build/build_go_macos.sh)
-// -- System Events derives a login item's own "name" from the app bundle's
-// display name when it's added, so this is what IsLoginItem/RemoveLoginItem
-// look for/target, rather than a path (which wouldn't survive the bundle
-// being moved after being registered).
-const loginItemName = "Casper"
-
 // bundlePath resolves the running app bundle's own path (e.g.
 // "/Applications/Casper.app") from the current executable's path
-// (.../Casper.app/Contents/MacOS/Casper) -- works no matter where the user
-// actually placed the bundle (Applications, Desktop, Downloads, ...). Falls
-// back to the raw executable path if it isn't running from inside a .app
-// bundle at all (e.g. a bare dev build) -- login items can technically
-// still point at a plain executable, just without any of the bundle's own
-// icon/Info.plist behavior.
+// (.../Casper.app/Contents/MacOS/Casper). Falls back to the raw executable
+// path if it isn't running from inside a .app bundle (a bare dev build).
 func bundlePath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -46,53 +36,85 @@ func bundlePath() (string, error) {
 	return exe, nil
 }
 
-func escapeForAppleScript(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-	return r.Replace(s)
-}
-
-// IsLoginItem reports whether Casper is currently registered as a macOS
-// Login Item, matched by name (not path) -- so it still recognizes itself
-// as already-registered even if the bundle has since been moved.
-func IsLoginItem() (bool, error) {
-	out, err := exec.Command("osascript", "-e",
-		`tell application "System Events" to get the name of every login item`,
-	).Output()
+// launchAgentLabel tells dev and prod builds apart (they keep separate
+// config directories, e.g. "Casper-dev").
+func launchAgentLabel() (string, error) {
+	dir, err := AppConfigDir()
 	if err != nil {
-		return false, fmt.Errorf("couldn't list login items: %w", err)
+		return "", err
 	}
-	for _, name := range strings.Split(string(out), ",") {
-		if strings.TrimSpace(name) == loginItemName {
-			return true, nil
-		}
-	}
-	return false, nil
+	return "app." + strings.ToLower(filepath.Base(dir)) + ".login", nil
 }
 
-// AddLoginItem registers the running app bundle as a macOS Login Item. Not
-// idempotent at the OS level (re-running this while already registered adds
-// a second, functionally-redundant entry with the same name) -- callers
-// should check IsLoginItem first; both call sites in cmd/casper do.
+func launchAgentPath() (string, error) {
+	label, err := launchAgentLabel()
+	if err != nil {
+		return "", err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist"), nil
+}
+
+// IsLoginItem reports whether Casper is set to start at login.
+func IsLoginItem() (bool, error) {
+	path, err := launchAgentPath()
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
+	return err == nil, nil
+}
+
+// AddLoginItem makes Casper start at login. It refuses an app running from a
+// macOS "App Translocation" path (what macOS runs a freshly downloaded app
+// from until it's moved): that path is random and disappears at the next
+// restart, so registering it would quietly break.
 func AddLoginItem() error {
-	path, err := bundlePath()
+	app, err := bundlePath()
 	if err != nil {
 		return err
 	}
-	script := fmt.Sprintf(
-		`tell application "System Events" to make login item at end with properties {path:"%s", hidden:false, name:"%s"}`,
-		escapeForAppleScript(path), escapeForAppleScript(loginItemName),
-	)
-	if out, err := exec.Command("osascript", "-e", script).CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	if strings.Contains(app, "/AppTranslocation/") {
+		return fmt.Errorf("Casper is running from a temporary location; move it to Applications first")
 	}
+	label, err := launchAgentLabel()
+	if err != nil {
+		return err
+	}
+	path, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-a</string><string>%s</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+`, label, xmlEscape(app))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(plist), 0o644)
+}
+
+// RemoveLoginItem stops Casper starting at login.
+func RemoveLoginItem() error {
+	path, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), path).Run() // best effort: not loaded yet is fine
 	return nil
 }
 
-// RemoveLoginItem unregisters Casper as a macOS Login Item, by name.
-func RemoveLoginItem() error {
-	script := fmt.Sprintf(`tell application "System Events" to delete login item "%s"`, escapeForAppleScript(loginItemName))
-	if out, err := exec.Command("osascript", "-e", script).CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+func xmlEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }

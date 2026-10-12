@@ -177,8 +177,9 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         return Stage("consent", "Casper's dialog is in front of them asking to start mirroring; wait. If they ask, it's the "
                      "Casper dialog on their Mac: Mirror starts it.", silent=True)
     if facts.folder == "active" and not facts.protected:
-        return Stage("syncing", "The first copy is on its way. Check protection_status; say in one line how far along it is, "
-                     "or \"Protected.\" once it is.")
+        return Stage("syncing", "The first copy is under way; the page shows its progress. Say only: \"Copying now. You can leave "
+                     "this page open.\" If they ask how it's going, check protection_status.",
+                     say="Copying now. You can leave this page open.")
     if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in answered:
         return Stage("recovery_kit", "Say only: \"Protected. Last step: your recovery kit. In Casper's menu (the ghost in the "
                      "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Later",),

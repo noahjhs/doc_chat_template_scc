@@ -1046,3 +1046,23 @@ def test_relay_address_follows_the_routers_public_address(app_env, monkeypatch):
     monkeypatch.setattr(mirroring, "_natpmp", lambda g, r, n: struct.pack("!BBHIHHI", 0, 130, 2, 1, 0, 0, 0))  # router refuses
     mirroring._relay_public.clear()
     assert mirroring.open_relay_port() is None and mirroring.relays() == []
+
+
+def test_guide_page_shows_dots_whenever_a_turn_is_running_and_hides_the_invite_message(app_env, monkeypatch):
+    """Noah saw nothing for ~15 s after choosing a folder: the 'waiting' flag
+    dropped as soon as the folder was reported, though the guide was still
+    writing. And the page's own invite message appeared as something Noah
+    'said'."""
+    main, client = app_env
+    _, riley = _signup(client, "riley")
+    uid = _user_id(main, "riley")
+    assert client.get("/guide/state", headers=riley).json()["waiting"] is False
+    with main._guide_lock(uid):  # a guide turn in progress
+        assert client.get("/guide/state", headers=riley).json()["waiting"] is True
+    assert client.get("/guide/state", headers=riley).json()["waiting"] is False
+
+    seen = []
+    monkeypatch.setattr(main, "_guide_reply", lambda u, text, event=False, only_if=None: seen.append((text, event)) or ("", []))
+    client.post("/guide/message", json={"text": "They arrived from a friend's invitation. Their invite code is CASPER-AAAA-BBBB-CCCC.", "event": True}, headers=riley)
+    client.post("/guide/message", json={"text": "Accept"}, headers=riley)
+    assert [e for _, e in seen] == [True, False]

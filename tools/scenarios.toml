@@ -10,7 +10,7 @@
 # builds on another checkpoint. A scenario starts several checkpoints at once,
 # e.g. both sides of an invite.
 #
-# Steps (see STEPS in scenario.py): name_mac <name>, install_casper,
+# Steps (see STEPS in scenario.py): name_mac <name>, claude_token, install_casper,
 # create_account, pair,
 # connect_claude, publish_offering <GB>, chat_folder.
 
@@ -39,7 +39,7 @@ accounts = ["noah", "noah_*", "noah-*"]
 [checkpoints.riley-before-publish]
 persona = "riley"
 about = "Riley: Casper installed and connected, Claude connected to Casper; nothing offered yet."
-steps = ["name_mac Riley's MacBook", "install_casper", "create_account", "pair", "connect_claude", "chat_folder"]
+steps = ["name_mac Riley's MacBook", "claude_token", "install_casper", "create_account", "pair", "connect_claude", "chat_folder"]
 
 [checkpoints.riley-before-invite]
 extends = "riley-before-publish"

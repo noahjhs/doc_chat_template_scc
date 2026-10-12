@@ -182,14 +182,22 @@ func (m *Manager) Start() error {
 		// so announcing isn't needed -- and it would set off macOS's "find
 		// devices on local networks" question the moment Casper launches,
 		// rather than when mirroring actually starts.
-		"localAnnounceEnabled":  false,
-		"relaysEnabled":         false, // until Casper runs its own relay
-		"natEnabled":            true,
-		"urAccepted":            -1,
-		"crashReportingEnabled": false,
-		"autoUpgradeIntervalH":  0,
-		"listenAddresses":       m.listenAddresses(),
-		"startBrowser":          false,
+		"localAnnounceEnabled": false,
+		"relaysEnabled":        false, // until Casper runs its own relay
+		// Off: Casper's own relay (and the addresses casper_service gives each
+		// Mac) cover reachability, and searching the router for a port mapping
+		// is a local-network scan: it would make macOS ask "find devices on
+		// local networks?" the moment Casper launches, long before mirroring.
+		"natEnabled": false,
+		// Syncthing retries a relay only every 10 minutes by default, and the
+		// first try usually comes before the friend's Mac has joined the
+		// relay: a fresh pair would sit idle for 10 minutes. One minute.
+		"relayReconnectIntervalM": 1,
+		"urAccepted":              -1,
+		"crashReportingEnabled":   false,
+		"autoUpgradeIntervalH":    0,
+		"listenAddresses":         m.listenAddresses(),
+		"startBrowser":            false,
 	})
 }
 

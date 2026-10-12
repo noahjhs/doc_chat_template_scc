@@ -2507,9 +2507,10 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
             db.execute("UPDATE invites SET delivered_via = ? WHERE code_hash = ?", (",".join(channels), trust._invite_hash(code)))
     out = f"Sent: {'; '.join(sent)}." if sent else f"Invite created for {who}."
     hears = ("in Telegram" if profile.telegram_chat_id and profile.telegram_notifications_enabled else None)
-    then = (f"Next: say they'll hear from Casper {hears} when {who} accepts. " if hears
-            else f"Next: say Casper will show it in 'what have I shared?' once {who} accepts. ")
-    then += "Then offer one next thing (keep their own files safe, if nothing of theirs is mirrored yet)."
+    then = (f"Next: one line: you'll hear {hears} when {who} accepts. " if hears
+            else f"Next: one line: it'll show under what you've shared once {who} accepts. ")
+    then += ("Don't mention how long the invite lasts. Refer to " + who + " by name, never he or she. "
+             "Then offer one next thing (keep their own files safe, if nothing of theirs is mirrored yet).")
     if problems or not sent:
         out += (f" ({' and '.join(problems)} delivery failed.)" if problems else "") + f"\n\nMessage for the person to send {who}:\n{message}"
     return out + f"\n{then}\nCode {code}; details in my_casper."
@@ -2923,9 +2924,7 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
     with get_db() as db:
         db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
     # The dialog says just the decision (Mirror / Cancel); the plan was already shown.
-    backups.daemon_call(config, "ask_consent", approval_id=approval_id,
-                        text=f"Start mirroring {label}?\n\nmacOS may then ask whether Casper can reach devices on your network. "
-                             "That's how it finds your friend's Mac.")
+    backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"Start mirroring {label}?")
     return (
         f"NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
         "click Mirror (or answer in Telegram). You can't confirm it for them. Once they say they have, check "
@@ -3242,6 +3241,22 @@ def recovery_kit_saved(authorization: str = Header(default="")):
     return {"ok": True}
 
 
+def _copy_progress(user_id: int) -> str:
+    """How the first copy is going, in a few words (from the owner's own report)."""
+    with get_db() as db:
+        f = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+                       (user_id,)).fetchone()
+        if f is None:
+            return ""
+        st = mirroring.latest_status(db, f["id"]) or {}
+    mirrors = [p for p in st.get("peers", []) if p.get("role") == "mirror"]
+    ever = any(p.get("connected") or not str(p.get("last_seen", "")).startswith("1969") for p in mirrors)
+    if not ever:
+        return f"Connecting to your friend's Mac to copy {f['label']}…"
+    pct = max((p.get("completion", 0) for p in mirrors), default=0)
+    return f"Copying {f['label']}: {pct:.0f}%"
+
+
 @app.post("/guide/message")
 def guide_message(body: dict, authorization: str = Header(default="")):
     with get_db() as db:
@@ -3249,7 +3264,7 @@ def guide_message(body: dict, authorization: str = Header(default="")):
     text = str(body.get("text", "")).strip()
     if not text:
         raise HTTPException(status_code=400, detail="Say something.")
-    reply, messages = _guide_reply(user_id, text)
+    reply, messages = _guide_reply(user_id, text, event=bool(body.get("event")))
     return {"reply": reply, "choices": (messages[-1].get("_choices") or []) if messages else []}
 
 
@@ -3264,8 +3279,11 @@ def guide_state(authorization: str = Header(default="")):
     picking = any(uid == user_id for uid, _ in _folder_requests.values())
     return {"stage": stage, "spoken": spoken, "count": len(guide.visible(history)),
             "due": bool(history) and stage != spoken and stage in _STEP_NEWS,
-            # Casper is waiting on something on their Mac (a dialog, the folder panel): show it's waiting.
-            "waiting": picking or stage == "consent"}
+            # Show the thinking dots whenever Casper is waiting on something on their Mac (a
+            # dialog, the folder panel) or the guide is writing its reply.
+            "waiting": picking or stage == "consent" or _guide_lock(user_id).locked(),
+            # While the first copy runs: a live line (the page shows it under the last message).
+            "progress": _copy_progress(user_id) if stage == "syncing" else ""}
 
 
 @app.post("/guide/continue")

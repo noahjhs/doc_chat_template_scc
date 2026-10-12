@@ -103,6 +103,12 @@ func main() {
 	logger := log.New(io.MultiWriter(os.Stdout, logFile), "", log.LstdFlags)
 	logf := func(format string, args ...any) { logger.Printf(format, args...) }
 
+	// A freshly downloaded app runs from a temporary copy until it's moved:
+	// offer that once, first thing (not in scripted/CI runs).
+	if os.Getenv("CONTROL_TOOL_KEY") == "" && os.Getenv("CASPER_SCRIPTED_SETUP") == "" {
+		moveToApplications(logf)
+	}
+
 	port := 8000
 	if v := os.Getenv("CONTROL_TOOL_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
