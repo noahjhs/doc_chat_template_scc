@@ -143,6 +143,7 @@ class Stage:
     now: str  # the one thing to do this turn
     tools: tuple = ()  # what it may change ("*" = anything); the read-only tools are always there
     choices: tuple = ()  # its buttons, unless a plan was just proposed
+    say: str = ""  # its exact line when the step begins -- written by Casper, not the model
 
 
 READ_ONLY = ("my_casper", "list_hosts", "list_offerings", "protection_status", "list_versions", "list_approvals")
@@ -160,25 +161,30 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     if not facts.mac_connected:
         lead = "If something just happened (an invite accepted), say it in a few words first. " if inv else ""
         return Stage("install", f"Their Mac isn't connected yet. {lead}Say exactly \"Download Casper and open it: {download_url}\" "
-                     "and nothing more. Opening it connects their Mac; you'll hear \"My Mac is connected.\"")
+                     "and nothing more. Opening it connects their Mac; you'll hear \"My Mac is connected.\"",
+                     say=f"Download Casper and open it: {download_url}")
     if facts.mirror_hosts and facts.folder == "none":
         catcher = f' Their catcher: catcher="{facts.catcher_hosts[0]}".' if facts.catcher_hosts else (
             " They have no catcher; leave it out unless they ask.")
-        return Stage("choose_folder", "Ask only which folder to keep safe, suggesting Documents: \"Documents?\". On their "
-                     f"answer, preview mirror_folder (source_host: their Mac from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
-                     "Give the one-line plan ending \"Start?\", and start it on their yes.", ("mirror_folder",), ("Documents", "Another folder"))
+        return Stage("choose_folder", "Ask only which folder to keep safe, suggesting Documents. On their answer, preview "
+                     f"mirror_folder (source_host: their Mac from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
+                     "Give the one-line plan ending \"Start?\", and start it on their yes.", ("mirror_folder",),
+                     ("Documents", "Another folder"), say="Which folder should Casper keep safe? Documents is a good start.")
     if facts.folder == "awaiting_consent":
         return Stage("consent", "A Casper dialog is waiting on their Mac. Say only: \"Click Allow in the Casper dialog on your "
-                     "Mac.\" When they say it's done, check protection_status.", (), ("Done",))
+                     "Mac.\" When they say it's done, check protection_status.", (), ("Done",),
+                     say="Click Allow in the Casper dialog on your Mac.")
     if facts.folder == "active" and not facts.protected:
         return Stage("syncing", "The first copy is on its way. Check protection_status; say in one line how far along it is, "
                      "or \"Protected.\" once it is.")
     if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in asked:
         return Stage("recovery_kit", "Say only: \"Protected. Last step: your recovery kit. In Casper's menu (the ghost in the "
-                     "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Done", "Later"))
+                     "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Done", "Later"),
+                     say="Protected. Last step: your recovery kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery Kit.")
     if inv and not facts.offers_space and "give_back" not in asked:
         return Stage("give_back", f"Ask only: \"Offer {inv['inviter']} space back? Not expected.\" If yes, invite {inv['inviter']} "
-                     "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"))
+                     "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"),
+                     say=f"Offer {inv['inviter']} space back? Not expected.")
     return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
 
 
@@ -211,6 +217,12 @@ def _for_model(messages: list[dict]) -> list[dict]:
     return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
 
 
+def _entering(stage: Stage, history: list[dict]) -> bool:
+    """Is this step new -- the guide's last word was from another step?"""
+    last = next((m for m in reversed(history) if m.get("role") == "assistant" and m.get("_stage")), None)
+    return last is None or last["_stage"] != stage.name
+
+
 def _tools_for(stage: Stage | None) -> list[dict]:
     if stage is None or "*" in stage.tools:
         return TOOLS
@@ -230,6 +242,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
     messages = list(history) + [{"role": "user", "content": user_text}]
     proposed = False
     previewed: set[str] = set()  # tools previewed in this turn: acting on one needs the person's answer first
+    acted = False  # something changed this turn (a confirmed action)
     stage = None
     for _ in range(MAX_TOOL_ROUNDS):
         stage = stage_fn(messages) if stage_fn else None
@@ -244,6 +257,13 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
         messages.append(entry)
         if not calls:
             reply = (msg.content or "").strip()
+            if stage and stage.say and not proposed and _entering(stage, history) and "?" not in user_text:
+                # A scripted step begins: Casper says its line. The model keeps
+                # at most a short note on what just happened (e.g. "Accepted.").
+                note = reply.split("\n")[0].strip() if acted else ""
+                keep = note and "?" not in note and len(note) <= 90 and stage.say not in note
+                reply = (note + "\n\n" if keep else "") + stage.say
+                entry["content"] = reply
             choices = choices_for(reply, proposed) or (list(stage.choices) if stage else [])
             if choices:
                 entry["_choices"] = choices
@@ -266,6 +286,8 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
             if result.startswith("PREVIEW"):
                 proposed = True
                 previewed.add(c.function.name)
+            elif args.get("preview") is False:
+                acted = True
             messages.append({"role": "tool", "tool_call_id": c.id, "content": result[:6000]})
     return "That didn't go through. Say it another way?", messages
 
