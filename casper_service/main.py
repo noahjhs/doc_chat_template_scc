@@ -3226,7 +3226,9 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             recovery_kit=bool(kit and kit["recovery_kit_at"]),
             offers_space=bool(trust.list_offerings(db, user_id)["mine"]),
         )
-    facts.mac_connected = any(h["role"] == "owner" and h["connected"] for h in _mcp_list_hosts(user_id))
+    # "Has a Mac" (paired), not "connected this second": the service forgets who's connected
+    # when it restarts, and that must never send someone back to the download step.
+    facts.mac_connected = any(h["role"] == "owner" for h in _mcp_list_hosts(user_id))
     return facts
 
 

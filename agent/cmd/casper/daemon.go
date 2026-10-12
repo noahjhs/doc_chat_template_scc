@@ -355,6 +355,27 @@ func (d *daemonState) setEnabled(enabled bool) {
 	d.applyState()
 }
 
+// presenceHeartbeat re-announces this Mac to casper_service every minute while
+// it's on. The service keeps who's connected only in memory, and a Mac used to
+// announce itself just once (when it connected), so after any service restart
+// every Mac looked offline until Casper was restarted on it.
+func (d *daemonState) presenceHeartbeat() {
+	for range time.Tick(time.Minute) {
+		if !d.isEnabled() {
+			continue
+		}
+		d.mu.Lock()
+		identities := make([]*pairedIdentity, 0, len(d.identities))
+		for _, pi := range d.identities {
+			identities = append(identities, pi)
+		}
+		d.mu.Unlock()
+		for _, pi := range identities {
+			d.reportPresence(pi.username, pi.deviceToken)
+		}
+	}
+}
+
 func (d *daemonState) isEnabled() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()

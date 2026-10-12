@@ -1066,3 +1066,15 @@ def test_guide_page_shows_dots_whenever_a_turn_is_running_and_hides_the_invite_m
     client.post("/guide/message", json={"text": "They arrived from a friend's invitation. Their invite code is CASPER-AAAA-BBBB-CCCC.", "event": True}, headers=riley)
     client.post("/guide/message", json={"text": "Accept"}, headers=riley)
     assert [e for _, e in seen] == [True, False]
+
+
+def test_a_paired_mac_that_isnt_connected_right_now_doesnt_send_the_guide_back_to_download(app_env):
+    """The service forgets who's connected when it restarts; the guide must not
+    treat that as 'Casper isn't installed'."""
+    main, client = app_env
+    _, riley = _signup(client, "riley")
+    rid = _user_id(main, "riley")
+    assert main._guide_facts(rid, []).mac_connected is False  # nothing paired yet: install is right
+    client.post("/hosts/pair", json={"routing_key": "rk-r", "hostname": "r-mac"}, headers=riley)  # paired, never reported presence
+    assert [h for h in main._mcp_list_hosts(rid) if h["role"] == "owner"][0]["connected"] is False
+    assert main._guide_facts(rid, []).mac_connected is True

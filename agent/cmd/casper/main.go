@@ -151,6 +151,7 @@ func main() {
 	srv := server.New(logger)
 
 	state := newDaemonState(srv, homeRoot, relayDomain, authDomain, routingKey, port, logf)
+	go state.presenceHeartbeat()
 	state.startMirroring()
 
 	go func() {
