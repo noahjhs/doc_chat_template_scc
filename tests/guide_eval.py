@@ -88,9 +88,9 @@ class FakeCasper:
             return (f"PREVIEW (nothing changed yet): Send {for_whom or 'a friend'} an invite: {quota_gb:g} GB of mirror space on Rileys-MacBook. "
                     f"It stays good until they're set up; unused, it lapses after 7 days.{also}")
         self.offering = self.invited = True
-        return (f"Invite created for {for_whom or 'a friend'}.\n\nMessage for the person to send {for_whom or 'a friend'}:\nI've set aside room for "
-                'your folders on my computer with Casper. Tell your AI agent: "Set me up with Casper using https://casper.example/agents.md, '
-                'my invite code is CASPER-QRST-UVWX-YZ23".\nNext: code CASPER-QRST-UVWX-YZ23; details in my_casper.')
+        return (f"Invite created for {for_whom or 'a friend'}.\n\nMessage for the person to send {for_whom or 'a friend'}:\nHi {for_whom or 'there'}, "
+                "I've saved space for you on my computer, so your files stay safe. Join me on Casper:\n"
+                "https://casper.example/invite#CASPER-QRST-UVWX-YZ23\nNext: code CASPER-QRST-UVWX-YZ23; details in my_casper.")
 
     def mirror_folder(self, u, source_host, path, mirrors, catcher, use_cc, label, preview):
         self._log("mirror_folder", path=path, mirrors=mirrors, preview=preview)

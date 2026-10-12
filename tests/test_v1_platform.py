@@ -475,7 +475,7 @@ def test_invite_sent_to_inviters_telegram_with_a_share_button(app_env, monkeypat
         assert button["text"] == "Send to Noah"
         shared = urllib.parse.parse_qs(urllib.parse.urlparse(button["url"]).query)
         assert shared["url"][0].startswith("https://www.example/invite#CASPER-")
-        assert shared["text"][0] == "Hi Noah! I've saved space for you on my computer, so your files stay safe. Join me in Mutual Aid on Casper:"
+        assert shared["text"][0] == "Hi Noah, I've saved space for you on my computer, so your files stay safe. Join me in Mutual Aid on Casper:"
 
 
 def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):

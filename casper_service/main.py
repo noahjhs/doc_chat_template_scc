@@ -2401,7 +2401,7 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
     page = _invite_page_url(code)
     # One short note and one link: the invite page holds the choices (Casper's
     # guide, or their own agent) and the details.
-    hello = f"Hi {for_whom}! " if for_whom else ""
+    hello = f"Hi {for_whom}, " if for_whom else ""
     into = f"Join me in {group} on Casper" if group else "Join me on Casper"
     message = (f"{hello}I've saved space for you on my computer, so your files stay safe. {into}:\n{page}" if page
                else f"{hello}I've saved space for you on my computer with Casper. Tell your AI agent: \"{prompt}\"")
