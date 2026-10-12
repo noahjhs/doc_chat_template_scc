@@ -82,6 +82,8 @@ func ConfirmWithDontAskAgain(message, _ string) (accepted bool, dontAskAgain boo
 
 // Confirm isn't implemented on Windows yet (mirroring is macOS-only for the
 // alpha); it reports no answer, so consent falls back to Telegram.
+func ChooseFolder() (string, bool) { return "", false }
+
 func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
 	return false, false
 }

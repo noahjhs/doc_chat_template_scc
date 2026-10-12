@@ -59,6 +59,12 @@ func ReportMirrorStatus(authDomain, deviceToken string, folders any) error {
 }
 
 // PostConsent records the person's answer from the native consent dialog.
+// PostFolderChosen reports the folder the person picked in Casper's folder
+// panel (or that they cancelled).
+func PostFolderChosen(authDomain, deviceToken string, report map[string]any) error {
+	return deviceCall("POST", authDomain, deviceToken, "/hosts/folder-chosen", report, nil)
+}
+
 func PostConsent(authDomain, deviceToken, approvalID string, approve bool) error {
 	return deviceCall("POST", authDomain, deviceToken, "/hosts/consent", map[string]any{"approval_id": approvalID, "approve": approve}, nil)
 }

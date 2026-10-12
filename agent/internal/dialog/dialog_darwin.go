@@ -163,6 +163,19 @@ function run() {
 // their answer; answered is false if they didn't respond within the time
 // limit. Used for consent that must come from the person, not their agent
 // (docs/product/scenarios/mirroring.md, "Setup").
+// ChooseFolder shows the standard folder panel, starting in the home
+// folder: the chosen folder's path, or false if they cancelled.
+func ChooseFolder() (string, bool) {
+	script := `tell application "System Events" to activate
+tell application "System Events" to set f to choose folder with prompt "Choose a folder for Casper to keep safe" default location (path to home folder)
+return POSIX path of f`
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimRight(strings.TrimSpace(string(out)), "/"), true
+}
+
 func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
 	script := fmt.Sprintf(`set r to display dialog %q with title "Casper" buttons {%q, %q} default button %q cancel button %q giving up after %d
 if gave up of r then return "timeout"

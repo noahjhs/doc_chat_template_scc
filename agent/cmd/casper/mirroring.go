@@ -38,9 +38,10 @@ func (d *daemonState) startMirroring() {
 		Passwords:  mirrord.KeychainPasswords{},
 		Identities: d.mirrorIdentities,
 		Ask: func(text string) (bool, bool) {
-			return dialog.Confirm(text, "Allow", "Don't Allow", 10*time.Minute)
+			return dialog.Confirm(text, "Mirror", "Cancel", 10*time.Minute)
 		},
-		Logf: d.logf,
+		ChooseFolder: dialog.ChooseFolder,
+		Logf:         d.logf,
 	}
 	d.mu.Lock()
 	d.mirror = svc

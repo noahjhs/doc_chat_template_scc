@@ -20,6 +20,9 @@ type MirrorOps interface {
 	RestoreVersionChunk(folderID, encryptedPath string, offset int64, data []byte) error
 	RestoreVersionFinish(folderID, encryptedPath string, restoresRoot string) (string, error)
 	UnprotectedFiles(folderID string) ([]string, error)
+	// ChooseFolder opens the Mac's own folder panel (in the background --
+	// the person may take a while) and reports their pick to casper_service.
+	ChooseFolder(requestID, home string)
 }
 
 func (h *Handler) SetMirrorOps(m MirrorOps) {
@@ -74,6 +77,9 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 	case "ask_consent":
 		m.AskConsent(req.ApprovalID, req.Text)
 		return map[string]any{"asked": true}, nil
+	case "mirror_choose_folder":
+		m.ChooseFolder(req.ApprovalID, h.HomeRoot())
+		return map[string]any{"opened": true}, nil
 	case "mirror_version_trailers":
 		items, err := m.VersionTrailers(req.FolderID)
 		return map[string]any{"versions": items}, err

@@ -32,9 +32,11 @@ type Service struct {
 	Identities func() []Identity
 	// Ask shows the person a native yes/no dialog (dialog.Confirm in the app;
 	// a no-op in the headless test daemon, whose test answers consent itself).
-	Ask      func(text string) (yes, answered bool)
-	Logf     func(string, ...any)
-	Interval time.Duration
+	Ask func(text string) (yes, answered bool)
+	// ChooseFolder shows the Mac's folder panel: the chosen path, or false if cancelled.
+	ChooseFolder func() (string, bool)
+	Logf         func(string, ...any)
+	Interval     time.Duration
 
 	once    sync.Once
 	refresh chan struct{}
@@ -389,6 +391,42 @@ func (o *ops) RestoreVersionFinish(folderID, encPath, homeRoot string) (string, 
 	defer os.Remove(p)
 	dest := filepath.Join(homeRoot, "Casper Restores", fmt.Sprintf("%s (versions, %s)", f.Label, time.Now().Format("2006-01-02 15.04.05")))
 	return mirror.DecryptVersion(o.s.Bin, encPath, data, f.ID, f.Password, dest)
+}
+
+// ChooseFolder shows the folder panel and reports the pick, relative to the
+// person's home folder (the only place Casper works), or that they
+// cancelled.
+func (o *ops) ChooseFolder(requestID, home string) {
+	if o.s.ChooseFolder == nil {
+		return
+	}
+	go func() {
+		chosen, ok := o.s.ChooseFolder()
+		report := map[string]any{"request_id": requestID, "cancelled": !ok}
+		if ok {
+			rel, err := filepath.Rel(home, chosen)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+				report["outside_home"] = true
+			} else {
+				report["path"] = rel
+				report["bytes"] = dirSize(chosen)
+			}
+		}
+		if err := config.PostFolderChosen(o.s.AuthDomain, o.s.tokenFor(o.user), report); err != nil {
+			o.s.Logf("mirroring: reporting the chosen folder: %s", err)
+		}
+	}()
+}
+
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 func (o *ops) UnprotectedFiles(folderID string) ([]string, error) {
