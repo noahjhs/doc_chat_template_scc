@@ -1017,3 +1017,32 @@ def test_pairing_by_code_needs_the_apps_secret_and_works_once(app_env):
     assert paired.status_code == 201
     again = client.post("/hosts/pair", json={"routing_key": "rk-y", "hostname": "y"}, headers={"Authorization": f"Bearer {got['token']}"})
     assert again.status_code == 401  # the token works once
+
+
+def test_relay_address_follows_the_routers_public_address(app_env, monkeypatch):
+    """Casper's relay at home: NAT-PMP opens its port and reports the
+    router's public address, which becomes the relay address Macs get."""
+    import struct
+    import mirroring
+
+    monkeypatch.setenv("ST_RELAY_NATPMP_GATEWAY", "192.168.0.1")
+    monkeypatch.setenv("ST_RELAY_PUBLIC_PORT", "22067")
+    monkeypatch.setenv("ST_RELAY_ID", "RELAYID")
+    monkeypatch.delenv("ST_RELAY_URL", raising=False)
+    sent = []
+
+    def router(gateway, request, size):
+        sent.append(request)
+        if request[1] == 2:  # map TCP: ok
+            return struct.pack("!BBHIHHI", 0, 130, 0, 1, 22067, 22067, 3600)
+        return struct.pack("!BBHI", 0, 128, 0, 1) + bytes([71, 212, 2, 124])
+
+    monkeypatch.setattr(mirroring, "_natpmp", router)
+    mirroring._relay_public.clear()
+    assert mirroring.relays() == []  # nothing until the port is open
+    assert mirroring.open_relay_port() == "71.212.2.124"
+    assert mirroring.relays() == ["relay://71.212.2.124:22067/?id=RELAYID"]
+    assert struct.unpack("!BBHHHI", sent[0]) == (0, 2, 0, 22067, 22067, 3600)
+    monkeypatch.setattr(mirroring, "_natpmp", lambda g, r, n: struct.pack("!BBHIHHI", 0, 130, 2, 1, 0, 0, 0))  # router refuses
+    mirroring._relay_public.clear()
+    assert mirroring.open_relay_port() is None and mirroring.relays() == []

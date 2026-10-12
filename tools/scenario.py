@@ -175,26 +175,6 @@ def step_name_mac(p, ctx, *name):
     return f"{pretty} ({local})"
 
 
-def step_relay_dns(p, ctx):
-    """Points the VM at Casper's relay by its public address. This Mac runs
-    Tailscale, so the VM (using this Mac's DNS) would get the relay's tailnet
-    address, which it can't reach -- a quirk of testing here, not of Casper."""
-    relays = sorted({a.split("//")[1].split(":")[0] for a in CONF["deployment"].get("relays", [])})
-    lines = []
-    for name in relays:
-        ips = subprocess.run(["dig", "+short", name, "@1.1.1.1"], capture_output=True, text=True).stdout.split()
-        ips = [i for i in ips if i[0].isdigit()]
-        if ips:
-            lines.append(f"{ips[0]} {name}")
-    if not lines:
-        return "no relay to map"
-    pw = (CONFIG_DIR / "password").read_text().strip()
-    entries = "\\n".join(lines)
-    vm_exec(p["vm"], f"""echo {json.dumps(pw)} | sudo -S -p '' sh -c 'grep -v "casper relay" /etc/hosts > /tmp/h; printf "{entries} # casper relay\\n" >> /tmp/h; cat /tmp/h > /etc/hosts'
-        echo {json.dumps(pw)} | sudo -S -p '' dscacheutil -flushcache""")
-    return ", ".join(lines)
-
-
 def step_install_casper(p, ctx):
     url = CONF["deployment"]["download_url"]
     vm_exec(p["vm"], f"""
@@ -236,7 +216,6 @@ def step_publish_offering(p, ctx, gb="20"):
 
 STEPS = {
     "name_mac": step_name_mac,
-    "relay_dns": step_relay_dns,
     "install_casper": step_install_casper,
     "create_account": step_create_account,
     "pair": step_pair,

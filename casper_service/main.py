@@ -82,6 +82,9 @@ from models import (
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app):
+    # Keep Casper's relay reachable from the internet (see mirroring.relays).
+    if os.environ.get("ST_RELAY_NATPMP_GATEWAY"):
+        threading.Thread(target=mirroring.keep_relay_port_open, daemon=True).start()
     # The MCP transport's session manager needs a running task group (see
     # the MCP section at the bottom of this module).
     async with _mcp.session_manager.run():

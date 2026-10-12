@@ -68,20 +68,22 @@ services:
   # other directly (different home networks, strict NATs). Private: it
   # doesn't join the public relay pool (-pools=""), so only devices Casper
   # tells about it use it. It relays end-to-end-encrypted TLS between
-  # peers; it never sees file data. Published to the internet via Tailscale
-  # Funnel (raw TCP, port 10000) on the mini -- see docs/product/
-  # scenarios/mirroring.md.
+  # peers; it never sees file data. Reachable from the internet through the
+  # home router (port 22067, forwarded by NAT-PMP from casper_service);
+  # Tailscale Funnel can't carry relay sessions (it routes by TLS name).
   st-relay:
     image: syncthing/relaysrv:latest
     container_name: casper-st-relay
     restart: unless-stopped
     # -ext-address: what the relay tells peers to connect to for a session
-    # -- its public (Funnel) address, not the container's own port.
-    command: ["-pools=", "-listen=:22067", "-status-srv=", "-keys=/var/strelaysrv", "-ext-address=${ST_RELAY_EXT_ADDRESS:-}"]
+    # -- just its port (":22067"): peers use the address they reached it by.
+    command: ["-pools=", "-listen=:22067", "-status-srv=", "-keys=/var/strelaysrv", "-ext-address=${ST_RELAY_EXT_ADDRESS:-:22067}"]
     volumes:
       - st_relay_keys:/var/strelaysrv
     ports:
-      - "127.0.0.1:22067:22067"
+      # Published on the mini's network: the home router forwards this port
+      # to it (casper_service keeps that open with NAT-PMP).
+      - "22067:22067"
     networks:
       - casper-net
 

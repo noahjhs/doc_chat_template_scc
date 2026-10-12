@@ -54,10 +54,69 @@ def _device_for_host(db, host_id: int) -> dict | None:
 
 
 # --- Casper's relay ------------------------------------------------------------------------
+# --- Casper's relay, reachable from the internet through the home router ----------
+# The relay runs next to casper_service; the router forwards its port, kept
+# open with NAT-PMP (renewed well before each lease ends), which also tells
+# us the router's public address -- so if the ISP changes it, the relay
+# address handed to every Mac follows. (Tailscale Funnel can't carry relay
+# sessions: it routes by TLS name, and relay sessions don't send one.)
+RELAY_LEASE_SECONDS = 3600
+_relay_public: dict = {}
+
+
+def _natpmp(gateway: str, request: bytes, size: int) -> bytes | None:
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(3)
+    try:
+        s.sendto(request, (gateway, 5351))
+        return s.recvfrom(size)[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def open_relay_port() -> str | None:
+    """Asks the router (NAT-PMP) to forward the relay's port here, and
+    returns its public address -- or None if the router didn't agree."""
+    import socket
+    import struct
+
+    gateway, port = os.environ.get("ST_RELAY_NATPMP_GATEWAY", ""), int(os.environ.get("ST_RELAY_PUBLIC_PORT", "0") or 0)
+    if not gateway or not port:
+        return None
+    mapped = _natpmp(gateway, struct.pack("!BBHHHI", 0, 2, 0, port, port, RELAY_LEASE_SECONDS), 16)
+    if not mapped or len(mapped) < 16 or struct.unpack("!H", mapped[2:4])[0] != 0:
+        return None
+    addr = _natpmp(gateway, b"\x00\x00", 12)
+    if not addr or len(addr) < 12 or struct.unpack("!H", addr[2:4])[0] != 0:
+        return None
+    ip = socket.inet_ntoa(addr[8:12])
+    _relay_public.update(ip=ip, port=port)
+    return ip
+
+
+def keep_relay_port_open(logf=print):
+    """Background loop: renew the mapping every half lease."""
+    import time as _time
+
+    while True:
+        ip = open_relay_port()
+        logf(f"relay: port {'open at ' + ip if ip else 'NOT opened (router said no)'}")
+        _time.sleep(RELAY_LEASE_SECONDS // 2 if ip else 300)
+
+
 def relays() -> list[str]:
-    """Casper's own Syncthing relays (ST_RELAY_URL, comma-separated), for
-    peers that can't reach each other directly. Never the public pool."""
-    return [r.strip() for r in os.environ.get("ST_RELAY_URL", "").split(",") if r.strip()]
+    """Casper's own Syncthing relays, for peers that can't reach each other
+    directly: the home relay at the router's current public address (when
+    its port is open), plus any fixed ones in ST_RELAY_URL. Never the
+    public pool."""
+    out = []
+    if _relay_public.get("ip") and os.environ.get("ST_RELAY_ID"):
+        out.append(f"relay://{_relay_public['ip']}:{_relay_public['port']}/?id={os.environ['ST_RELAY_ID']}")
+    return out + [r.strip() for r in os.environ.get("ST_RELAY_URL", "").split(",") if r.strip()]
 
 
 # --- Casper's own catcher (the catcher of last resort) ----------------------------------
