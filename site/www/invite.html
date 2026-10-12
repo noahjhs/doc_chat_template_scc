@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;1,9..144,300&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"><title>You're invited — Casper</title></head><body><div class="wrap">
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;1,9..144,300&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"><title>You're invited — Casper</title><meta property="og:title" content="You're invited to Casper"><meta property="og:description" content="A friend has saved space for you on their computer, so your files stay safe."><meta property="og:site_name" content="Casper"></head><body><div class="wrap">
 <nav><a class="logo" href="/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C9.4 3 5 8 5 14.5V28l3.6-2.6L12 28l4-2.8L20 28l3.4-2.6L27 28V14.5C27 8 22.6 3 16 3z" fill="#2b1d14"/><circle cx="12.5" cy="14" r="1.8" fill="#f6efe4"/><circle cx="19.5" cy="14" r="1.8" fill="#f6efe4"/></svg> Casper</a><div class="links"><a href="/#how">How it works</a><a href="/#trust">Trust</a><a href="/#commons">The commons</a><a class="pill" href="${APP_URL}/signin">Sign in</a></div></nav>
 <section style="border:0;padding-top:48px">
 <div id="loading" class="muted">Opening your invitation…</div>
@@ -7,13 +7,17 @@
 <div class="eyebrow" id="eyebrow">You're invited</div>
 <h1 style="font-size:clamp(40px,6vw,64px)"><span id="hello">Welcome.</span><br><em id="joined">You've been invited to Casper.</em></h1>
 <p class="lede" id="gift"></p>
-<div class="cta" style="margin-bottom:56px"><div><a class="btn" id="begin" href="${APP_URL}/signup?start=guide">Begin setup with Casper's guide →</a></div>
-<div class="alt">Casper's guide is a friendly AI that sets everything up with you in a short chat — no technical steps.</div></div>
-<div class="two">
-<div class="panel"><h3>Already use an AI agent?</h3><p class="muted">Claude Code, Hermes, Codex… paste this, and it does the rest:</p>
-<div class="prompt"><code id="ap"></code><button data-copy="ap">Copy</button></div></div>
-<div class="panel"><h3>What you're joining</h3><p class="muted">Casper keeps your important folders mirrored on the computers of people you trust — continuously, with a month of history. Your files are encrypted on your Mac before they leave it, so <span class="who2"></span> can never read them. Either of you can end this at any time.</p></div>
+<p class="muted" style="margin:-16px 0 28px">How would you like to set up?</p>
+<div class="two choice">
+<div class="panel"><h3>With Casper's guide</h3>
+<p class="muted">A short chat that sets everything up with you. No technical steps.</p>
+<p><a class="btn" id="begin" href="${APP_URL}/signup?start=guide">Start with the guide</a></p></div>
+<div class="panel"><h3>With your own AI agent</h3>
+<p class="muted">Claude Code, Codex, Hermes… paste this, and it takes over.</p>
+<div class="prompt"><code id="ap"></code></div>
+<p><button class="btn" data-copy="ap">Copy for your agent</button></p></div>
 </div>
+<p class="muted small" style="margin-top:28px">Your files are encrypted on your Mac before they leave it, so <span class="who2"></span> can never read them.</p>
 </div></section>
 <footer><span>Casper — held by friends, read by no one.</span><span><a href="/download">Download</a> · <a href="${APP_URL}/guide">Guide</a> · Early alpha · macOS</span></footer></div><script>document.querySelectorAll("[data-copy]").forEach(b=>b.addEventListener("click",()=>{navigator.clipboard.writeText(document.getElementById(b.dataset.copy).innerText.trim());const t=b.innerText;b.innerText="Copied";setTimeout(()=>b.innerText=t,1500)}))</script>
 <script>

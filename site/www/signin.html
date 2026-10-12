@@ -46,9 +46,8 @@ async function connect() {
   Casper.pair();
   if (await waitForConnected(before)) {
     showStatus("This Mac is connected.");
-    // Carry on with the guide right here; any older guide tab goes quiet.
-    new BroadcastChannel("casper").postMessage("connected-elsewhere");
-    setTimeout(() => location.href = next + (next.includes("?") ? "&" : "?") + "connected=1", 700);
+    // The guide (this tab, or one already open) carries on by itself.
+    setTimeout(() => location.href = next, 700);
   } else {
     showStatus("Casper didn't connect.", "Make sure Casper is open on this Mac, then try again.",
                '<button class="btn" onclick="connect()">Try again</button>');

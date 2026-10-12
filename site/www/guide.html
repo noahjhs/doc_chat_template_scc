@@ -10,61 +10,84 @@
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
-let busy = false, msgs = [], announced = false;
-function bubble(role, text) {
-  const d = document.createElement("div"); d.className = "msg " + role;
-  d.innerHTML = (role === "assistant" ? '<span class="av">' + GHOST + "</span>" : "") + '<div class="body">' + Casper.render(text) + "</div>";
+let busy = false, rendered = -1, waitingNote = "";
+
+function bubble(role, html, extra = "") {
+  const d = document.createElement("div"); d.className = "msg " + role + " " + extra;
+  d.innerHTML = (role === "assistant" ? '<span class="av">' + GHOST + "</span>" : "") + '<div class="body">' + html + "</div>";
   $("log").appendChild(d); window.scrollTo(0, document.body.scrollHeight); return d;
 }
+const thinking = () => bubble("assistant", "<span></span><span></span><span></span>", "thinking");
+
+// Buttons replace typing: while there are choices, there's no text box.
 function setChoices(list) {
   $("choices").innerHTML = "";
+  const has = (list || []).length > 0;
+  $("f").classList.toggle("hide", has);
   (list || []).forEach((c, i) => {
-    const b = document.createElement("button"); b.className = i === 0 ? "btn" : "btn ghost"; b.innerText = c;
-    b.onclick = () => send(c); $("choices").appendChild(b);
+    const b = document.createElement("button"); b.className = i === 0 ? "btn" : "btn ghost";
+    b.innerText = typeof c === "string" ? c : c.label;
+    b.onclick = () => typeof c === "string" ? send(c) : act(c.action);
+    $("choices").appendChild(b);
   });
+  if (!has) $("t").focus();
 }
+
+// The server's history is the truth: render it (any tab, any source).
+async function refresh() {
+  let msgs;
+  try { msgs = (await Casper.api("/guide/history")).messages; } catch (e) { if (e.status === 401) location.replace("/signin"); return; }
+  if (msgs.length === rendered) return;
+  rendered = msgs.length; $("log").innerHTML = ""; waitingNote = "";
+  if (!msgs.length) bubble("assistant", Casper.render("Hi! I'm Casper's guide. Keep your files safe on a friend's computer, or offer space on yours?"));
+  msgs.forEach(m => bubble(m.role, Casper.render(m.text)));
+  const last = msgs[msgs.length - 1];
+  setChoices(last && last.role === "assistant" ? last.choices : []);
+}
+
 async function send(text) {
-  if (busy || !text.trim()) return; busy = true; setChoices([]);
-  bubble("user", text); msgs.push({ role: "user", text });
-  const thinking = bubble("assistant", "…"); thinking.classList.add("thinking");
-  try {
-    const r = await Casper.api("/guide/message", { method: "POST", body: { text } });
-    thinking.remove(); bubble("assistant", r.reply); msgs.push({ role: "assistant", text: r.reply }); setChoices(r.choices);
-  } catch (e) { thinking.remove(); bubble("assistant", e.message); }
-  busy = false; $("t").focus();
+  if (busy || !text.trim()) return; busy = true; setChoices([]); $("f").classList.add("hide");
+  bubble("user", Casper.render(text)); const t = thinking();
+  try { await Casper.api("/guide/message", { method: "POST", body: { text } }); }
+  catch (e) { t.remove(); bubble("assistant", Casper.render(e.message)); busy = false; $("f").classList.remove("hide"); return; }
+  busy = false; rendered = -1; await refresh();
 }
+
+// A button that does something on their Mac (e.g. open the folder chooser).
+async function act(action) {
+  setChoices([]); $("f").classList.add("hide");
+  try {
+    const r = await Casper.api("/guide/action", { method: "POST", body: { action } });
+    bubble("assistant", Casper.render(r.message), "note-bubble");
+    if (!r.opened) { rendered = -1; await refresh(); }
+  } catch (e) { bubble("assistant", Casper.render(e.message)); }
+}
+
+// Casper's state moved on (Mac connected, Mirror clicked...): the guide
+// carries on by itself -- whichever tab notices first; the rest just render.
+async function tick() {
+  if (busy) return;
+  try {
+    const st = await Casper.api("/guide/state");
+    if (st.count !== rendered) await refresh();
+    if (st.due) {
+      busy = true; const t = thinking();
+      try { await Casper.api("/guide/continue", { method: "POST" }); } finally { t.remove(); busy = false; }
+      rendered = -1; await refresh();
+    }
+  } catch (e) { /* offline for a moment: try again next tick */ }
+}
+
 $("f").addEventListener("submit", ev => { ev.preventDefault(); const t = $("t").value; $("t").value = ""; send(t); });
 $("signout").onclick = ev => { ev.preventDefault(); Casper.signOut(); location.href = "/signin"; };
 (async () => {
-  try { msgs = (await Casper.api("/guide/history")).messages; } catch (e) { if (e.status === 401) return location.replace("/signin"); }
-  msgs.forEach(m => bubble(m.role, m.text));
-  const last = msgs[msgs.length - 1];
-  if (last && last.choices) setChoices(last.choices);
+  await refresh();
   const invite = Casper.param("invite");
-  if (invite && !msgs.some(m => m.text.includes(invite))) send("A friend invited me to Casper -- my invite code is " + invite + ".");
-  else if (Casper.param("connected") && msgs.length) announce();
-  else if (!msgs.length) bubble("assistant", "Hi! I'm Casper's guide. Keep your files safe on a friend's computer, or offer space on yours?");
-  // When this person's Mac connects (they opened Casper and signed in, in
-  // another tab or here), carry on without them having to say so.
-  // Connected through Casper's sign-in tab: that tab carries the guide on,
-  // so this one steps aside instead of saying it twice.
-  let poll;
-  new BroadcastChannel("casper").onmessage = e => {
-    if (e.data === "connected-elsewhere") { announced = true; clearInterval(poll); setChoices([]); bubble("assistant", "Continued in the newer tab."); $("f").classList.add("hide"); }
-  };
-  let seen = await Casper.connectedHosts();
-  poll = setInterval(async () => {
-    const now = await Casper.connectedHosts();
-    if (now && seen && [...now].some(id => !seen.has(id))) announce();
-    if (now) seen = now;
-  }, 4000);
+  if (invite) {
+    history.replaceState(null, "", location.pathname);
+    const msgs = (await Casper.api("/guide/history")).messages;
+    if (!msgs.some(m => m.text.includes(invite))) await send("A friend invited me to Casper -- my invite code is " + invite + ".");
+  }
+  setInterval(tick, 3000);
 })();
-async function announce() {
-  // Once per connection, across tabs.
-  const mark = "casper_connected_announced", now = Date.now();
-  if (announced || !msgs.length || now - Number(localStorage.getItem(mark) || 0) < 60000) return;
-  announced = true; localStorage.setItem(mark, String(now));
-  await waitIdle(); send("My Mac is connected.");
-}
-const waitIdle = () => new Promise(r => { const i = setInterval(() => { if (!busy) { clearInterval(i); r(); } }, 300); });
 </script></body></html>

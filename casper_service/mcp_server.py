@@ -76,7 +76,7 @@ This is your own know-how: act like you've always known it.
   give the one-line plan, act (preview=false) only on their yes.
 - Never pick a folder or a friend for them; suggest one ("Documents?").
 - Their own confirmations (starting a mirror) happen in a Casper dialog on
-  their Mac, or in Telegram, never by you. Say "Click Allow in the Casper
+  their Mac, or in Telegram, never by you. Say "Click Mirror in the Casper
   dialog." Never say it's protected until protection_status says so.
 - Requests from other people (list_approvals): read each one plainly, ask,
   then record exactly their answer (decide_approval).

@@ -102,6 +102,7 @@ def test_notify_sends_buttons_only_to_linked_opted_in_users(app_env, monkeypatch
 
 # --- Shared helpers for the scenario tests ---------------------------------------
 import json  # noqa: E402
+import urllib.parse  # noqa: E402
 
 from fake_daemon import FakeDaemon  # noqa: E402
 
@@ -467,11 +468,14 @@ def test_invite_sent_to_inviters_telegram_with_a_share_button(app_env, monkeypat
         sent = []
         monkeypatch.setattr(main.requests, "post", lambda url, json=None, timeout=None: sent.append(json) or _Ok())
         out = _mcp(client, sam_agent, "create_invite", quota_gb=5, for_whom="Noah", group="Mutual Aid", send_telegram=True, preview=False)
-        assert "sent to your Telegram to forward" in out
+        assert "in your Telegram: tap Send to Noah there" in out
         (msg,) = sent
-        assert msg["chat_id"] == "42" and "Hi Noah! I'm inviting you to join 'Mutual Aid' on Casper" in msg["text"]
-        share = msg["reply_markup"]["inline_keyboard"][0][0]
-        assert share["text"] == "Share" and share["url"].startswith("https://t.me/share/url?url=https%3A%2F%2Fwww.example%2Finvite%23CASPER-")
+        assert msg["chat_id"] == "42" and msg["text"] == "Your invite for Noah is ready."
+        button = msg["reply_markup"]["inline_keyboard"][0][0]
+        assert button["text"] == "Send to Noah"
+        shared = urllib.parse.parse_qs(urllib.parse.urlparse(button["url"]).query)
+        assert shared["url"][0].startswith("https://www.example/invite#CASPER-")
+        assert shared["text"][0] == "Hi Noah! I've saved space for you on my computer, so your files stay safe. Join me in Mutual Aid on Casper:"
 
 
 def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
@@ -503,7 +507,8 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         assert to == "riley@example.com" and subject == "sam invited you to join Mutual Aid on Casper"
         assert "Welcome, Riley." in text and "join \u2018Mutual Aid.\u2019" in text and "https://www.example/invite#" in html
         code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
-        assert f"https://www.example/invite#{code}" in html and "agents.md" in text and code in text  # both paths
+        assert f"https://www.example/invite#{code}" in html and f"https://www.example/invite#{code}" in text
+        assert "agents.md" not in text and "agent" not in html.lower()  # one call to action; the page holds the choices
 
         # The site's invite page reads what it offers, without signing in.
         info = client.get("/invites/info", params={"code": code})
@@ -529,7 +534,7 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
 
         # Undo: cancelled invites stop working; ending space is one call.
         out2 = _mcp(client, sam_agent, "create_invite", quota_gb=5, preview=False)
-        assert "to join 'Mutual Aid'" in out2  # their one group is the default
+        assert "Join me in Mutual Aid on Casper" in out2  # their one group is the default
         code2 = re.search(r"CASPER-[A-Z2-9-]{14}", out2).group(0)
         invite_id = re.findall(r"\[invite (\d+)\]", _mcp(client, sam_agent, "my_casper"))[-1]
         assert "Cancelled" in _mcp(client, sam_agent, "revoke", kind="invite", id_or_name=invite_id)
@@ -912,3 +917,62 @@ def test_guide_cant_use_another_steps_tools(app_env):
     assert "mirror_folder" not in seen_tools[0] and "redeem_invite" not in seen_tools[0]
     assert any("Not now" in m.get("content", "") for m in messages if m["role"] == "tool")
     assert messages[-1]["_stage"] == "install"
+
+
+def test_guide_carries_on_by_itself_when_caspers_state_moves_on(app_env, monkeypatch):
+    """Noah's Mac connected and the guide didn't notice until told. Now the
+    page asks /guide/continue when a step is due; it runs once, as news from
+    Casper the person never sees, and Casper's own line for the new step."""
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    monkeypatch.setenv("NOUS_API_KEY", "k")
+    calls = []
+
+    class Model:
+        def create(self, **kw):
+            calls.append(kw["messages"][-1]["content"])
+            msg = type("M", (), {"content": "Noted.", "tool_calls": None})()
+            return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+
+    monkeypatch.setattr(main.guide, "client_from_env", lambda: type("Cl", (), {"chat": type("Ch", (), {"completions": Model()})()})())
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", for_whom="Riley", preview=False)).group(0)
+        _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        with main.get_db() as db:  # the guide last spoke while Riley's Mac wasn't connected
+            main.guide.save_new(_user_id(main, "riley"), 0, [
+                {"role": "user", "content": f"My invite code is {code}."},
+                {"role": "assistant", "content": "Download Casper and open it.", "_stage": "install"}])
+        _pair(client, riley, "rk-riley", "riley-mac", sd.url)  # ...now it is
+        st = client.get("/guide/state", headers=riley).json()
+        assert st["stage"] == "choose_folder" and st["spoken"] == "install" and st["due"]
+        out = client.post("/guide/continue", headers=riley).json()
+        assert out["continued"] and out["reply"].endswith("Which folder should Casper keep safe? Documents is a good start.")
+        assert out["choices"][1] == {"label": "Another folder…", "action": "choose_folder"}
+        assert "Their Mac is connected now." in calls[-1]
+        assert not client.post("/guide/continue", headers=riley).json()["continued"]  # once per step
+        shown = client.get("/guide/history", headers=riley).json()["messages"]
+        assert not any("From Casper" in m["text"] for m in shown)  # the news itself isn't shown
+
+
+def test_another_folder_opens_the_macs_own_chooser_and_the_guide_carries_on(app_env, monkeypatch):
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    asked, news = [], []
+    monkeypatch.setattr(main, "_guide_reply", lambda uid, text, event=False, only_if=None: news.append((uid, text, event)) or ("", []))
+    with client, FakeDaemon(respond_with=lambda b: asked.append(b) or _ok()) as sd:
+        _, riley = _signup(client, "riley")
+        device = _pair(client, riley, "rk-riley", "riley-mac", sd.url)
+        out = client.post("/guide/action", json={"action": "choose_folder"}, headers=riley).json()
+        assert out == {"opened": True, "message": "Choose a folder in the window Casper opened on your Mac."}
+        (req,) = [b for b in asked if b.get("action") == "mirror_choose_folder"]
+        # The person picks ~/Projects in the Mac's panel; Casper reports it.
+        assert client.post("/hosts/folder-chosen", json={"request_id": req["approval_id"], "path": "Projects", "bytes": 2_000_000},
+                           headers=device).status_code == 200
+        for _ in range(50):
+            if news:
+                break
+            time.sleep(0.05)
+        assert news[0][0] == _user_id(main, "riley") and news[0][2] is True and "They chose the folder Projects" in news[0][1]
+        # The same request can't be answered twice, or by someone else.
+        assert client.post("/hosts/folder-chosen", json={"request_id": req["approval_id"], "cancelled": True}, headers=device).status_code == 404

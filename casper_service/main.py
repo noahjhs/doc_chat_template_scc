@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import urllib.parse
+from typing import Callable
 from datetime import datetime, timezone
 
 import bcrypt
@@ -2397,38 +2398,36 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
         return f"Can't: {e.message}"
     url = f"{_public_base_url()}/agents.md"
     prompt = f"Set me up with Casper using {url} -- my invite code is {code}"
-    gift = {
-        "mirror_space": f"room for {quota_gb:g} GB of your folders to be mirrored on my computer with Casper -- kept up to date as you work, with 30 days of history",
-        "catcher_space": "a catcher on my always-on computer with Casper -- it holds your newest changes while your mirrors are asleep",
-    }.get(kind, f"{quota_gb:g} GB of backup space for you on my computer with Casper")
     page = _invite_page_url(code)
-    joining = f" to join '{group}'" if group else ""
-    message = (
-        f"{'Hi ' + for_whom + '! ' if for_whom else ''}I'm inviting you{joining} on Casper. I've set aside {gift} -- your files get encrypted "
-        f"before they leave your machine, so I can't read them. "
-        + (f"Start here: {page} -- or, if you use an AI agent (e.g. Claude Code), tell it: \"{prompt}\". " if page
-           else f"To use it, tell your AI agent (e.g. Claude Code): \"{prompt}\". ")
-        + f"(From {me}. It's yours until you're set up; if you don't start within {trust.INVITE_TTL_DAYS} days, it lapses.)"
-    )
+    # One short note and one link: the invite page holds the choices (Casper's
+    # guide, or their own agent) and the details.
+    hello = f"Hi {for_whom}! " if for_whom else ""
+    into = f"Join me in {group} on Casper" if group else "Join me on Casper"
+    message = (f"{hello}I've saved space for you on my computer, so your files stay safe. {into}:\n{page}" if page
+               else f"{hello}I've saved space for you on my computer with Casper. Tell your AI agent: \"{prompt}\"")
     sent, problems, channels = [], [], []
     if email:
         third = {"mirror_space": f"{quota_gb:g} GB on their computer to keep your folders safe, with 30 days of history",
                  "catcher_space": "their always-on computer as a catcher for your newest changes"}.get(kind, f"{quota_gb:g} GB of backup space")
         try:
-            mailer.send(email, *mailer.invite_email(for_whom, me, group, third, page, prompt))
+            mailer.send(email, *mailer.invite_email(for_whom, me, group, third, page))
             sent.append(f"emailed to {email}")
             channels.append("email")
         except Exception as e:
             print(f"invite email to user {user_id}'s invitee failed: {e}")
             problems.append("email")
     if send_telegram:
-        share = "https://t.me/share/url?" + urllib.parse.urlencode({"url": page or url, "text": message})
+        # A bot can't message someone who's never talked to it, so the invite
+        # goes from the inviter's own Telegram: one tap on "Send to Noah"
+        # picks the chat and sends it, from them.
+        share_text = message.rsplit("\n", 1)[0] if page else message
+        share = "https://t.me/share/url?" + urllib.parse.urlencode({"url": page or url, "text": share_text})
         try:
             r = requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage", json={
-                "chat_id": profile.telegram_chat_id, "text": f"Your invite for {who} -- forward this message, or tap Share:\n\n{message}",
-                "reply_markup": {"inline_keyboard": [[{"text": "Share", "url": share}]]}}, timeout=10)
+                "chat_id": profile.telegram_chat_id, "text": f"Your invite for {who} is ready.",
+                "reply_markup": {"inline_keyboard": [[{"text": f"Send to {who}", "url": share}]]}}, timeout=10)
             r.raise_for_status()
-            sent.append("sent to your Telegram to forward")
+            sent.append(f"in your Telegram: tap Send to {who} there")
             channels.append("telegram")
         except Exception as e:
             print(f"invite Telegram copy for user {user_id} failed: {e}")
@@ -2838,15 +2837,6 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
     if use_casper_catcher and catcher_grant:
         use_casper_catcher = False
     where = ", ".join(f"{g['owner']}/{g['host']}" for g in mirror_grants)
-    catch = (
-        f" While they're all asleep, new changes are caught by {catcher_grant['owner']}/{catcher_grant['host']}." if catcher_grant
-        else " While they're all asleep, new changes are caught by Casper's own server (encrypted; only until a friend can catch for you)." if use_casper_catcher
-        else " If they're all asleep at once, recent changes wait on this Mac until one wakes up."
-    )
-    plan = (
-        f"Mirror {label} ({backups.human(size)}) from {source_host} to {where}: every change is encrypted here and reaches them within "
-        f"seconds while both computers are on, with 30 days of history (every version for a week, then daily). They can never read it.{catch}"
-    )
     if preview:  # the one-line version; the Casper dialog shows the full plan
         short_catch = (f", catcher {catcher_grant['owner']}/{catcher_grant['host']}" if catcher_grant
                        else ", Casper's catcher" if use_casper_catcher else ", no catcher")
@@ -2858,10 +2848,11 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
     approval_id = create_approval(user_id, user_id, "mirror_consent", description, {"folder_id": folder_id})
     with get_db() as db:
         db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
-    backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"{plan}\n\nStart mirroring?")
+    # The dialog says just the decision (Mirror / Cancel); the plan was already shown.
+    backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"Start mirroring {label}?")
     return (
         f"NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
-        "click Allow (or answer in Telegram). You can't confirm it for them. Once they say they've allowed it, check "
+        "click Mirror (or answer in Telegram). You can't confirm it for them. Once they say they have, check "
         "protection_status before telling them they're protected."
     )
 
@@ -2877,7 +2868,7 @@ def _status_text(db, f) -> str:
     if cd:
         names[cd["device_id"]] = "Casper's catcher"
     if f["status"] == "awaiting_consent":
-        return f"{f['label']}: NOT protected yet, waiting for the person to click Allow in the Casper dialog (or Telegram)."
+        return f"{f['label']}: NOT protected yet, waiting for the person to click Mirror in the Casper dialog (or Telegram)."
     if f["restore_host_id"] and st.get("restoring"):
         state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
         return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
@@ -3068,27 +3059,56 @@ def _guide_lock(user_id: int) -> threading.Lock:
         return _guide_locks.setdefault(user_id, threading.Lock())
 
 
-def _guide_reply(user_id: int, text: str) -> tuple[str, list[dict]]:
+def _guide_download_url() -> str:
+    return os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos"
+
+
+def _guide_stage(user_id: int, messages: list[dict]) -> "guide.Stage":
+    return guide.stage_for(_guide_facts(user_id, messages), messages, _guide_download_url())
+
+
+def _spoken_stage(history: list[dict]) -> str | None:
+    last = next((m for m in reversed(history) if m.get("role") == "assistant" and m.get("_stage")), None)
+    return last["_stage"] if last else None
+
+
+def _guide_reply(user_id: int, text: str, event: bool = False,
+                 only_if: Callable[[list[dict]], str | None] | None = None) -> tuple[str, list[dict]]:
     """One turn with the guide, serialized per person (web and Telegram
-    share the conversation)."""
+    share the conversation). event: news from Casper rather than the person.
+    only_if: checked under the lock (so two tabs can't both trigger one turn)
+    -- None to skip, or the text to say."""
     if not os.environ.get("NOUS_API_KEY"):
         return "Casper's guide isn't available on this deployment yet.", []
-    prompt = guide.system_prompt(
-        os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos",
-    )
-    download_url = os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos"
+    prompt = guide.system_prompt(_guide_download_url())
     with _guide_lock(user_id):
         history = guide.load_history(user_id)
+        if only_if is not None:
+            text = only_if(history)
+            if text is None:
+                return "", []
         before = len(history)
         try:
             reply, messages = guide.run(guide.client_from_env(), os.environ.get("GUIDE_MODEL", "deepseek/deepseek-v4.1-flash"),
                                         _mcp_services, user_id, history, text[:4000], prompt,
-                                        stage_fn=lambda msgs: guide.stage_for(_guide_facts(user_id, msgs), msgs, download_url))
+                                        stage_fn=lambda msgs: _guide_stage(user_id, msgs), event=event)
         except Exception as e:  # the model provider being down shouldn't 500 the page
             print(f"guide failed for user {user_id}: {e}")
             return "Sorry -- I'm having trouble thinking right now. Please try again in a minute.", []
         guide.save_new(user_id, before, messages)
     return reply, messages
+
+
+# What moved the person on to each step -- the guide's cue to carry on by itself.
+_STEP_NEWS = {
+    "install": "Their invite is accepted.",
+    "choose_folder": "Their Mac is connected now.",
+    "consent": "A Casper dialog is waiting on their Mac.",
+    "syncing": "They clicked Mirror; the first copy is under way.",
+    "recovery_kit": "Their folder is protected now.",
+    "give_back": "Their recovery kit is done.",
+    "open": "Setup is complete.",
+}
 
 
 _CODE = re.compile(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", re.I)
@@ -3151,6 +3171,93 @@ def guide_message(body: dict, authorization: str = Header(default="")):
     return {"reply": reply, "choices": (messages[-1].get("_choices") or []) if messages else []}
 
 
+@app.get("/guide/state")
+def guide_state(authorization: str = Header(default="")):
+    """Where the person is (their current step) and whether the guide has
+    spoken for it yet -- the page asks the guide to carry on when not."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    history = guide.load_history(user_id)
+    stage, spoken = _guide_stage(user_id, history).name, _spoken_stage(history)
+    return {"stage": stage, "spoken": spoken, "count": len(guide.visible(history)),
+            "due": bool(history) and stage != spoken and stage in _STEP_NEWS}
+
+
+@app.post("/guide/continue")
+def guide_continue(authorization: str = Header(default="")):
+    """Casper's state moved on (their Mac connected, they clicked Mirror...):
+    the guide carries on without the person having to say so. Once per step,
+    whichever tab asks first."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    def due(history):
+        stage = _guide_stage(user_id, history).name
+        if history and stage != _spoken_stage(history) and stage in _STEP_NEWS:
+            return _STEP_NEWS[stage]
+        return None
+
+    reply, messages = _guide_reply(user_id, "", event=True, only_if=due)
+    if not messages:
+        return {"continued": False}
+    return {"continued": True, "reply": reply, "choices": messages[-1].get("_choices") or []}
+
+
+_folder_requests: dict[str, tuple[int, str]] = {}  # request id -> (user, where to reply: "web" or a Telegram chat id)
+
+
+def _choose_folder(user_id: int, reply_to: str = "web") -> str:
+    """Opens the folder panel on the person's own Mac; their pick comes back
+    through /hosts/folder-chosen."""
+    hosts = [h for h in _mcp_list_hosts(user_id) if h["role"] == "owner" and h["connected"]]
+    host_id = _own_host_id(user_id, hosts[0]["host"]) if hosts else None
+    config = _host_config(user_id, host_id) if host_id else None
+    if config is None:
+        return "Your Mac isn't connected right now."
+    request_id = secrets.token_urlsafe(12)
+    _folder_requests[request_id] = (user_id, reply_to)
+    r = backups.daemon_call(config, "mirror_choose_folder", approval_id=request_id)
+    if not r.get("success"):
+        _folder_requests.pop(request_id, None)
+        return "Casper on your Mac needs an update to choose a folder. Name the folder instead."
+    return ""
+
+
+@app.post("/guide/action")
+def guide_action(body: dict, authorization: str = Header(default="")):
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    if body.get("action") != "choose_folder":
+        raise HTTPException(status_code=400, detail="Unknown action.")
+    problem = _choose_folder(user_id)
+    return {"opened": not problem, "message": problem or "Choose a folder in the window Casper opened on your Mac."}
+
+
+@app.post("/hosts/folder-chosen")
+def folder_chosen(body: dict, authorization: str = Header(default="")):
+    with get_db() as db:
+        attached = _resolve_attached(db, authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    req = _folder_requests.pop(str(body.get("request_id", "")), None)
+    if req is None or req[0] != attached["user_id"]:
+        raise HTTPException(status_code=404, detail="No such request.")
+    user_id, reply_to = req
+    if body.get("cancelled"):
+        news = "They closed the folder chooser without picking a folder."
+    elif body.get("outside_home"):
+        news = "They picked a folder outside their home folder; Casper only keeps folders inside it. Ask them to choose another."
+    else:
+        news = f"They chose the folder {body.get('path')} ({backups.human(int(body.get('bytes') or 0))}). Preview mirroring it."
+
+    def work():
+        reply, messages = _guide_reply(user_id, news, event=True)
+        if reply_to != "web" and messages:
+            _telegram_guide_send(reply_to, reply, messages)
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
 @app.get("/guide/history")
 def guide_history(authorization: str = Header(default="")):
     with get_db() as db:
@@ -3158,21 +3265,26 @@ def guide_history(authorization: str = Header(default="")):
     return {"messages": guide.visible(guide.load_history(user_id))}
 
 
+def _telegram_guide_send(chat_id: str, reply: str, messages: list[dict]):
+    reply = guide.plain(reply)
+    choices = (messages[-1].get("_choices") or []) if messages else []
+    if not choices:
+        _telegram_send_text(chat_id, reply[:4000])
+        return
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    buttons = [{"text": c["label"], "callback_data": f"guide:act:{c['action']}"[:64]} if isinstance(c, dict)
+               else {"text": c, "callback_data": f"guide:{c}"[:64]} for c in choices]
+    try:  # the guide's buttons, as inline buttons; a tap is that answer (or that action)
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
+            "chat_id": chat_id, "text": reply[:4000], "reply_markup": {"inline_keyboard": [buttons]}}, timeout=10)
+    except requests.RequestException as e:
+        print(f"Couldn't send Telegram message to chat {chat_id}: {e}")
+
+
 def _guide_via_telegram(chat_id: str, user_id: int, text: str):
     def work():
         reply, messages = _guide_reply(user_id, text)
-        reply = guide.plain(reply)
-        choices = (messages[-1].get("_choices") or []) if messages else []
-        if not choices:
-            _telegram_send_text(chat_id, reply[:4000])
-            return
-        token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        try:  # the guide's buttons, as inline buttons; a tap is that answer
-            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-                "chat_id": chat_id, "text": reply[:4000],
-                "reply_markup": {"inline_keyboard": [[{"text": c, "callback_data": f"guide:{c}"[:64]} for c in choices]]}}, timeout=10)
-        except requests.RequestException as e:
-            print(f"Couldn't send Telegram message to chat {chat_id}: {e}")
+        _telegram_guide_send(chat_id, reply, messages)
 
     threading.Thread(target=work, daemon=True).start()
 

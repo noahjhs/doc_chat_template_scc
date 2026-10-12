@@ -169,11 +169,12 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         return Stage("choose_folder", "Ask only which folder to keep safe, suggesting Documents. On their answer, preview "
                      f"mirror_folder (source_host: their Mac from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
                      "Give the one-line plan ending \"Start?\", and start it on their yes.", ("mirror_folder",),
-                     ("Documents", "Another folder"), say="Which folder should Casper keep safe? Documents is a good start.")
+                     ("Documents", {"label": "Another folder…", "action": "choose_folder"}),
+                     say="Which folder should Casper keep safe? Documents is a good start.")
     if facts.folder == "awaiting_consent":
-        return Stage("consent", "A Casper dialog is waiting on their Mac. Say only: \"Click Allow in the Casper dialog on your "
+        return Stage("consent", "A Casper dialog is waiting on their Mac. Say only: \"Click Mirror in the Casper dialog on your "
                      "Mac.\" When they say it's done, check protection_status.", (), ("Done",),
-                     say="Click Allow in the Casper dialog on your Mac.")
+                     say="Click Mirror in the Casper dialog on your Mac.")
     if facts.folder == "active" and not facts.protected:
         return Stage("syncing", "The first copy is on its way. Check protection_status; say in one line how far along it is, "
                      "or \"Protected.\" once it is.")
@@ -232,14 +233,19 @@ def _tools_for(stage: Stage | None) -> list[dict]:
 
 def run(client, model: str, services, user_id: int, history: list[dict], user_text: str, prompt: str,
         on_tool: Callable[[str, dict], None] | None = None,
-        stage_fn: Callable[[list[dict]], Stage] | None = None) -> tuple[str, list[dict]]:
+        stage_fn: Callable[[list[dict]], Stage] | None = None, event: bool = False) -> tuple[str, list[dict]]:
     """One person-turn: the model may call tools for several rounds before
     answering. Returns (reply, the new history including this turn); the
     final assistant message carries any buttons as "_choices" and its step
     as "_stage". stage_fn (messages -> Stage) gates the turn: the current
     step's instruction and only its tools, re-checked after every round so
     a step that just completed hands straight on to the next."""
-    messages = list(history) + [{"role": "user", "content": user_text}]
+    # An event is news from Casper itself (their Mac connected, a folder was
+    # chosen) -- the guide's cue to carry on; the person never sees it.
+    said = {"role": "user", "content": f"(From Casper, not the person: {user_text})" if event else user_text}
+    if event:
+        said["_event"] = True
+    messages = list(history) + [said]
     proposed = False
     previewed: set[str] = set()  # tools previewed in this turn: acting on one needs the person's answer first
     acted = False  # something changed this turn (a confirmed action)
@@ -318,7 +324,8 @@ def save_new(user_id: int, before: int, messages: list[dict]):
 def visible(messages: list[dict]) -> list[dict]:
     """What a person sees: their messages and the guide's replies."""
     shown = [{"role": m["role"], "text": m["content"], **({"choices": m["_choices"]} if m.get("_choices") else {})}
-             for m in messages if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")]
+             for m in messages if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")
+             and not m.get("_event")]
     for m in shown[:-1]:  # only the latest message's buttons still apply
         m.pop("choices", None)
     return shown
