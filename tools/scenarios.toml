@@ -1,7 +1,9 @@
 # Test scenarios for tools/scenario.py: personas, checkpoints, scenarios.
 #
 # A persona is one test person: their own VM, started from a snapshot, and
-# their dev account. Snapshots hold only what's local to a Mac (apps,
+# their dev accounts -- `accounts` lists the names (shell-style patterns)
+# that belong to them, so accounts made up during a walkthrough
+# (noah_walkthrough) are cleared by the next reset too. Snapshots hold only what's local to a Mac (apps,
 # Gmail/Telegram/Claude sign-ins) -- never anything tied to a Casper account.
 # A checkpoint is a recipe: reset the persona's VM from its snapshot, delete
 # their dev account, then replay steps to reach a known point. `extends`
@@ -26,11 +28,13 @@ noah-base-claude = "noah-base plus Claude Code, installed and signed in."
 vm = "riley-mac"
 snapshot = "riley-base"
 username = "riley"
+accounts = ["riley", "riley_*"]  # every reset deletes these (names made up during a walkthrough too)
 
 [personas.noah]  # uses the Principal's own Telegram and Gmail (noah-base)
 vm = "noah-mac"
 snapshot = "noah-base"
 username = "noah"
+accounts = ["noah", "noah_*"]
 
 [checkpoints.riley-before-publish]
 persona = "riley"

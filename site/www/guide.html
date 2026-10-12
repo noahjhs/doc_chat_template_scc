@@ -46,17 +46,24 @@ $("signout").onclick = ev => { ev.preventDefault(); Casper.signOut(); location.h
   else if (!msgs.length) bubble("assistant", "Hi! I'm Casper's guide. Keep your files safe on a friend's computer, or offer space on yours?");
   // When this person's Mac connects (they opened Casper and signed in, in
   // another tab or here), carry on without them having to say so.
-  const bc = new BroadcastChannel("casper");
-  bc.onmessage = e => { if (e.data === "connected?") { bc.postMessage("guide-here"); announce(); } };
+  // Connected through Casper's sign-in tab: that tab carries the guide on,
+  // so this one steps aside instead of saying it twice.
+  let poll;
+  new BroadcastChannel("casper").onmessage = e => {
+    if (e.data === "connected-elsewhere") { announced = true; clearInterval(poll); setChoices([]); bubble("assistant", "Continued in the newer tab."); $("f").classList.add("hide"); }
+  };
   let seen = await Casper.connectedHosts();
-  setInterval(async () => {
+  poll = setInterval(async () => {
     const now = await Casper.connectedHosts();
     if (now && seen && [...now].some(id => !seen.has(id))) announce();
     if (now) seen = now;
   }, 4000);
 })();
 async function announce() {
-  if (announced || !msgs.length) return; announced = true;
+  // Once per connection, across tabs.
+  const mark = "casper_connected_announced", now = Date.now();
+  if (announced || !msgs.length || now - Number(localStorage.getItem(mark) || 0) < 60000) return;
+  announced = true; localStorage.setItem(mark, String(now));
   await waitIdle(); send("My Mac is connected.");
 }
 const waitIdle = () => new Promise(r => { const i = setInterval(() => { if (!busy) { clearInterval(i); r(); } }, 300); });

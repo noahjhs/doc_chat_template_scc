@@ -15,7 +15,7 @@
     tools/scenario.py uncapture <checkpoint>  forget a capture: back to replaying its steps
 
 How it works: each persona's VM is cloned fresh from a local snapshot
-(copy-on-write, instant), their dev account is deleted, and the checkpoint's
+(copy-on-write, instant), their dev accounts are deleted, and the checkpoint's
 steps are replayed. A captured checkpoint is restored instead: its VM
 snapshot (cp-<checkpoint>) and its server state, exported at the same moment
 -- so tweaks made by hand are kept. Steps are replayed -- inside the VM through the Tart guest agent (`tart
@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -236,6 +237,22 @@ def checkpoint_plan(name: str) -> tuple[dict, list[str]]:
 CAPTURES = CONFIG_DIR / "captures"
 
 
+def persona_accounts(persona: dict) -> list[str]:
+    """Every dev account that's this persona's right now: the names matching
+    its `accounts` patterns (default: just its username)."""
+    names: set[str] = set()
+    for pattern in persona.get("accounts", [persona["username"]]):
+        names.update(dev("GET", "/dev/users?" + urllib.parse.urlencode({"glob": pattern}))["usernames"])
+    return sorted(names)
+
+
+def delete_accounts(persona: dict) -> list[str]:
+    names = persona_accounts(persona)
+    for name in names:
+        dev("DELETE", f"/dev/users/{urllib.parse.quote(name)}")
+    return names
+
+
 def capture_of(checkpoint: str) -> dict | None:
     f = CAPTURES / f"{checkpoint}.json"
     return json.loads(f.read_text()) if f.exists() else None
@@ -256,7 +273,9 @@ def reset_checkpoint(name: str):
     if at is not None:
         cp = chain[at][0]
         cap = capture_of(cp)
-        dev("POST", "/dev/users/import", {"exports": [cap["export"]]})
+        delete_accounts(persona)  # including ones made since the capture
+        exports = cap.get("exports") or [cap["export"]]
+        dev("POST", "/dev/users/import", {"exports": exports})
         say(who, f"server state restored from the {cp} capture ({cap['captured_at'][:16]})")
         say(who, f"{persona['vm']}: from {cap['snapshot']}, starting…")
         fresh_vm({**persona, "snapshot": cap["snapshot"]})
@@ -264,8 +283,8 @@ def reset_checkpoint(name: str):
         if any("install_casper" in s for _, steps_ in chain[:at + 1] for s in steps_):
             steps = ["install_casper"] + steps  # keep the app current; its sign-in survives
     else:
-        gone = dev("DELETE", f"/dev/users/{who}")
-        say(who, "dev account deleted" if gone.get("existed") else "no dev account yet")
+        gone = delete_accounts(persona)
+        say(who, f"dev accounts deleted: {', '.join(gone)}" if gone else "no dev accounts yet")
         say(who, f"{persona['vm']}: fresh from {persona['snapshot']}, starting…")
         fresh_vm(persona)
         steps = [s for _, steps in chain for s in steps]
@@ -351,7 +370,7 @@ def describe(name: str) -> str:
         out = [f"{indent}{cp}: {CONF['checkpoints'][cp]['about']}",
                f"{indent}  persona  {persona['username']} (VM {persona['vm']}, dev account {persona['username']})",
                f"{indent}  starts   {snapshot_line(persona['snapshot'])}",
-               f"{indent}  then     delete the dev account, and:"]
+               f"{indent}  then     delete their dev accounts ({', '.join(persona.get('accounts', [persona['username']]))}), and:"]
         chain = checkpoint_chain(cp)
         at = max((i for i, (c, _) in enumerate(chain) if capture_of(c)), default=None)
         if at is not None:
@@ -471,7 +490,7 @@ def capture(name: str) -> int:
     for _, p in personas:
         say(p["username"], f"{p['vm']}: {shutdown_vm(p['vm'])}")
     when = time.strftime("%Y-%m-%dT%H:%M:%S")
-    exports = {cp: dev("GET", f"/dev/users/{p['username']}/export") for cp, p in personas}
+    exports = {cp: [dev("GET", f"/dev/users/{urllib.parse.quote(n)}/export") for n in persona_accounts(p)] for cp, p in personas}
     CAPTURES.mkdir(parents=True, exist_ok=True)
     os.chmod(CAPTURES, 0o700)
     for cp, p in personas:
@@ -480,7 +499,7 @@ def capture(name: str) -> int:
         tart("clone", p["vm"], snap)
         f = CAPTURES / f"{cp}.json"
         f.write_text(json.dumps({"checkpoint": cp, "persona": p["username"], "captured_at": when, "group": when,
-                                 "snapshot": snap, "export": exports[cp]}))
+                                 "snapshot": snap, "exports": exports[cp]}))
         os.chmod(f, 0o600)  # holds the persona's credential hashes
         say(p["username"], f"captured {cp}: VM as {snap}, plus its server state")
     for _, p in personas:

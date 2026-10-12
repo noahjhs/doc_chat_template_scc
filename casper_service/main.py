@@ -3133,6 +3133,17 @@ import devtools  # noqa: E402
 from fastapi import Depends  # noqa: E402
 
 
+@app.get("/dev/users", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
+def dev_list_users(glob: str):
+    """Account names matching a shell-style pattern (case-insensitive), e.g.
+    noah_* -- the extra accounts a persona's walkthroughs create."""
+    import fnmatch
+
+    with get_db() as db:
+        names = [r["username"] for r in db.execute("SELECT username FROM users").fetchall()]
+    return {"usernames": sorted(n for n in names if fnmatch.fnmatchcase(n.lower(), glob.lower()))}
+
+
 @app.delete("/dev/users/{username}", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
 def dev_delete_user(username: str):
     with get_db() as db:

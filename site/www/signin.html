@@ -3,14 +3,14 @@
 <section class="auth">
 <div class="eyebrow" id="eyebrow">Welcome back</div>
 <h2 id="title">Sign in</h2>
-<form id="f" class="panel form">
+<form id="f" class="panel form hide">
 <label>Username<input name="username" autocomplete="username" required autofocus></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
 <button class="btn" type="submit">Sign in</button>
 <p class="err" id="err"></p>
 <p class="muted small">New to Casper? <a id="toSignup" href="/signup">Create an account</a></p>
 </form>
-<div id="status" class="panel hide"><h3 id="statusTitle">Connecting this Mac…</h3><p class="muted" id="statusText">If your browser asks to open Casper, choose Open.</p><p id="statusAction"></p></div>
+<div id="status" class="panel hide"><h3 id="statusTitle">One moment…</h3><p class="muted" id="statusText"></p><p id="statusAction"></p></div>
 </section>
 <footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
 const fromApp = Casper.param("from") === "app";
@@ -21,30 +21,45 @@ if (fromApp) carry.set("from", "app");
 if ([...carry].length) document.getElementById("toSignup").href = "/signup?" + carry;
 if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this Mac"; }
 const $ = id => document.getElementById(id);
-async function connect() {
+// One thing on screen at a time: the form, or the connection status -- never both.
+function showForm() { $("status").classList.add("hide"); $("f").classList.remove("hide"); $("f").querySelector("input").focus(); }
+function showStatus(title, text = "", action = "") {
   $("f").classList.add("hide"); $("status").classList.remove("hide");
+  $("statusTitle").innerText = title; $("statusText").innerText = text; $("statusAction").innerHTML = action;
+}
+// Connected: a host that wasn't before, or -- re-pairing a Mac that was
+// already connected -- any connected host once pairing has had a moment.
+async function waitForConnected(before, seconds = 40) {
+  const start = Date.now();
+  while (Date.now() - start < seconds * 1000) {
+    await new Promise(r => setTimeout(r, 1500));
+    const now = await Casper.connectedHosts();
+    if (!now) continue;
+    if ([...now].some(id => !before.has(id))) return true;
+    if (before.size && now.size && Date.now() - start > 6000) return true;
+  }
+  return false;
+}
+async function connect() {
+  showStatus("Connecting this Mac…", "If your browser asks to open Casper, choose Open.");
   const before = (await Casper.connectedHosts()) || new Set();
   Casper.pair();
-  if (await Casper.waitForNewHost(before)) {
-    $("statusTitle").innerText = "This Mac is connected."; $("statusText").innerText = "";
-    // An open guide tab carries on by itself; otherwise continue here.
-    const bc = new BroadcastChannel("casper"); let guideOpen = false;
-    bc.onmessage = e => { if (e.data === "guide-here") guideOpen = true; };
-    bc.postMessage("connected?");
-    setTimeout(() => {
-      if (guideOpen) { $("statusText").innerText = "Back to your guide tab; it's carrying on."; return; }
-      location.href = next + (next.includes("?") ? "&" : "?") + "connected=1";
-    }, 900);
+  if (await waitForConnected(before)) {
+    showStatus("This Mac is connected.");
+    // Carry on with the guide right here; any older guide tab goes quiet.
+    new BroadcastChannel("casper").postMessage("connected-elsewhere");
+    setTimeout(() => location.href = next + (next.includes("?") ? "&" : "?") + "connected=1", 700);
   } else {
-    $("statusTitle").innerText = "Casper didn't answer.";
-    $("statusText").innerText = "Make sure Casper is open on this Mac.";
-    $("statusAction").innerHTML = '<button class="btn" onclick="connect()">Try again</button>';
+    showStatus("Casper didn't connect.", "Make sure Casper is open on this Mac, then try again.",
+               '<button class="btn" onclick="connect()">Try again</button>');
   }
 }
 (async () => {
   if (Casper.session()) {
+    showStatus("One moment…");
     try { await Casper.api("/hosts"); if (fromApp) return connect(); location.href = next; return; } catch (e) {}
   }
+  showForm();
 })();
 $("f").addEventListener("submit", async ev => {
   ev.preventDefault(); $("err").innerText = "";

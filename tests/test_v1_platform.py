@@ -827,3 +827,14 @@ def test_dev_capture_and_restore_brings_personas_back_exactly(app_env, monkeypat
         # Restoring over the live state again (no reset in between) is the same.
         client.post("/dev/users/import", json={"exports": capture}, headers=admin)
         assert _mcp(client, riley_agent, "my_casper") == before["riley"]
+
+
+def test_dev_lists_a_personas_accounts_by_pattern(app_env, monkeypatch):
+    main, client = app_env
+    monkeypatch.setenv("DEV_ADMIN_TOKEN", "t0ken")
+    for name in ("noah", "Noah_walkthrough", "noah_walkthrough2", "noahjhs", "samm1001"):
+        client.post("/signup", json={"username": name, "password": "longenough1"})
+    listed = lambda g: client.get("/dev/users", params={"glob": g}, headers={"X-Dev-Admin": "t0ken"}).json()["usernames"]  # noqa: E731
+    assert listed("noah_*") == ["Noah_walkthrough", "noah_walkthrough2"]  # case-insensitive, and not noahjhs
+    assert listed("noah") == ["noah"]
+    assert client.get("/dev/users", params={"glob": "*"}).status_code == 403  # without the dev token
