@@ -168,7 +168,7 @@ def scenario_invite_to_protected(run):
     r = run(fake, "Looks good, start it.")
     t = _turn_calls(fake, c0)
     checks.append(("starts the mirror after yes", _did(t, "mirror_folder", preview=False)))
-    checks.append(("sends the person to the Casper dialog", "mirror in the casper dialog" in r.lower()))
+    checks.append(("then waits quietly for Casper's dialog", r.strip() == ""))
     checks.append(("doesn't claim protection yet", "is protected" not in r.lower() and "now protected" not in r.lower()))
     fake.allowed = True
     r = run(fake, "OK, I clicked Mirror.")
@@ -285,6 +285,7 @@ praise, filler ("Great!", "Sure!", "Let me..."), apologies or exclamation
 marks, and no generic offers ("anything else?").
 
 Expected, and NOT a fault:
+- An empty reply: the guide waiting while Casper's own dialog is on screen.
 - Pointing to Casper's own interface the person must use: its menu-bar menu
   and items like "Make Recovery Kit", the Casper dialog and its Mirror button,
   a download link. Naming these is the product, not internals.
