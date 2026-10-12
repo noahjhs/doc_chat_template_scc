@@ -5,6 +5,8 @@
     tools/scenario.py start <name>         stop other VMs, free memory, then reset a scenario (every persona in it) or one checkpoint
     tools/scenario.py reset <name>         the same, but leave other running VMs alone
     tools/scenario.py stop                 shut every test VM down
+    ... start|reset <name> --vnc           serve each VM's screen over VNC instead of opening its window,
+                                           so tools/vmgui.py can look at it and click (see that file)
     tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
     tools/scenario.py copy <from> <to> ["what it is"]   duplicate a starting snapshot (instant, no extra disk until changed)
@@ -29,6 +31,7 @@ quit before starting (one per line) to free memory."""
 
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -121,6 +124,42 @@ def shutdown_vm(vm: str) -> str:
     return "stopped (power cut: the VM didn't respond)"
 
 
+VNC = False  # --vnc: serve each VM's screen over VNC (from the hypervisor), for tools/vmgui.py
+_CHROME_TIDY = r"""
+import glob, json, os
+base = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+for f in glob.glob(base + "/*/Preferences") + [base + "/Local State"]:
+    try:
+        d = json.load(open(f))
+        d.setdefault("profile", {})["exit_type"] = "Normal"
+        d["profile"]["exited_cleanly"] = True
+        d["exited_cleanly"] = True
+        json.dump(d, open(f, "w"))
+    except Exception:
+        pass
+"""
+
+
+def launch(vm: str):
+    """Opens the VM: its window on this Mac, or (--vnc) a VNC server whose
+    address and password are written for tools/vmgui.py. A VNC-served VM has
+    no window of its own; open it in Screen Sharing to watch (vmgui.py open)."""
+    if not VNC:
+        subprocess.Popen(["tart", "run", vm], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return
+    (CONFIG_DIR / "vnc").mkdir(parents=True, exist_ok=True)
+    log = CONFIG_DIR / "vnc" / f"{vm}.log"
+    log.write_text("")
+    subprocess.Popen(["tart", "run", vm, "--vnc-experimental"], stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    for _ in range(60):
+        m = re.search(r"vnc://:(\S+)@127\.0\.0\.1:(\d+)", log.read_text())
+        if m:
+            (CONFIG_DIR / "vnc" / f"{vm}.json").write_text(json.dumps({"password": m.group(1), "port": int(m.group(2))}))
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"{vm}: no VNC address after 30s ({log})")
+
+
 def fresh_vm(persona: dict):
     vm = persona["vm"]
     if vm in running_vms():
@@ -128,10 +167,13 @@ def fresh_vm(persona: dict):
     tart("delete", vm, check=False)
     tart("clone", persona["snapshot"], vm)
     tart("set", vm, "--cpu", str(VM_CPU), "--memory", str(VM_MEMORY_MB), "--display", VM_DISPLAY)
-    subprocess.Popen(["tart", "run", vm], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    launch(vm)
     deadline = time.time() + 180
     while time.time() < deadline:
         if subprocess.run(["tart", "exec", vm, "true"], capture_output=True).returncode == 0:
+            # Chrome, saved with the snapshot while running, would greet the
+            # person with "Restore pages? Chrome didn't shut down correctly".
+            subprocess.run(["tart", "exec", "-i", vm, "/usr/bin/python3", "-"], input=_CHROME_TIDY, text=True, capture_output=True)
             return
         time.sleep(3)
     raise RuntimeError(f"{vm} didn't come up (no guest agent after 3 minutes)")
@@ -503,7 +545,7 @@ def capture(name: str) -> int:
         os.chmod(f, 0o600)  # holds the persona's credential hashes
         say(p["username"], f"captured {cp}: VM as {snap}, plus its server state")
     for _, p in personas:
-        subprocess.Popen(["tart", "run", p["vm"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        launch(p["vm"])
     say("mac", "VMs starting again; resets of these checkpoints now restore this moment")
     return 0
 
@@ -519,6 +561,9 @@ def uncapture(checkpoint: str) -> int:
 
 
 def main(argv: list[str]) -> int:
+    global VNC
+    VNC = "--vnc" in argv
+    argv = [a for a in argv if a != "--vnc"]
     cmd = argv[1] if len(argv) > 1 else "list"
     if cmd == "list":
         print("Scenarios:")
