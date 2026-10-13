@@ -22,10 +22,28 @@ dev and the test stack (`tools/test_stack.sh`); only its env file differs.
   `www` and `app.casperagent.dev` -> `casper-www-prod:8080`,
   `auth` -> `casper-auth-prod:8100`, `relay` -> `casper-relay-prod:8600`.
 - `.env.prod` is dev's `.env` with the domains changed to the prod ones,
-  minus `TELEGRAM_*`, `DEV_ADMIN_TOKEN` (so the `/dev/*` endpoints don't
-  exist) and `MAIL_SINK` (prod sends real email through SMTP), plus the
-  stack settings (`ENV_SUFFIX=-prod`, `PAIR_SCHEME=casper`, `PUBLIC_*`, its
-  own `CATCHER_API_KEY`/`CATCHER_URL`/`CATCHER_ADDRESSES`).
+  minus `DEV_ADMIN_TOKEN` (so the `/dev/*` endpoints don't exist) and
+  `MAIL_SINK` (prod sends real email through SMTP), with prod's own
+  `TELEGRAM_*`, plus the stack settings (`ENV_SUFFIX=-prod`,
+  `PAIR_SCHEME=casper`, `PUBLIC_*`, its own
+  `CATCHER_API_KEY`/`CATCHER_URL`/`CATCHER_ADDRESSES`).
+- Telegram (2026-10-13): its own bot, **@Casper_svc_bot** (dev has a
+  different one). `.env.prod` holds `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_BOT_USERNAME=Casper_svc_bot` and a random
+  `TELEGRAM_WEBHOOK_SECRET` (`openssl rand -hex 24`). The webhook was
+  registered from the mini with the Bot API's `setWebhook`:
+  `url=https://auth.casperagent.dev/telegram/webhook`,
+  `secret_token=$TELEGRAM_WEBHOOK_SECRET`,
+  `allowed_updates=["message","callback_query"]` (all `/telegram/webhook`
+  reads), `drop_pending_updates=true`; `getWebhookInfo` should show that URL
+  and no `last_error`. Make the calls with a small Python script on the mini
+  that reads `.env.prod` itself (the file isn't shell-sourceable, and that
+  keeps the token off command lines). The bot's profile (description,
+  commands) is set by hand in @BotFather; Casper doesn't set it. People link
+  their chat with `Casper setup notifications` on a paired Mac (their agent
+  runs it, and it turns notifications on), or `harness login --prod`, then
+  `harness profile telegram-link` and `harness profile set
+  --telegram-notifications`.
 - The app: "Casper", `casper://` scheme, built with
   `DEPLOY_ENV=prod ./build/build_go_macos.sh` (reads `auth_server.txt`,
   `relay_server.txt`, `app_server.txt`) and served from the checkout's
@@ -86,12 +104,5 @@ Check afterwards: `www`, `app/guide`, `auth/agents.md` and
 
 ## Not there yet
 
-- **Telegram.** Prod has no bot: approvals and nudges work in the app, the
-  guide and the agent, not in Telegram. Needs a separate prod bot from
-  @BotFather (dev's bot webhook points at dev), its `TELEGRAM_*` values in
-  `.env.prod`, and `setWebhook` to `https://auth.casperagent.dev/telegram/webhook`.
-- **DMARC.** Invite email goes out through Resend as
-  `invites@casperagent.dev`; the domain's DMARC record is only
-  `v=DMARC1; p=none;` (no policy, no reports), so some providers may file
-  it as spam. Tightening it (`p=quarantine`, a `rua` address) is a DNS
-  change for the Principal.
+Nothing listed. (DMARC was tightened by the Principal on 2026-10-13:
+`p=quarantine`, reports through Cloudflare DMARC Management.)
