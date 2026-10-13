@@ -891,6 +891,13 @@ def test_guide_facts_come_from_caspers_state(app_env):
         assert not f.recovery_kit
         assert client.post("/profile/recovery-kit", headers=riley).status_code == 200
         assert main._guide_facts(rid, said).recovery_kit
+        # A Mac paired by signing in in the browser reports the kit with its own device token.
+        db_ = main.get_db
+        with db_() as db:
+            db.execute("UPDATE user_profile SET recovery_kit_at = NULL WHERE user_id = ?", (rid,))
+        riley_mac = _pair(client, riley, "rk-riley", "riley-air", sd.url)
+        assert client.post("/profile/recovery-kit", headers=riley_mac).status_code == 200
+        assert main._guide_facts(rid, said).recovery_kit
 
 
 def test_guide_cant_use_another_steps_tools(app_env):

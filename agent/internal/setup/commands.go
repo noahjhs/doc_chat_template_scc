@@ -353,6 +353,26 @@ func (c *cli) notifications() error {
 
 // --- recovery kit ---------------------------------------------------------------------------
 
+// kitAccount is whose kit this is, and how to tell Casper it was made. A Mac
+// set up by an agent has a setup account; one paired by signing in in the
+// browser (Casper's guide) has only the app's own pairing, which is enough:
+// the kit needs just the username, and the Mac's device token can report it.
+func (c *cli) kitAccount() (*storedAccount, func(), error) {
+	if acct, err := c.currentAccount(); err == nil {
+		return acct, func() {
+			_ = c.authed(func(token string) error { return c.call("POST", "/profile/recovery-kit", token, nil, nil) })
+		}, nil
+	} else if c.account == "" {
+		if sessions, _ := config.LoadSessions(); len(sessions) == 1 {
+			s := sessions[0]
+			return &storedAccount{Username: s.Username}, func() { _ = c.call("POST", "/profile/recovery-kit", s.DeviceToken, nil, nil) }, nil
+		}
+		return nil, nil, err
+	} else {
+		return nil, nil, err
+	}
+}
+
 // recoveryKit is what a kit holds (version 2): this account's backup keys
 // and every mirrored folder's password, so a replacement Mac can read the
 // mirrors. Locked with a passphrase the person types into a macOS dialog.
@@ -365,7 +385,7 @@ type recoveryKit struct {
 }
 
 func (c *cli) recoveryKit() error {
-	acct, err := c.currentAccount()
+	acct, report, err := c.kitAccount()
 	if err != nil {
 		return err
 	}
@@ -418,7 +438,7 @@ Make a new kit whenever you start mirroring another folder.
 	}
 	// Tell Casper a kit was made (only that -- the kit stays here), so the
 	// guide knows the step is done. Best effort.
-	_ = c.authed(func(token string) error { return c.call("POST", "/profile/recovery-kit", token, nil, nil) })
+	report()
 	c.emit(fmt.Sprintf("Saved the recovery kit (%d mirrored folder(s)) to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.", len(kit.MirrorPasswords), path),
 		map[string]any{"ok": true, "path": path, "mirrored_folders": len(kit.MirrorPasswords)})
 	return nil

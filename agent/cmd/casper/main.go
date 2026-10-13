@@ -343,8 +343,8 @@ func makeRecoveryKit(logf func(format string, args ...any)) {
 			return
 		case strings.Contains(msg, "no keys or mirrored folders"):
 			msg = "Nothing to put in a recovery kit yet. Make one after your first folder is mirrored."
-		case msg == "":
-			msg = "Couldn't make the recovery kit."
+		case msg == "" || strings.Contains(msg, "`") || strings.Contains(msg, "--"):
+			msg = "Couldn't make the recovery kit. Try again in a minute."
 		}
 		logf("Recovery kit: %s", result.Error)
 		dialog.ShowError(msg)

@@ -11,7 +11,7 @@
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
-let busy = false, rendered = -1, retired = false;
+let busy = false, rendered = -1, retired = false, stage = "";
 const invite = Casper.param("invite");
 
 function bubble(role, html, extra = "") {
@@ -38,7 +38,12 @@ function setChoices(list) {
   (list || []).forEach((c, i) => {
     const b = document.createElement("button"); b.className = i === 0 ? "btn" : "btn ghost";
     b.innerText = typeof c === "string" ? c : c.label;
-    b.onclick = () => typeof c === "string" ? send(c) : act(c.action);
+    b.onclick = () => {
+      // Sizing a folder makes macOS ask whether Casper may see it: say so before it pops up.
+      if (stage === "choose_folder" && typeof c === "string")
+        setTimeout(() => { if (busy) bubble("assistant", "If your Mac asks whether Casper can see " + c + ", choose Allow.", "note-bubble"); }, 3000);
+      typeof c === "string" ? send(c) : act(c.action);
+    };
     $("choices").appendChild(b);
   });
   if (!has) $("t").focus();
@@ -92,6 +97,7 @@ async function tick() {
   if (busy || retired) return;
   try {
     const st = await Casper.api("/guide/state");
+    stage = st.stage || "";
     if (st.count !== rendered) await refresh();
     waiting(st.waiting);
     $("progress").classList.toggle("hide", !st.progress); $("progress").innerText = st.progress || "";
@@ -113,7 +119,7 @@ document.addEventListener("click", ev => {
   setTimeout(async () => {
     try { if ((await Casper.api("/guide/state")).stage !== "install") return; } catch (e) { return; }
     bubble("assistant", "Chrome blocked it? Click the download arrow in Chrome's toolbar, then Download suspicious file.", "note-bubble");
-  }, 12000);
+  }, 5000);
 });
 
 $("f").addEventListener("submit", ev => { ev.preventDefault(); const t = $("t").value; $("t").value = ""; send(t); });

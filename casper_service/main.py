@@ -3235,9 +3235,11 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
 @app.post("/profile/recovery-kit")
 def recovery_kit_saved(authorization: str = Header(default="")):
     """Casper tells us when the person saves a recovery kit (the kit itself
-    never leaves their Mac), so the guide knows that step is done."""
+    never leaves their Mac), so the guide knows that step is done. From the
+    Mac itself (its device token) or a signed-in session."""
     with get_db() as db:
-        user_id = _require_user(db, authorization)
+        attached = _resolve_attached(db, authorization)
+        user_id = attached["user_id"] if attached else _require_user(db, authorization)
         _get_or_create_profile(db, user_id)
         db.execute("UPDATE user_profile SET recovery_kit_at = ? WHERE user_id = ?", (trust.now_iso(), user_id))
     return {"ok": True}
