@@ -504,7 +504,7 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         out = _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com", preview=False)
         assert out.startswith("Sent: emailed to riley@example.com.") and "Message for the person" not in out  # delivered: nothing to relay
         (to, subject, text, html), = emails
-        assert to == "riley@example.com" and subject == "sam invited you to join Mutual Aid on Casper"
+        assert to == "riley@example.com" and subject == "Sam invited you to join Mutual Aid on Casper"
         assert "Welcome, Riley." in text and "join \u2018Mutual Aid.\u2019" in text and "https://www.example/invite#" in html
         code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
         assert f"https://www.example/invite#{code}" in html and f"https://www.example/invite#{code}" in text

@@ -27,6 +27,8 @@ WT="$HOME/.cache/casper-e2e/$(basename "$RUN")"
 mkdir -p "$(dirname "$WT")"
 git worktree add -q --detach "$WT" "$REV"
 ln -s "$REPO/.venv" "$WT/.venv"   # vncdotool, for tools/vmgui.py
+mkdir -p "$WT/agent/internal/config/embedded"   # untracked; go:embed needs the files to exist
+touch "$WT"/agent/internal/config/embedded/{auth,relay,app}_server.txt
 cleanup() { cd "$REPO" && git worktree remove --force "$WT" 2>/dev/null || true; }
 trap cleanup EXIT
 

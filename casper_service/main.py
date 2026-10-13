@@ -2480,7 +2480,7 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
         third = {"mirror_space": f"{quota_gb:g} GB on their computer to keep your folders safe, with 30 days of history",
                  "catcher_space": "their always-on computer as a catcher for your newest changes"}.get(kind, f"{quota_gb:g} GB of backup space")
         try:
-            mailer.send(email, *mailer.invite_email(for_whom, me, group, third, page))
+            mailer.send(email, *mailer.invite_email(for_whom, trust.display_name(me), group, third, page))
             sent.append(f"emailed to {email}")
             channels.append("email")
         except Exception as e:
