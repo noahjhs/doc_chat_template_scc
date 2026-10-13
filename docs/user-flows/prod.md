@@ -14,7 +14,8 @@ dev and the test stack (`tools/test_stack.sh`); only its env file differs.
 - Volumes: `casper-prod_auth_db` (database, started fresh at promotion),
   `casper-prod_catcher_data`. The old Streamlit-era prod's volume
   `doc_chat_template_scc-prod_auth_db` is kept, unused; a copy of it and of
-  the old `.env`/compose file is in `~/casper-backups/prod-2026-10-13/`.
+  the old `.env`/compose file is in `~/casper-backups/prod-2026-10-13/`
+  and on the Time Capsule (see Backups).
 - Ports: debug (localhost only) www 8082, auth 8110, relay 8610; catcher sync
   port 22102 (dev 22100, test 22101).
 - Addresses (cloudflared, `~/casper-infra/cloudflared/config.yml`):
@@ -29,6 +30,36 @@ dev and the test stack (`tools/test_stack.sh`); only its env file differs.
   `DEPLOY_ENV=prod ./build/build_go_macos.sh` (reads `auth_server.txt`,
   `relay_server.txt`, `app_server.txt`) and served from the checkout's
   `dist/Casper-macos.zip` at `https://auth.casperagent.dev/download/casper/macos`.
+
+## Backups
+
+Backups belong on the Time Capsule (2.7 TB), not the mini's own disk:
+`/Volumes/Data/casper-backups/<name>/` on the mini, one folder per backup
+(first: `prod-2026-10-13`, copied 2026-10-13 and checked with `shasum -a 256`;
+the original in `~/casper-backups/` stays as a local copy).
+
+- The Time Capsule is `Noahs-AirPort-Time-Capsule.local` (192.168.0.107 on
+  the home LAN), SMB share `Data`, user `admin`. The password is in the
+  mini's login keychain (internet password, server
+  `Noahs-AirPort-Time-Capsule.local`, protocol smb), saved when the
+  Principal first connected.
+- It does not mount itself after a reboot (the mini has no auto-login, and
+  the share isn't a login item). A backup job checks first and mounts it if
+  needed:
+
+  ```bash
+  [ -d /Volumes/Data/casper-backups ] || {
+    open 'smb://admin@Noahs-AirPort-Time-Capsule.local/Data'   # uses the keychain
+    sleep 10; [ -d /Volumes/Data/casper-backups ]; }
+  ```
+
+  `open` needs someone logged in to the mini's desktop (it does the mount
+  through Finder, which reads the keychain). Over SSH with no one logged in,
+  `mount_smbfs //admin@Noahs-AirPort-Time-Capsule.local/Data <dir>` is the
+  alternative but may not reach a locked keychain. If neither works, ask the
+  Principal to connect once in Finder (Go > Connect to Server).
+- Copy with `cp -Rp` and compare `shasum -a 256` of both sides. SMB adds
+  `._*` files for extended attributes; they're harmless.
 
 ## Redeploying
 
