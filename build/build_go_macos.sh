@@ -41,8 +41,10 @@ DEPLOY_ENV="${DEPLOY_ENV:-prod}"
 case "$DEPLOY_ENV" in
     prod) SUFFIX="" ;      APP_DISPLAY_NAME="Casper";     BUNDLE_ID_SUFFIX=""; URL_SCHEME="casper" ;;
     dev)  SUFFIX=".dev" ;  APP_DISPLAY_NAME="Casper Dev"; BUNDLE_ID_SUFFIX=".dev"; URL_SCHEME="casper-dev" ;;
+    # test: the end-to-end test deployment (tools/test_stack.sh), so runs never touch dev
+    test) SUFFIX=".test" ; APP_DISPLAY_NAME="Casper Test"; BUNDLE_ID_SUFFIX=".test"; URL_SCHEME="casper-test" ;;
     *)
-        echo "Unknown DEPLOY_ENV '$DEPLOY_ENV' -- expected 'prod' or 'dev'." >&2
+        echo "Unknown DEPLOY_ENV '$DEPLOY_ENV' -- expected 'prod', 'dev' or 'test'." >&2
         exit 1
         ;;
 esac

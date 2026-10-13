@@ -1,3 +1,7 @@
+# One file for dev and the end-to-end test stack (tools/test_stack.sh). The
+# test stack sets ENV_SUFFIX (container names), its own debug ports and its
+# own env file, and starts only www, auth, catcher and relay: it shares dev's
+# Syncthing relay (st-relay), since the router forwards only one port.
 services:
   # The web front end (site/www, "Warm Paper"): the public site (www) and the
   # signed-in pages -- sign in, sign up, Casper's guide (app). Static pages;
@@ -5,7 +9,7 @@ services:
   www:
     build:
       context: ./site/www
-    container_name: casper-www
+    container_name: casper-www${ENV_SUFFIX:-}
     restart: unless-stopped
     environment:
       APP_URL: ${PUBLIC_APP_URL:-https://dev-app.casperagent.dev}
@@ -14,9 +18,9 @@ services:
       DOWNLOAD_URL: ${PUBLIC_DOWNLOAD_URL:-https://dev-auth.casperagent.dev/download/casper/macos}
       WWW_URL: ${PUBLIC_WWW_URL:-https://dev-www.casperagent.dev}
       PAIR_SCHEME: ${PAIR_SCHEME:-casper-dev}
-      AUTH_UPSTREAM: http://casper-auth:8100
+      AUTH_UPSTREAM: http://casper-auth${ENV_SUFFIX:-}:8100
     ports:
-      - "127.0.0.1:8080:8080"   # local-only, for debugging
+      - "127.0.0.1:${WWW_DEBUG_PORT:-8080}:8080"   # local-only, for debugging
     networks:
       - casper-net
 
@@ -24,9 +28,9 @@ services:
     build:
       context: ./casper_service
       dockerfile: Dockerfile
-    container_name: casper-auth
+    container_name: casper-auth${ENV_SUFFIX:-}
     restart: unless-stopped
-    env_file: .env
+    env_file: ${AUTH_ENV_FILE:-.env}
     environment:
       # Agent onboarding (docs/product/scenarios/agent-onboarding.md): the
       # instructions served at /agents.md and the app at /download/...
@@ -37,7 +41,7 @@ services:
       - ./onboarding:/app/onboarding:ro
       - ./dist:/app/dist:ro
     ports:
-      - "127.0.0.1:8100:8100"   # local-only, for debugging
+      - "127.0.0.1:${AUTH_DEBUG_PORT:-8100}:8100"   # local-only, for debugging
     networks:
       - casper-net
 
@@ -50,17 +54,17 @@ services:
   # (CATCHER_ADDRESSES in .env lists the addresses they should use).
   catcher:
     image: syncthing/syncthing:2.1.5
-    container_name: casper-catcher
+    container_name: casper-catcher${ENV_SUFFIX:-}
     restart: unless-stopped
-    hostname: casper-catcher
+    hostname: casper-catcher${ENV_SUFFIX:-}
     environment:
       STGUIADDRESS: 0.0.0.0:8384
       STGUIAPIKEY: ${CATCHER_API_KEY:-}
     volumes:
       - catcher_data:/var/syncthing
     ports:
-      - "22100:22000/tcp"
-      - "22100:22000/udp"
+      - "${CATCHER_PORT:-22100}:22000/tcp"
+      - "${CATCHER_PORT:-22100}:22000/udp"
     networks:
       - casper-net
 
@@ -91,10 +95,10 @@ services:
     build:
       context: ./relay
       dockerfile: Dockerfile
-    container_name: casper-relay
+    container_name: casper-relay${ENV_SUFFIX:-}
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8600:8600"   # local-only, for debugging
+      - "127.0.0.1:${RELAY_DEBUG_PORT:-8600}:8600"   # local-only, for debugging
     networks:
       - casper-net
 

@@ -1078,3 +1078,21 @@ def test_a_paired_mac_that_isnt_connected_right_now_doesnt_send_the_guide_back_t
     client.post("/hosts/pair", json={"routing_key": "rk-r", "hostname": "r-mac"}, headers=riley)  # paired, never reported presence
     assert [h for h in main._mcp_list_hosts(rid) if h["role"] == "owner"][0]["connected"] is False
     assert main._guide_facts(rid, []).mac_connected is True
+
+
+def test_mail_sink_keeps_invites_instead_of_sending(app_env, monkeypatch, tmp_path):
+    """The end-to-end test deployment (MAIL_SINK) reaches nobody's inbox: the
+    invite email is kept, and the dev-only /dev/mail reads it back."""
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    monkeypatch.setenv("PUBLIC_WWW_URL", "https://www.example")
+    monkeypatch.setenv("MAIL_SINK", str(tmp_path / "mail"))
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.setenv("DEV_ADMIN_TOKEN", "t0ken")
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=20, preview=False)
+        _mcp(client, sam_agent, "create_invite", quota_gb=10, for_whom="Riley", group="Mutual Aid", email="riley@example.com", preview=False)
+        got = client.get("/dev/mail", params={"to": "riley@example.com"}, headers={"X-Dev-Admin": "t0ken"}).json()["messages"]
+        assert len(got) == 1 and "https://www.example/invite#CASPER-" in got[0]["text"]
+        assert client.get("/dev/mail", params={"to": "nobody@example.com"}, headers={"X-Dev-Admin": "t0ken"}).json()["messages"] == []

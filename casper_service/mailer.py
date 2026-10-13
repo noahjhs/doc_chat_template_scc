@@ -1,10 +1,16 @@
 """Outgoing email (invitations). Plain SMTP, so any provider works:
 SMTP_HOST, SMTP_PORT (587, STARTTLS; 465 means implicit TLS), SMTP_USER,
 SMTP_PASSWORD, MAIL_FROM (e.g. "Casper <invites@casperagent.dev>"). A
-deployment without SMTP_HOST simply can't send email; callers say so."""
+deployment without SMTP_HOST simply can't send email; callers say so.
+
+MAIL_SINK=<dir> (the end-to-end test deployment) keeps every email as a JSON
+file there instead of sending it, so test runs reach nobody's inbox; the
+dev-only GET /dev/mail reads them back."""
 
 import html
+import json
 import os
+import time
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -12,7 +18,7 @@ from email.utils import parseaddr
 
 
 def configured() -> bool:
-    return bool(os.environ.get("SMTP_HOST"))
+    return bool(os.environ.get("SMTP_HOST") or os.environ.get("MAIL_SINK"))
 
 
 def valid_address(addr: str) -> bool:
@@ -31,6 +37,12 @@ def send(to: str, subject: str, text: str, html_body: str, reply_to: str = ""):
         msg["Reply-To"] = reply_to
     msg.set_content(text)
     msg.add_alternative(html_body, subtype="html")
+    if sink := os.environ.get("MAIL_SINK"):
+        os.makedirs(sink, exist_ok=True)
+        path = os.path.join(sink, f"{time.time():.6f}.json")
+        with open(path, "w") as f:
+            json.dump({"to": to, "from": msg["From"], "subject": subject, "text": text, "html": html_body, "at": time.time()}, f)
+        return
     host, port = os.environ["SMTP_HOST"], int(os.environ.get("SMTP_PORT", "587"))
     context = ssl.create_default_context()
     if port == 465:
@@ -65,3 +77,17 @@ def invite_email(name: str, inviter: str, group: str, gift: str, link: str) -> t
 <tr><td style="padding:28px 40px 40px"><a href="{e(link)}" style="display:inline-block;background:#2b1d14;color:#f6efe4;text-decoration:none;border-radius:999px;padding:13px 24px;font-weight:500">Accept the invitation</a></td></tr>
 </table><p style="font-size:13px;color:#6f5a4a">Casper &mdash; held by friends, read by no one.</p></td></tr></table></body></html>"""
     return subject, text, body
+
+
+def sunk(to: str = "") -> list[dict]:
+    """Emails kept by MAIL_SINK, newest first (only those to `to`, if given)."""
+    sink = os.environ.get("MAIL_SINK")
+    if not sink or not os.path.isdir(sink):
+        return []
+    out = []
+    for name in sorted(os.listdir(sink), reverse=True):
+        with open(os.path.join(sink, name)) as f:
+            m = json.load(f)
+        if not to or m["to"].lower() == to.lower():
+            out.append(m)
+    return out

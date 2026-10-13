@@ -3402,6 +3402,12 @@ import devtools  # noqa: E402
 from fastapi import Depends  # noqa: E402
 
 
+@app.get("/dev/mail", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
+def dev_mail(to: str = ""):
+    """Emails a MAIL_SINK deployment kept instead of sending (newest first)."""
+    return {"messages": mailer.sunk(to)}
+
+
 @app.get("/dev/users", include_in_schema=False, dependencies=[Depends(devtools.require_dev_admin)])
 def dev_list_users(glob: str):
     """Account names matching a shell-style pattern (case-insensitive), e.g.

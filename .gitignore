@@ -8,6 +8,9 @@ relay_server.txt
 app_server.dev.txt
 auth_server.dev.txt
 relay_server.dev.txt
+app_server.test.txt
+auth_server.test.txt
+relay_server.test.txt
 session.json
 
 # Runtime state for .claude/hooks/block-git-commit.sh -- mutable, toggled

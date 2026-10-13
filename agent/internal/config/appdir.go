@@ -26,8 +26,10 @@ func appConfigSubdir() string {
 	if v := os.Getenv("CONTROL_TOOL_AUTH_DOMAIN"); v != "" {
 		domain = v
 	}
-	if strings.HasPrefix(domain, "dev-") {
-		return "Casper-dev"
+	for _, env := range []string{"dev", "test"} { // test: the end-to-end test deployment
+		if strings.HasPrefix(domain, env+"-") {
+			return "Casper-" + env
+		}
 	}
 	return "Casper"
 }
@@ -50,12 +52,9 @@ func AppConfigDir() (string, error) {
 }
 
 // PairURLScheme is the custom URL scheme this build's Casper.app registers
-// for pairing hand-offs -- "casper-dev" for a dev build, "casper" for prod
+// for pairing hand-offs -- "casper-dev"/"casper-test" for dev/test builds, "casper" for prod
 // (see build/build_go_macos.sh's URL_SCHEME, derived from the same dev-
 // prefix convention as appConfigSubdir).
 func PairURLScheme() string {
-	if appConfigSubdir() == "Casper-dev" {
-		return "casper-dev"
-	}
-	return "casper"
+	return strings.ToLower(appConfigSubdir())
 }
