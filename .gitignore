@@ -210,3 +210,7 @@ agent/casper-testdaemon
 # Local secrets (never commit)
 nous_key.txt
 *_key.txt
+
+# Stack env files (tools/test_stack.sh, docs/user-flows/prod.md)
+.env.test
+.env.prod
