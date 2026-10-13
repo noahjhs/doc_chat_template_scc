@@ -236,6 +236,9 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 	if err != nil {
 		logf("Couldn't check login items: %s", err)
 	}
+	if err := config.RefreshLoginItem(); err != nil {
+		logf("Couldn't update the login item: %s", err)
+	}
 	// Independent of sign-in state (unlike mToggle/mStatus above) -- always
 	// visible, since "launch Casper at login" is a system-level preference
 	// a user might want set before ever pairing a host.

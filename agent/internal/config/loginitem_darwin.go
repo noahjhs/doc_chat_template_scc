@@ -102,6 +102,25 @@ func AddLoginItem() error {
 	return os.WriteFile(path, []byte(plist), 0o644)
 }
 
+// RefreshLoginItem points an existing login item at this copy of Casper if
+// the app has moved (e.g. from the older /Applications/CasperGo), so the next
+// login doesn't open a copy that's gone.
+func RefreshLoginItem() error {
+	path, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil // not a login item: nothing to refresh
+	}
+	app, err := bundlePath()
+	if err != nil || strings.Contains(app, "/AppTranslocation/") || strings.Contains(string(b), "<string>"+xmlEscape(app)+"</string>") {
+		return err
+	}
+	return AddLoginItem()
+}
+
 // RemoveLoginItem stops Casper starting at login.
 func RemoveLoginItem() error {
 	path, err := launchAgentPath()

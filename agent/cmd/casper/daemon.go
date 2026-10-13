@@ -54,7 +54,7 @@ type daemonState struct {
 	tun        *tunnel.Tunnel
 	enabled    bool
 	identities map[string]*pairedIdentity // keyed by username
-	mirror     *mirrord.Service             // nil if mirroring is off (see mirroring.go)
+	mirror     *mirrord.Service           // nil if mirroring is off (see mirroring.go)
 
 	// Set once onReady runs; nil until then. A casper:// pairing event can
 	// arrive before the menu exists (confirmed via a cold-launch spike: the
@@ -435,11 +435,11 @@ func (d *daemonState) pairWith(bootstrapToken, username string) bool {
 }
 
 // refocusBrowser: after a casper:// hand-off, re-foregrounds the browser -- see internal/activate's doc comment for
-	// why this exists (a JS-only fix from the browser side didn't hold up).
-	// A short delay first, off the goroutine handling this event, so it
-	// doesn't compete with whatever's still settling right after the OS
-	// just delivered this Apple Event (and so a slow/failing activation
-	// attempt can never block pairing itself).
+// why this exists (a JS-only fix from the browser side didn't hold up).
+// A short delay first, off the goroutine handling this event, so it
+// doesn't compete with whatever's still settling right after the OS
+// just delivered this Apple Event (and so a slow/failing activation
+// attempt can never block pairing itself).
 func (d *daemonState) refocusBrowser() {
 	go func() {
 		time.Sleep(300 * time.Millisecond)

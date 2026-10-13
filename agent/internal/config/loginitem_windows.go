@@ -10,4 +10,5 @@ package config
 
 func IsLoginItem() (bool, error) { return false, nil }
 func AddLoginItem() error        { return nil }
+func RefreshLoginItem() error    { return nil }
 func RemoveLoginItem() error     { return nil }
