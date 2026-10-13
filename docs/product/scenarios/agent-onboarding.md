@@ -53,7 +53,7 @@ for people who already know each other's usernames.
 
 ## Mechanics: `casper setup` (built into the Casper app)
 
-`/Applications/CasperGo/Casper.app/Contents/MacOS/Casper setup <command>`.
+`/Applications/Casper.app/Contents/MacOS/Casper setup <command>`.
 Every command is safe to re-run, prints plain text by default or JSON with
 `--json`, and reports what to do next.
 

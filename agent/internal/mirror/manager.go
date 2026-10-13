@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -139,6 +140,9 @@ func (m *Manager) Start() error {
 			return fmt.Errorf("syncthing generate: %v: %s", err, out)
 		}
 	}
+	if err := m.presetOptions(); err != nil {
+		return fmt.Errorf("presetting syncthing options: %w", err)
+	}
 	port, err := freeLocalPort()
 	if err != nil {
 		return err
@@ -176,7 +180,45 @@ func (m *Manager) Start() error {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return m.patch("/rest/config/options", map[string]any{
+	return m.patch("/rest/config/options", m.baseOptions())
+}
+
+// presetOptions writes Casper's options into config.xml before Syncthing
+// starts. Patching them over REST alone leaves Syncthing's first seconds on
+// its defaults (local discovery, router port mapping), and those alone make
+// macOS ask "find devices on local networks?" the moment Casper launches.
+func (m *Manager) presetOptions() error {
+	path := filepath.Join(m.home, "config.xml")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	s := string(b)
+	start, end := strings.Index(s, "<options>"), strings.Index(s, "</options>")
+	if start < 0 || end < start {
+		return errors.New("config.xml has no <options>")
+	}
+	opts := s[start:end]
+	for k, v := range m.baseOptions() {
+		if k == "listenAddresses" {
+			continue
+		}
+		re := regexp.MustCompile(`<` + k + `>[^<]*</` + k + `>`)
+		opts = re.ReplaceAllString(opts, fmt.Sprintf("<%s>%v</%s>", k, v, k))
+	}
+	var listen strings.Builder
+	for _, a := range m.listenAddresses() {
+		listen.WriteString("<listenAddress>" + a + "</listenAddress>")
+	}
+	re := regexp.MustCompile(`(\s*<listenAddress>[^<]*</listenAddress>)+`)
+	if loc := re.FindStringIndex(opts); loc != nil {
+		opts = opts[:loc[0]] + "\n        " + listen.String() + opts[loc[1]:]
+	}
+	return os.WriteFile(path, []byte(s[:start]+opts+s[end:]), 0o600)
+}
+
+func (m *Manager) baseOptions() map[string]any {
+	return map[string]any{
 		"globalAnnounceEnabled": false, // casper_service is the discovery service
 		// Off: Casper tells each Mac its peers' addresses (LAN ones included),
 		// so announcing isn't needed -- and it would set off macOS's "find
@@ -198,7 +240,7 @@ func (m *Manager) Start() error {
 		"autoUpgradeIntervalH":    0,
 		"listenAddresses":         m.listenAddresses(),
 		"startBrowser":            false,
-	})
+	}
 }
 
 // baseListen is where Syncthing listens directly: the explicit listen

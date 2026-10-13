@@ -2526,7 +2526,7 @@ def invite_info(code: str, request: Request):
     try:
         with get_db() as db:
             inv = trust.find_invite(db, code.strip())
-            inviter = trust.username(db, inv["owner_user_id"])
+            inviter = trust.display_name(trust.username(db, inv["owner_user_id"]))
             group = trust.group_name(db, inv["group_id"])
     except trust.TrustError as e:
         return JSONResponse({"valid": False, "reason": e.message}, headers=cors)
@@ -3206,11 +3206,11 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             code = codes[-1].upper()
             row = db.execute("SELECT owner_user_id, used_by_user_id FROM invites WHERE code_hash = ?", (trust._invite_hash(code),)).fetchone()
             if row and row["used_by_user_id"] == user_id:
-                invite = {"code": code, "inviter": trust.username(db, row["owner_user_id"]), "state": "accepted"}
+                invite = {"code": code, "inviter": trust.display_name(trust.username(db, row["owner_user_id"])), "state": "accepted"}
             elif row:
                 try:
                     trust.find_invite(db, code)
-                    invite = {"code": code, "inviter": trust.username(db, row["owner_user_id"]), "state": "open"}
+                    invite = {"code": code, "inviter": trust.display_name(trust.username(db, row["owner_user_id"])), "state": "open"}
                 except trust.TrustError:
                     pass  # cancelled, expired or someone else's: nothing to gate on
         held = trust.grants_held(db, user_id)

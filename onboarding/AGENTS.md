@@ -19,7 +19,7 @@ Run everything yourself. The person only answers questions and clicks in
 Casper's own dialogs.
 
 ```sh
-CASPER=/Applications/CasperGo/Casper.app/Contents/MacOS/Casper
+CASPER=/Applications/Casper.app/Contents/MacOS/Casper
 "$CASPER" setup status 2>/dev/null || echo "not installed"
 ```
 
@@ -30,7 +30,7 @@ safe to re-run.
    ```sh
    curl -fsSL {{CASPER_URL}}/download/casper/macos -o /tmp/casper-macos.zip \
      && unzip -oq /tmp/casper-macos.zip -d /Applications \
-     && open /Applications/CasperGo/Casper.app
+     && open /Applications/Casper.app
    ```
    If macOS asks about opening Casper at login, say: "Choose Allow, so
    Casper keeps running."

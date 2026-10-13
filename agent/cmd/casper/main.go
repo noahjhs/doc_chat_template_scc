@@ -155,7 +155,7 @@ func main() {
 	state.startMirroring()
 
 	go func() {
-		if err := srv.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
+		if err := srv.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port)); err != nil { // reached only through the tunnel, via localhost
 			logf("Server error: %s", err)
 		}
 	}()
@@ -294,10 +294,9 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 
 	// Nothing paired on this Mac yet (a fresh install): the next step is
 	// signing in, so take the person straight there -- the sign-in page
-	// connects this Mac. Only then ask about login items, so the two never
-	// compete. Not in a non-interactive dev/CI run (CONTROL_TOOL_KEY set).
+	// connects this Mac. Only then add the login item. Not in a non-interactive dev/CI run (CONTROL_TOOL_KEY set).
 	// CASPER_SCRIPTED_SETUP: launched by tools/scenario.py, which signs in
-	// and pairs by itself -- no sign-in page, no login-items question.
+	// and pairs by itself -- no sign-in page, no login item.
 	scripted := os.Getenv("CASPER_SCRIPTED_SETUP") != ""
 	if os.Getenv("CONTROL_TOOL_KEY") == "" {
 		go func() {
@@ -311,7 +310,7 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 				}
 			}
 			if !isLoginItem && !scripted && !config.LoginItemPromptDismissed() {
-				promptAddToLoginItems(mStartup, logf)
+				addLoginItemOnce(mStartup, logf)
 			}
 		}()
 	}
@@ -355,22 +354,12 @@ func makeRecoveryKit(logf func(format string, args ...any)) {
 	}
 }
 
-// promptAddToLoginItems asks (via a native, declinable modal -- see
-// internal/dialog.ConfirmWithDontAskAgain) whether to register Casper as a
-// macOS Login Item, so it relaunches automatically after a logout/restart
-// -- otherwise "Include in startup items" would only ever get turned on by a
-// user who happens to notice the menu item themselves.
-func promptAddToLoginItems(mStartup *systray.MenuItem, logf func(format string, args ...any)) {
-	accepted, dontAskAgain := dialog.ConfirmWithDontAskAgain(
-		"Add Casper to your login items, so it starts automatically when you log in?",
-		"Add",
-	)
-	if dontAskAgain {
-		config.DismissLoginItemPrompt()
-	}
-	if !accepted {
-		return
-	}
+// addLoginItemOnce makes Casper start at login, once, after this Mac is
+// connected: a mirror that stops at the next restart protects nothing, so
+// this isn't a question. "Include in startup items" in the menu turns it off,
+// and that choice sticks (it's never re-added).
+func addLoginItemOnce(mStartup *systray.MenuItem, logf func(format string, args ...any)) {
+	config.DismissLoginItemPrompt()
 	if err := config.AddLoginItem(); err != nil {
 		logf("Couldn't add Casper to login items: %s", err)
 		return

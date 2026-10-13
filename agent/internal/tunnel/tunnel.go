@@ -216,7 +216,7 @@ func doLoopback(client *http.Client, port int, frame Frame) Frame {
 	reqCtx, cancel := context.WithTimeout(context.Background(), timeoutFor(frame.Path))
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, frame.Method, fmt.Sprintf("http://localhost:%d%s", port, frame.Path), bodyReader)
+	req, err := http.NewRequestWithContext(reqCtx, frame.Method, fmt.Sprintf("http://127.0.0.1:%d%s", port, frame.Path), bodyReader)
 	if err != nil {
 		return Frame{ID: frame.ID, Error: err.Error()}
 	}

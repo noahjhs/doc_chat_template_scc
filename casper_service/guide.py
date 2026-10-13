@@ -161,9 +161,10 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
                      "preview=true) and give only the one-line plan, ending \"Accept?\". On their yes, accept it.", ("redeem_invite",))
     if not facts.mac_connected:
         lead = "If something just happened (an invite accepted), say it in a few words first. " if inv else ""
-        return Stage("install", f"Their Mac isn't connected yet. {lead}Say exactly \"Download Casper and open it: {download_url}\" "
+        say = f"Download Casper and open it: {download_url}\n(Ignore browser warnings. The app is safe.)"
+        return Stage("install", f"Their Mac isn't connected yet. {lead}Say exactly \"{say}\" "
                      "and nothing more. Opening it connects their Mac; you'll hear \"My Mac is connected.\"",
-                     say=f"Download Casper and open it: {download_url}")
+                     say=say)
     if facts.mirror_hosts and facts.folder == "none":
         catcher = f' Their catcher: catcher="{facts.catcher_hosts[0]}".' if facts.catcher_hosts else (
             " They have no catcher; leave it out unless they ask.")

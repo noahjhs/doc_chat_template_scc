@@ -9,7 +9,7 @@ knowledge of Casper, given only what a real person would give it.
 ## Preconditions
 
 - A Mac with Claude Code, and no Casper installed (remove
-  `/Applications/CasperGo`).
+  `/Applications/Casper.app`, or the older `/Applications/CasperGo`).
 - The onboarding folder, downloaded as a person would:
   `curl -fsSL https://<casper>/onboarding.zip -o c.zip && unzip c.zip`. Or
   just the URL `https://<casper>/agents.md`.

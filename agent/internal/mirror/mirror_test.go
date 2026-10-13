@@ -291,3 +291,40 @@ func TestRelaysSetListenAddresses(t *testing.T) {
 		t.Fatalf("relay not removed: %+v", opts)
 	}
 }
+
+// Syncthing must never run on its defaults, even for its first seconds:
+// local discovery or router port mapping make macOS ask "find devices on
+// local networks?" at launch.
+func TestPresetOptionsBeforeStart(t *testing.T) {
+	home := t.TempDir()
+	cfg := `<configuration version="37">
+    <options>
+        <listenAddress>default</listenAddress>
+        <globalAnnounceEnabled>true</globalAnnounceEnabled>
+        <localAnnounceEnabled>true</localAnnounceEnabled>
+        <relaysEnabled>true</relaysEnabled>
+        <natEnabled>true</natEnabled>
+        <urAccepted>0</urAccepted>
+    </options>
+</configuration>
+`
+	if err := os.WriteFile(filepath.Join(home, "config.xml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New("syncthing", home, t.TempDir(), "", nil)
+	if err := m.presetOptions(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "config.xml"))
+	got := string(b)
+	for _, want := range []string{"<localAnnounceEnabled>false</localAnnounceEnabled>", "<natEnabled>false</natEnabled>",
+		"<globalAnnounceEnabled>false</globalAnnounceEnabled>", "<urAccepted>-1</urAccepted>",
+		"<listenAddress>tcp://0.0.0.0:22000</listenAddress><listenAddress>quic://0.0.0.0:22000</listenAddress>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %s in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "<listenAddress>default</listenAddress>") {
+		t.Errorf("default listen address left in:\n%s", got)
+	}
+}

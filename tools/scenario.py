@@ -5,7 +5,7 @@
     tools/scenario.py start <name>         stop other VMs, free memory, then reset a scenario (every persona in it) or one checkpoint
     tools/scenario.py reset <name>         the same, but leave other running VMs alone
     tools/scenario.py stop                 shut every test VM down
-    ... start|reset <name> --vnc           serve each VM's screen over VNC instead of opening its window,
+    ... start|reset|edit <name> --vnc      serve each VM's screen over VNC instead of opening its window,
                                            so tools/vmgui.py can look at it and click (see that file)
     tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
     tools/scenario.py save <snapshot>      shut it down cleanly -- the changes are saved
@@ -45,7 +45,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CONF = tomllib.loads((HERE / "scenarios.toml").read_text())
 CONFIG_DIR = Path.home() / ".config" / "casper-vm"
-CASPER = "/Applications/CasperGo/Casper.app/Contents/MacOS/Casper"
+CASPER = "/Applications/Casper.app/Contents/MacOS/Casper"
 VM_CPU, VM_MEMORY_MB, VM_DISPLAY = 4, 4096, "1440x900"
 _print_lock = threading.Lock()
 # python.org's Python ships without root certificates; macOS has its own bundle.
@@ -254,10 +254,10 @@ def step_quiet_apps(p, ctx, *names):
 def step_install_casper(p, ctx):
     url = CONF["deployment"]["download_url"]
     vm_exec(p["vm"], f"""
-        pkill -f CasperGo/Casper.app/Contents/MacOS/Casper; sleep 1
-        curl -fsSL '{url}' -o /tmp/casper.zip && rm -rf /Applications/CasperGo &&
+        pkill -x Casper; sleep 1
+        curl -fsSL '{url}' -o /tmp/casper.zip && rm -rf /Applications/CasperGo /Applications/Casper.app &&
         unzip -oq /tmp/casper.zip -d /Applications &&
-        open --env CASPER_SCRIPTED_SETUP=1 /Applications/CasperGo/Casper.app""")
+        open --env CASPER_SCRIPTED_SETUP=1 /Applications/Casper.app""")
     for _ in range(30):
         if "Casper app: running" in vm_exec(p["vm"], f"'{CASPER}' setup status 2>&1 || true"):
             return "installed and running"
@@ -654,7 +654,7 @@ def main(argv: list[str]) -> int:
         if snap not in CONF["snapshots"]:
             print(f"No snapshot {snap!r}; known: {', '.join(CONF['snapshots'])}")
             return 2
-        subprocess.Popen(["tart", "run", snap], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        launch(snap)
         say("mac", f"{snap} is opening. Changes you make in it are kept; it holds only what's local to a Mac -- "
                    f"no Casper account. When done: tools/scenario.py save {snap}")
         return 0

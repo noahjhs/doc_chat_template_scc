@@ -11,14 +11,24 @@
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
-let busy = false, rendered = -1, waitDots = null;
+let busy = false, rendered = -1, retired = false;
+const invite = Casper.param("invite");
 
 function bubble(role, html, extra = "") {
   const d = document.createElement("div"); d.className = "msg " + role + " " + extra;
   d.innerHTML = (role === "assistant" ? '<span class="av">' + GHOST + "</span>" : "") + '<div class="body">' + html + "</div>";
   $("log").appendChild(d); window.scrollTo(0, document.body.scrollHeight); return d;
 }
-const thinking = () => bubble("assistant", "<span></span><span></span><span></span>", "thinking");
+
+// One "thinking" bubble, however many reasons there are to show it (a reply
+// being written, Casper waiting on their Mac): each reason holds it on.
+const dotsFor = new Set();
+let dotsEl = null;
+function dots(reason, on) {
+  if (on) dotsFor.add(reason); else dotsFor.delete(reason);
+  if (dotsFor.size && !dotsEl) dotsEl = bubble("assistant", "<span></span><span></span><span></span>", "thinking");
+  if (!dotsFor.size && dotsEl) { dotsEl.remove(); dotsEl = null; }
+}
 
 // Buttons replace typing: while there are choices, there's no text box.
 function setChoices(list) {
@@ -39,9 +49,11 @@ async function refresh() {
   let msgs;
   try { msgs = (await Casper.api("/guide/history")).messages; } catch (e) { if (e.status === 401) location.replace("/signin"); return; }
   if (msgs.length === rendered) return;
-  rendered = msgs.length; $("log").innerHTML = ""; waitDots = null;
-  if (!msgs.length) bubble("assistant", Casper.render("I'm Casper's guide. Keep your files safe, or offer space to friends?"));
+  rendered = msgs.length; $("log").innerHTML = ""; dotsEl = null;
+  // Arriving from an invitation: the guide's first line is about the invite.
+  if (!msgs.length && !invite) bubble("assistant", Casper.render("I'm Casper's guide. Keep your files safe, or offer space to friends?"));
   msgs.forEach(m => bubble(m.role, Casper.render(m.text)));
+  const reasons = [...dotsFor]; dotsFor.clear(); reasons.forEach(r => dots(r, true));
   const last = msgs[msgs.length - 1];
   setChoices(last && last.role === "assistant" ? last.choices : []);
   // A button in the message itself (Download Casper) is the call to action too.
@@ -51,17 +63,17 @@ async function refresh() {
 // Casper is waiting on something on their Mac (its dialog, the folder panel):
 // the guide shows it's waiting, and there's nothing to type.
 function waiting(on) {
-  if (on && !waitDots) { waitDots = thinking(); $("f").classList.add("hide"); $("choices").innerHTML = ""; }
-  if (!on && waitDots) { waitDots.remove(); waitDots = null; }
+  if (on && !dotsFor.has("mac")) { $("f").classList.add("hide"); $("choices").innerHTML = ""; }
+  dots("mac", on);
 }
 
 async function send(text, { hidden = false } = {}) {
   if (busy || !text.trim()) return; busy = true; setChoices([]); $("f").classList.add("hide");
   if (!hidden) bubble("user", Casper.render(text));
-  const t = thinking();
+  dots("reply", true);
   try { await Casper.api("/guide/message", { method: "POST", body: { text, event: hidden } }); }
-  catch (e) { t.remove(); bubble("assistant", Casper.render(e.message)); busy = false; $("f").classList.remove("hide"); return; }
-  busy = false; rendered = -1; await refresh();
+  catch (e) { dots("reply", false); bubble("assistant", Casper.render(e.message)); busy = false; $("f").classList.remove("hide"); return; }
+  dots("reply", false); busy = false; rendered = -1; await refresh();
 }
 
 // A button that does something on their Mac (e.g. open the folder chooser).
@@ -77,15 +89,15 @@ async function act(action) {
 // Casper's state moved on (Mac connected, Mirror clicked...): the guide
 // carries on by itself -- whichever tab notices first; the rest just render.
 async function tick() {
-  if (busy) return;
+  if (busy || retired) return;
   try {
     const st = await Casper.api("/guide/state");
     if (st.count !== rendered) await refresh();
     waiting(st.waiting);
     $("progress").classList.toggle("hide", !st.progress); $("progress").innerText = st.progress || "";
     if (st.due) {
-      busy = true; const t = thinking();
-      try { await Casper.api("/guide/continue", { method: "POST" }); } finally { t.remove(); busy = false; }
+      busy = true; dots("reply", true);
+      try { await Casper.api("/guide/continue", { method: "POST" }); } finally { dots("reply", false); busy = false; }
       rendered = -1; await refresh();
     }
   } catch (e) { /* offline for a moment: try again next tick */ }
@@ -106,9 +118,16 @@ document.addEventListener("click", ev => {
 
 $("f").addEventListener("submit", ev => { ev.preventDefault(); const t = $("t").value; $("t").value = ""; send(t); });
 $("signout").onclick = ev => { ev.preventDefault(); Casper.signOut(); location.href = "/signin"; };
+// Signing in from the Mac app opens a new guide tab: the newest one carries
+// on, and an older one says so instead of running alongside it.
+const tabs = new BroadcastChannel("casper-guide");
+tabs.onmessage = () => {
+  retired = true; dotsFor.clear(); setChoices([]); $("f").classList.add("hide"); $("progress").classList.add("hide");
+  $("log").innerHTML = ""; bubble("assistant", Casper.render("This conversation continues in your newer Casper tab. You can close this one."));
+};
+tabs.postMessage("here");
 (async () => {
   await refresh();
-  const invite = Casper.param("invite");
   if (invite) {
     history.replaceState(null, "", location.pathname);
     const msgs = (await Casper.api("/guide/history")).messages;

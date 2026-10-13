@@ -43,6 +43,12 @@ def username(db, user_id: int) -> str:
     return row["username"] if row else f"user{user_id}"
 
 
+def display_name(name: str) -> str:
+    """A username written as a person's name, for text people read: riley ->
+    Riley. Anything that isn't a plain lowercase name is left as it is."""
+    return name.capitalize() if name.isalpha() and name.islower() else name
+
+
 # --- Friends -----------------------------------------------------------------
 def are_friends(db, a: int, b: int) -> bool:
     row = db.execute(

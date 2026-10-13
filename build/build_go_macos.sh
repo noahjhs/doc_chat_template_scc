@@ -234,7 +234,7 @@ codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_DIR"
 
 ZIP_NAME="Casper-macos-go${SUFFIX}.zip"
 rm -f "dist/$ZIP_NAME"
-( cd dist && zip -r "$ZIP_NAME" CasperGo )
+( cd dist/CasperGo && zip -qr "../$ZIP_NAME" Casper.app )  # unzips to Casper.app itself
 
 if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
     echo "SKIP_NOTARIZE=1 -- signed but not submitted for notarization; a downloaded copy will still show Gatekeeper's \"unidentified developer\" prompt."
@@ -270,7 +270,7 @@ else
     # artifact contains the now-stapled bundle.
     xcrun stapler staple "$APP_DIR"
     rm -f "dist/$ZIP_NAME"
-    ( cd dist && zip -r "$ZIP_NAME" CasperGo )
+    ( cd dist/CasperGo && zip -qr "../$ZIP_NAME" Casper.app )  # unzips to Casper.app itself
 fi
 
 # Restore the staged embed targets to empty -- go:embed needs these files to

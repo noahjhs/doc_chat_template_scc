@@ -513,7 +513,7 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         # The site's invite page reads what it offers, without signing in.
         info = client.get("/invites/info", params={"code": code})
         assert info.headers["access-control-allow-origin"] == "*"
-        assert info.json() == {"valid": True, "inviter": "sam", "name": "Riley", "group": "Mutual Aid", "kind": "mirror_space",
+        assert info.json() == {"valid": True, "inviter": "Sam", "name": "Riley", "group": "Mutual Aid", "kind": "mirror_space",
                                "quota_gb": 10.0, "expires_at": info.json()["expires_at"]}
         assert client.get("/invites/info", params={"code": "CASPER-AAAA-AAAA-AAAA"}).json()["valid"] is False
 
@@ -884,7 +884,7 @@ def test_guide_facts_come_from_caspers_state(app_env):
         rid = _user_id(main, "riley")
         said = [{"role": "user", "content": f"A friend invited me -- my invite code is {code}."}]
         f = main._guide_facts(rid, said)
-        assert f.invite == {"code": code, "inviter": "sam", "state": "open"} and not f.mirror_hosts
+        assert f.invite == {"code": code, "inviter": "Sam", "state": "open"} and not f.mirror_hosts
         _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
         f = main._guide_facts(rid, said)
         assert f.invite["state"] == "accepted" and f.mirror_hosts == ["sam/sam-mini"] and f.folder == "none"
