@@ -67,9 +67,12 @@ quietly, finish on your own, and leave a report.
    → Start → Casper's Mirror dialog → copying → Protected → the recovery kit
    (from the ghost menu: Make Recovery Kit; any passphrase, typed twice) →
    the give-back question (answer either way) → done.
-5. Take a screenshot at every step and whenever something looks off.
+5. **Both sides agree.** Once Noah's guide says Protected, ask Riley's
+   agent "What am I holding for Noah?" (`-c`). It must match what Noah was
+   told: one folder, its size, up to date. Log it in the transcript.
+6. Take a screenshot at every step and whenever something looks off.
    Number them in order.
-6. `tools/scenario.py stop $SCENARIO --env test` (only your own personas).
+7. `tools/scenario.py stop $SCENARIO --env test` (only your own personas).
 
 ## What to look for
 
