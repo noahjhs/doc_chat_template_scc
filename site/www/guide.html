@@ -11,7 +11,7 @@
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
-let busy = false, rendered = -1, retired = false;
+let busy = false, rendered = -1;
 const invite = Casper.param("invite");
 
 function bubble(role, html, extra = "") {
@@ -98,7 +98,7 @@ async function act(action) {
 // Casper's state moved on (Mac connected, Mirror clicked...): the guide
 // carries on by itself -- whichever tab notices first; the rest just render.
 async function tick() {
-  if (busy || retired) return;
+  if (busy) return;
   try {
     const st = await Casper.api("/guide/state");
     if (st.count !== rendered) await refresh();
@@ -127,14 +127,11 @@ document.addEventListener("click", ev => {
 
 $("f").addEventListener("submit", ev => { ev.preventDefault(); const t = $("t").value; $("t").value = ""; send(t); });
 $("signout").onclick = ev => { ev.preventDefault(); Casper.signOut(); location.href = "/signin"; };
-// Signing in from the Mac app opens a new guide tab: the newest one carries
-// on, and an older one says so instead of running alongside it.
+// Every guide tab stays live (the server takes turns one at a time). Sign-in
+// from the Mac app asks whether one is open, so it can leave the guide to it
+// instead of opening another.
 const tabs = new BroadcastChannel("casper-guide");
-tabs.onmessage = () => {
-  retired = true; dotsFor.clear(); setChoices([]); $("f").classList.add("hide"); $("progress").classList.add("hide");
-  $("log").innerHTML = ""; bubble("assistant", Casper.render("This conversation continues in your newer Casper tab. You can close this one."));
-};
-tabs.postMessage("here");
+tabs.onmessage = ev => { if (ev.data === "anyone?") tabs.postMessage("guide-open"); };
 (async () => {
   await refresh();
   if (invite) {

@@ -41,6 +41,17 @@ async function waitForConnected(before, seconds = 40) {
   }
   return false;
 }
+// Is a guide tab open in this browser? Open ones answer on this channel.
+function guideOpen(ms = 500) {
+  if (!window.BroadcastChannel) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const ch = new BroadcastChannel("casper-guide");
+    const done = found => { clearTimeout(t); ch.close(); resolve(found); };
+    const t = setTimeout(() => done(false), ms);
+    ch.onmessage = ev => { if (ev.data === "guide-open") done(true); };
+    ch.postMessage("anyone?");
+  });
+}
 const pairCode = Casper.param("pair");
 async function connect() {
   const before = (await Casper.connectedHosts()) || new Set();
@@ -55,8 +66,14 @@ async function connect() {
     Casper.pair();
   }
   if (await waitForConnected(before)) {
+    // A guide tab already open carries on by itself: leave it to that one
+    // rather than opening a second guide here.
+    if (await guideOpen()) {
+      showStatus("This Mac is connected.", "Your guide carries on in your other Casper tab.");
+      window.close();  // usually ignored for a tab the app opened; the line above stands
+      return;
+    }
     showStatus("This Mac is connected.");
-    // The guide (this tab, or one already open) carries on by itself.
     setTimeout(() => location.href = next, 700);
   } else {
     showStatus("Casper didn't connect.", "Make sure Casper is open on this Mac, then try again.",
