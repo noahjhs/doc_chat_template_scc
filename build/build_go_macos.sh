@@ -270,7 +270,13 @@ else
     # applies to an .app/.pkg/.dmg, never a zip, so the zip submitted above
     # doesn't carry it yet. Re-zip afterward so the actual distributed
     # artifact contains the now-stapled bundle.
-    xcrun stapler staple "$APP_DIR"
+    # Retried: fetching the ticket from Apple sometimes drops mid-request.
+    for attempt in 1 2 3 4; do
+        xcrun stapler staple "$APP_DIR" && break
+        [ "$attempt" = 4 ] && exit 1
+        echo "Stapling failed (attempt $attempt); retrying in 20 s..."
+        sleep 20
+    done
     rm -f "dist/$ZIP_NAME"
     ( cd dist/CasperGo && zip -qr "../$ZIP_NAME" Casper.app )  # unzips to Casper.app itself
 fi
