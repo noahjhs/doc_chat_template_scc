@@ -2240,6 +2240,27 @@ def _gb(n: int) -> str:
     return backups.human(n)
 
 
+def _holding(grant_id: int) -> str:
+    """What a friend mirrors under a grant you give, from their Mac's own
+    reports: how many folders, how big, and whether your copy is current.
+    Never the folders' names (that's theirs to share)."""
+    with get_db() as db:
+        folders = db.execute(
+            """SELECT f.id FROM mirror_targets t JOIN mirror_folders f ON f.id = t.folder_id
+               WHERE t.grant_id = ? AND t.removed_at IS NULL AND f.status = 'active'""", (grant_id,)).fetchall()
+        if not folders:
+            return ", holding nothing yet"
+        total, copying = 0, 0
+        for f in folders:
+            st = mirroring.latest_status(db, f["id"]) or {}
+            total += st.get("local_bytes", 0) or 0
+            if not st or st.get("unprotected_files") or not any(p.get("connected") or not str(p.get("last_seen", "")).startswith("1969")
+                                                               for p in st.get("peers", [])):
+                copying += 1
+    what = f"{len(folders)} folder{'s' if len(folders) > 1 else ''} of theirs" + (f" ({_gb(total)})" if total else "")
+    return f", holding {what}, " + ("still copying" if copying else "up to date")
+
+
 def _mcp_my_casper(user_id: int) -> str:
     """The ledger (agent-first-ux.md, principle 3): everything this person
     has shared or been given, and anything waiting on them, in plain words."""
@@ -2296,7 +2317,7 @@ def _mcp_my_casper(user_id: int) -> str:
     if given:
         lines.append("Space you give friends (everything arrives encrypted; you can't read it):")
         for g in given:
-            using = f", using {_gb(stored_by_friend.get(g['grantee_user_id'], 0))}" if g["relation"] == "backup_peer" else ""
+            using = f", using {_gb(stored_by_friend.get(g['grantee_user_id'], 0))}" if g["relation"] == "backup_peer" else _holding(g["id"])
             lines.append(f"  - {kinds[g['relation']]} space for {g['grantee']}: {_gb(g['quota_bytes'])} on {g['host']}{using} [grant {g['id']}]")
     if held:
         lines.append("Space friends have given you:")

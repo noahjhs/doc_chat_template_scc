@@ -11,13 +11,14 @@
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
-let busy = false, rendered = -1, retired = false, stage = "";
+let busy = false, rendered = -1, retired = false;
 const invite = Casper.param("invite");
 
 function bubble(role, html, extra = "") {
   const d = document.createElement("div"); d.className = "msg " + role + " " + extra;
   d.innerHTML = (role === "assistant" ? '<span class="av">' + GHOST + "</span>" : "") + '<div class="body">' + html + "</div>";
-  $("log").appendChild(d); window.scrollTo(0, document.body.scrollHeight); return d;
+  $("log").insertBefore(d, dotsEl);  // the thinking dots stay last
+  window.scrollTo(0, document.body.scrollHeight); return d;
 }
 
 // One "thinking" bubble, however many reasons there are to show it (a reply
@@ -35,12 +36,15 @@ function setChoices(list) {
   $("choices").innerHTML = "";
   const has = (list || []).length > 0;
   $("f").classList.toggle("hide", has);
+  // The folder step (its buttons include the folder chooser): sizing the folder
+  // picked makes macOS ask whether Casper may see it. Say so before it pops up.
+  const folderStep = (list || []).some(c => typeof c === "object" && c.action === "choose_folder");
   (list || []).forEach((c, i) => {
     const b = document.createElement("button"); b.className = i === 0 ? "btn" : "btn ghost";
     b.innerText = typeof c === "string" ? c : c.label;
     b.onclick = () => {
       // Sizing a folder makes macOS ask whether Casper may see it: say so before it pops up.
-      if (stage === "choose_folder" && typeof c === "string")
+      if (folderStep && typeof c === "string")
         setTimeout(() => { if (busy) bubble("assistant", "If your Mac asks whether Casper can see " + c + ", choose Allow.", "note-bubble"); }, 3000);
       typeof c === "string" ? send(c) : act(c.action);
     };
@@ -97,7 +101,6 @@ async function tick() {
   if (busy || retired) return;
   try {
     const st = await Casper.api("/guide/state");
-    stage = st.stage || "";
     if (st.count !== rendered) await refresh();
     waiting(st.waiting);
     $("progress").classList.toggle("hide", !st.progress); $("progress").innerText = st.progress || "";

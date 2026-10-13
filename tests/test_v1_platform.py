@@ -1103,3 +1103,19 @@ def test_mail_sink_keeps_invites_instead_of_sending(app_env, monkeypatch, tmp_pa
         got = client.get("/dev/mail", params={"to": "riley@example.com"}, headers={"X-Dev-Admin": "t0ken"}).json()["messages"]
         assert len(got) == 1 and "https://www.example/invite#CASPER-" in got[0]["text"]
         assert client.get("/dev/mail", params={"to": "nobody@example.com"}, headers={"X-Dev-Admin": "t0ken"}).json()["messages"] == []
+
+
+def test_a_giver_sees_what_they_hold_without_folder_names(app_env, monkeypatch):
+    """Second unattended run: Noah's guide said "Protected", but Riley's own
+    ledger had nothing about it, so Riley's agent said nothing was stored."""
+    main, _ = app_env
+    with main.get_db() as db:
+        db.execute("PRAGMA foreign_keys = OFF")
+        db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES ('f1', 2, 2, '~/Documents', 'Documents', 'active')")
+        db.execute("INSERT INTO mirror_targets (folder_id, role, grant_id, peer_owner_user_id, peer_host_id) VALUES ('f1', 'mirror', 7, 1, 1)")
+    assert main._holding(8) == ", holding nothing yet"
+    copying = {"local_bytes": 417 * 1024**2, "unprotected_files": 3, "peers": [{"role": "mirror", "connected": True, "last_seen": "2026-10-12T01:00:00Z"}]}
+    for status, want in ((copying, "still copying"), ({**copying, "unprotected_files": 0}, "up to date")):
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: st)
+        got = main._holding(7)
+        assert got.startswith(", holding 1 folder of theirs (") and got.endswith(want) and "Documents" not in got
