@@ -9,7 +9,8 @@
 #
 # The report lands in ~/Documents/Casper e2e runs/<when>/notes.md (screens/,
 # transcripts and the runner's own log alongside). Prints the run directory
-# and returns when the run is over; start it in the background.
+# and returns when the run is over; start it in the background. Runs go one at
+# a time (lock: ~/.cache/casper-e2e.lock); a second one waits its turn.
 set -euo pipefail
 # All in a function, called on the last line: bash then reads the whole
 # script before running any of it, so editing this file mid-run is safe.
@@ -18,6 +19,15 @@ main() {
   REPO=$(pwd)
   local SCENARIO=${1:-invite-headless}
   REV=$(git rev-parse "${2:-HEAD}")
+  # One run at a time (one test stack, one VM): wait for any other run.
+  source tools/lock.sh
+  WT=""
+  cleanup() {
+    [ -z "$WT" ] || { cd "$REPO" && git worktree remove --force "$WT" 2>/dev/null || true; }
+    lock_release e2e
+  }
+  trap cleanup EXIT
+  lock_take e2e
   RUN="$HOME/Documents/Casper e2e runs/$(date +%Y-%m-%d_%H%M)"
   mkdir -p "$RUN/screens"
   echo "$RUN"
@@ -32,8 +42,6 @@ main() {
   ln -s "$REPO/.venv" "$WT/.venv"   # vncdotool, for tools/vmgui.py
   mkdir -p "$WT/agent/internal/config/embedded"   # untracked; go:embed needs the files to exist
   touch "$WT"/agent/internal/config/embedded/{auth,relay,app}_server.txt
-  cleanup() { cd "$REPO" && git worktree remove --force "$WT" 2>/dev/null || true; }
-  trap cleanup EXIT
 
   cd "$WT"
   claude -p "Use the e2e-run skill. RUN=\"$RUN\" SCENARIO=$SCENARIO COMMIT=$REV. Work in this directory (a worktree of the commit under test)." \
