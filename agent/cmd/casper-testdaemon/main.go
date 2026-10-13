@@ -4,8 +4,11 @@
 // handler and backup store for one already-paired identity, so a test can
 // drive real encryption, signing, grant enforcement and restore through a
 // real casper_service -- everything except the menu bar, the Keychain (an
-// in-memory key store instead) and the relay (casper_service reaches it
-// directly on localhost).
+// in-memory key store instead) and, by default, the relay (casper_service
+// reaches it directly on localhost). With -relay-domain/-routing-key it
+// joins the relay and reports presence every minute like the app does: a
+// headless persona for end-to-end runs (tools/scenario.py), a Mac that's
+// always on without a screen.
 package main
 
 import (
@@ -24,6 +27,7 @@ import (
 	"casper-agent/internal/mirror"
 	"casper-agent/internal/mirrord"
 	"casper-agent/internal/server"
+	"casper-agent/internal/tunnel"
 )
 
 func main() {
@@ -36,6 +40,8 @@ func main() {
 	data := flag.String("data", "", "where backups/keys state lives")
 	syncthing := flag.String("syncthing", "", "syncthing binary (enables mirroring)")
 	stListen := flag.String("st-listen", "", "syncthing listen address, e.g. tcp://127.0.0.1:22101")
+	relayDomain := flag.String("relay-domain", "", "join this relay and report presence (a headless persona)")
+	routingKey := flag.String("routing-key", "", "the routing key paired with (with -relay-domain)")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "testdaemon "+*username+": ", log.LstdFlags)
@@ -76,6 +82,19 @@ func main() {
 
 	srv := server.New(logger)
 	srv.AddIdentity(*commandKey, handler, nil, nil)
+	if *relayDomain != "" {
+		tun, err := tunnel.Start(*relayDomain, *routingKey, *port)
+		if err != nil {
+			logger.Fatal(err)
+		}
+		go func() {
+			for ; ; time.Sleep(time.Minute) {
+				if config.ReportPresence(*authDomain, *deviceToken, tun.URL, *home) {
+					logger.Fatal("the pairing is no longer recognized")
+				}
+			}
+		}()
+	}
 	fmt.Println("ready")
 	if err := srv.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", *port)); err != nil {
 		logger.Fatal(err)

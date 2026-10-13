@@ -82,6 +82,7 @@ deploy() {
     local wt; wt=$(mktemp -d)/build
     git worktree add -q --detach "$wt" "$rev"
     cp auth_server.test.txt relay_server.test.txt app_server.test.txt "$wt/"
+    mkdir -p "$wt/agent/internal/config/embedded"   # untracked: the build stages the domains here
     (cd "$wt" && DEPLOY_ENV=test ./build/build_go_macos.sh > /tmp/casper_test_build.log 2>&1) \
       || { echo "app build failed: /tmp/casper_test_build.log"; git worktree remove --force "$wt"; exit 1; }
     cp "$wt/dist/Casper-macos-go.test.zip" dist/

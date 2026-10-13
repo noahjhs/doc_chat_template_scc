@@ -4,7 +4,10 @@
     tools/scenario.py list                 what's defined (tools/scenarios.toml)
     tools/scenario.py start <name>         stop other VMs, free memory, then reset a scenario (every persona in it) or one checkpoint
     tools/scenario.py reset <name>         the same, but leave other running VMs alone
-    tools/scenario.py stop                 shut every test VM down
+    tools/scenario.py stop [scenario]      shut every test VM down (or just the scenario's), and wipe headless personas' Macs
+    tools/scenario.py mail [address]       the newest email the test stack kept instead of sending
+    tools/scenario.py ask <persona> [-c] "text"   talk to a headless persona's own agent (-c: carry on the conversation)
+    ... --env test                         use the end-to-end test deployment (tools/test_stack.sh) instead of dev
     ... start|reset|edit <name> --vnc      serve each VM's screen over VNC instead of opening its window,
                                            so tools/vmgui.py can look at it and click (see that file)
     tools/scenario.py edit <snapshot>      open a starting snapshot itself, to change it (e.g. riley-base)
@@ -185,10 +188,13 @@ def fresh_vm(persona: dict):
     raise RuntimeError(f"{vm} didn't come up (no guest agent after 3 minutes)")
 
 
-# --- The dev deployment ----------------------------------------------------------------
+# --- The deployment (dev by default; --env test for the end-to-end test stack) ------------
+DEPLOY = CONF["deployments"]["dev"]
+
+
 def dev(method: str, path: str, body: dict | None = None) -> dict:
     token = (CONFIG_DIR / "dev-admin-token").read_text().strip()
-    req = urllib.request.Request(CONF["deployment"]["auth_url"] + path, method=method,
+    req = urllib.request.Request(DEPLOY["auth_url"] + path, method=method,
                                  data=json.dumps(body).encode() if body is not None else None,
                                  headers={"X-Dev-Admin": token, "User-Agent": "casper-scenario", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=60, context=_TLS) as r:
@@ -199,7 +205,7 @@ def mcp(token: str, tool: str, **arguments):
     """One MCP tool call as the persona; returns its result (text, or the
     tool's structured data, e.g. list_hosts' list)."""
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}).encode()
-    req = urllib.request.Request(CONF["deployment"]["auth_url"] + "/mcp", data=body, method="POST", headers={
+    req = urllib.request.Request(DEPLOY["auth_url"] + "/mcp", data=body, method="POST", headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream", "User-Agent": "casper-scenario"})
     with urllib.request.urlopen(req, timeout=60, context=_TLS) as r:
@@ -210,12 +216,105 @@ def mcp(token: str, tool: str, **arguments):
     return structured["result"] if "result" in structured else "\n".join(c.get("text", "") for c in result["content"])
 
 
+def api(method: str, path: str, body: dict | None = None, token: str = "") -> dict:
+    """A plain call to the deployment's API (as a person, with their session)."""
+    req = urllib.request.Request(DEPLOY["auth_url"] + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json", "User-Agent": "casper-scenario",
+                                          **({"Authorization": f"Bearer {token}"} if token else {})})
+    with urllib.request.urlopen(req, timeout=60, context=_TLS) as r:
+        return json.loads(r.read() or b"{}")
+
+
+# --- Headless personas ------------------------------------------------------------------
+# A persona with `headless = true` has no VM: their "Mac" is
+# agent/cmd/casper-testdaemon plus Syncthing, running on the mini (always on,
+# no screen, nothing on this Mac's), joined to the relay and reporting presence
+# like the app. Their agent is a Claude Code with only Casper's tools
+# (`tools/scenario.py ask`). Local state (credentials) is kept in
+# ~/.config/casper-vm/headless/<persona>.json, owner-only.
+MINI = "casper-mini"
+HEADLESS = CONFIG_DIR / "headless"
+
+
+def mini(script: str, timeout: int = 120) -> str:
+    r = subprocess.run(["ssh", MINI, script], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"on the mini: {(r.stderr or r.stdout).strip()[-600:]}")
+    return r.stdout.strip()
+
+
+def headless_state(p: dict) -> dict:
+    f = HEADLESS / f"{p['username']}.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def save_headless_state(p: dict, state: dict):
+    HEADLESS.mkdir(parents=True, exist_ok=True)
+    os.chmod(HEADLESS, 0o700)
+    f = HEADLESS / f"{p['username']}.json"
+    f.write_text(json.dumps(state))
+    os.chmod(f, 0o600)
+
+
+def headless_stop(p: dict) -> str:
+    """Stops the persona's daemon on the mini and wipes its "Mac" (Syncthing
+    identity and whatever it held), so the next start is a fresh machine."""
+    d = f"~/casper-headless/{p['username']}"
+    mini(f"[ -f {d}/pid ] && kill $(cat {d}/pid) 2>/dev/null; sleep 2; rm -rf {d}; echo ok")
+    (HEADLESS / f"{p['username']}.json").unlink(missing_ok=True)
+    return "headless Mac wiped"
+
+
+def headless_start(p: dict, st: dict):
+    """Builds the test daemon, copies it to the mini and starts it there."""
+    out = Path("/tmp/casper-testdaemon-arm64")
+    subprocess.run(["go", "build", "-o", str(out), "./cmd/casper-testdaemon"], cwd=HERE.parent / "agent", check=True,
+                   env={**os.environ, "GOOS": "darwin", "GOARCH": "arm64"}, capture_output=True)
+    mini("mkdir -p ~/casper-headless/bin && cp -n ~/st-spike/bin/syncthing ~/casper-headless/bin/syncthing 2>/dev/null; true")
+    subprocess.run(["scp", "-q", str(out), f"{MINI}:casper-headless/bin/casper-testdaemon"], check=True)
+    d = f"casper-headless/{p['username']}"
+    args = " ".join(f"{k} {json.dumps(v)}" for k, v in [
+        ("-port", str(p.get("port", 8720))), ("-auth-domain", DEPLOY["auth_domain"]), ("-relay-domain", DEPLOY["relay_domain"]),
+        ("-routing-key", st["routing_key"]), ("-username", p["username"]), ("-device-token", st["device_token"]),
+        ("-command-key", st["command_key"]), ("-home", f"$HOME/{d}/home"), ("-data", f"$HOME/{d}/data"),
+        ("-syncthing", "$HOME/casper-headless/bin/syncthing"), ("-st-listen", f"tcp://0.0.0.0:{p.get('st_port', 22020)}")])
+    mini(f"""mkdir -p ~/{d}/home ~/{d}/data && cd ~/{d} &&
+        nohup ~/casper-headless/bin/casper-testdaemon {args} > daemon.out 2> daemon.log < /dev/null & echo $! > ~/{d}/pid
+        for i in $(seq 30); do grep -q ready ~/{d}/daemon.out && exit 0; sleep 1; done; tail -5 ~/{d}/daemon.log; exit 1""")
+
+
+def ask(persona: str, text: str, continue_: bool = False) -> str:
+    """One message to a headless persona's own agent: Claude Code with only
+    Casper's tools, in its own clean config (none of this Mac's settings or
+    memory), signed in with the long-lived test token."""
+    p = CONF["personas"][persona]
+    st = headless_state(p)
+    if not st.get("agent_token"):
+        raise RuntimeError(f"{persona} has no agent yet: reset a checkpoint of theirs first")
+    home = HEADLESS / f"{p['username']}-claude"
+    (home / "chat").mkdir(parents=True, exist_ok=True)
+    mcp_config = {"mcpServers": {"casper": {"type": "http", "url": DEPLOY["auth_url"] + "/mcp",
+                                            "headers": {"Authorization": f"Bearer {st['agent_token']}"}}}}
+    token = mini("cat ~/.config/casper-test/claude-token")
+    r = subprocess.run(["claude", *(["-c"] if continue_ else []), "-p", text, "--mcp-config", json.dumps(mcp_config),
+                        "--strict-mcp-config", "--allowedTools", "mcp__casper__*", "--output-format", "text"],
+                       cwd=home / "chat", capture_output=True, text=True, timeout=300,
+                       env={**os.environ, "CLAUDE_CONFIG_DIR": str(home / "config"), "CLAUDE_CODE_OAUTH_TOKEN": token})
+    if r.returncode != 0:
+        raise RuntimeError(f"{persona}'s agent: {(r.stderr or r.stdout).strip()[-400:]}")
+    return r.stdout.strip()
+
+
 # --- Steps ------------------------------------------------------------------------------
 def step_name_mac(p, ctx, *name):
     """Gives the persona's Mac a real name (what friends see), e.g.
     name_mac Riley's MacBook. Needs the VM's admin password."""
     pretty = " ".join(name)
     local = "".join(c if c.isalnum() else "-" for c in pretty.replace("'", "")).strip("-")
+    if p.get("headless"):
+        ctx["mac_name"] = local
+        return f"{pretty} ({local})"
     pw = (CONFIG_DIR / "password").read_text().strip()
     vm_exec(p["vm"], f"""for k in ComputerName HostName LocalHostName; do
         v={json.dumps(pretty)}; [ $k = ComputerName ] || v={json.dumps(local)}
@@ -252,7 +351,7 @@ def step_quiet_apps(p, ctx, *names):
 
 
 def step_install_casper(p, ctx):
-    url = CONF["deployment"]["download_url"]
+    url = DEPLOY["download_url"]
     vm_exec(p["vm"], f"""
         pkill -x Casper; sleep 1
         curl -fsSL '{url}' -o /tmp/casper.zip && rm -rf /Applications/CasperGo /Applications/Casper.app &&
@@ -266,11 +365,26 @@ def step_install_casper(p, ctx):
 
 
 def step_create_account(p, ctx):
+    if p.get("headless"):
+        password = os.urandom(12).hex()
+        token = api("POST", "/signup", {"username": p["username"], "password": password})["token"]
+        save_headless_state(p, {"password": password, "session": token})
+        return f"account {p['username']}"
     vm_exec(p["vm"], f"'{CASPER}' setup account create --username '{p['username']}'")
     return f"account {p['username']}"
 
 
 def step_pair(p, ctx):
+    if p.get("headless"):
+        st = headless_state(p)
+        rk = "rk-" + os.urandom(8).hex()
+        name = ctx.get("mac_name", f"{p['username']}-mac")
+        st.update(routing_key=rk, **{k: v for k, v in api("POST", "/hosts/pair", {"routing_key": rk, "hostname": name},
+                                                         token=st["session"]).items() if k in ("device_token", "command_key", "host_id")})
+        st["agent_token"] = ctx.setdefault("agent_token", dev("POST", f"/dev/users/{p['username']}/agent-token")["token"])
+        save_headless_state(p, st)
+        headless_start(p, st)
+        return f"Paired: {name}, running headless on the mini"
     return vm_exec(p["vm"], f"'{CASPER}' setup pair", timeout=120).splitlines()[-1]
 
 
@@ -286,6 +400,8 @@ def step_chat_folder(p, ctx):
 
 def step_publish_offering(p, ctx, gb="20"):
     token = ctx.setdefault("agent_token", dev("POST", f"/dev/users/{p['username']}/agent-token")["token"])
+    if p.get("headless"):
+        save_headless_state(p, {**headless_state(p), "agent_token": token})
     mine = [h["host"] for h in mcp(token, "list_hosts") if h["role"] == "owner"]
     return mcp(token, "publish_offering", host=mine[0], max_gb=float(gb), kind="mirror", preview=False).split(".")[0]
 
@@ -348,7 +464,12 @@ def reset_checkpoint(name: str):
     # The deepest captured checkpoint on the way here, if any: restore it,
     # then replay only the steps after it.
     at = max((i for i, (cp, _) in enumerate(chain) if capture_of(cp)), default=None)
-    if at is not None:
+    if persona.get("headless"):
+        gone = delete_accounts(persona)
+        say(who, f"dev accounts deleted: {', '.join(gone)}" if gone else "no dev accounts yet")
+        say(who, headless_stop(persona))
+        steps = [s for _, steps in chain for s in steps]
+    elif at is not None:
         cp = chain[at][0]
         cap = capture_of(cp)
         delete_accounts(persona)  # including ones made since the capture
@@ -446,8 +567,9 @@ def describe(name: str) -> str:
     def checkpoint_lines(cp, indent="  "):
         persona, _ = checkpoint_plan(cp)
         out = [f"{indent}{cp}: {CONF['checkpoints'][cp]['about']}",
-               f"{indent}  persona  {persona['username']} (VM {persona['vm']}, dev account {persona['username']})",
-               f"{indent}  starts   {snapshot_line(persona['snapshot'])}",
+               f"{indent}  persona  {persona['username']} (" + ("headless, on the mini" if persona.get("headless") else f"VM {persona['vm']}")
+               + f", dev account {persona['username']})",
+               f"{indent}  starts   " + ("a wiped headless Mac" if persona.get("headless") else snapshot_line(persona["snapshot"])),
                f"{indent}  then     delete their dev accounts ({', '.join(persona.get('accounts', [persona['username']]))}), and:"]
         chain = checkpoint_chain(cp)
         at = max((i for i, (c, _) in enumerate(chain) if capture_of(c)), default=None)
@@ -478,10 +600,11 @@ def describe(name: str) -> str:
         lines.append(f"in scenarios: {', '.join(used) or 'none'}")
     elif name in personas:
         p = personas[name]
-        lines += [f"persona {name}: VM {p['vm']}, dev account {p['username']}", f"starts {snapshot_line(p['snapshot'])}",
+        lines += [f"persona {name}: " + ("headless, on the mini" if p.get("headless") else f"VM {p['vm']}") + f", dev account {p['username']}",
+                  "starts " + ("a wiped headless Mac" if p.get("headless") else snapshot_line(p["snapshot"])),
                   "checkpoints: " + ", ".join(c for c in CONF["checkpoints"] if checkpoint_plan(c)[0] is p)]
     elif name in snapshots or name in vms:
-        users = [n for n, p in personas.items() if p["snapshot"] == name]
+        users = [n for n, p in personas.items() if p.get("snapshot") == name]
         lines += [f"snapshot {snapshot_line(name)}", f"used by: {', '.join(users) or 'no persona'}"]
     else:
         lines.append(f"Nothing called {name!r}. Try: tools/scenario.py list")
@@ -561,6 +684,9 @@ def capture(name: str) -> int:
         return 2
     existing = tart("list", "-q").stdout.split()
     personas = [(cp, checkpoint_plan(cp)[0]) for cp in checkpoints]
+    if any(p.get("headless") for _, p in personas):
+        print("Headless personas can't be captured (their Mac is rebuilt in seconds anyway).")
+        return 2
     missing = [p["vm"] for _, p in personas if p["vm"] not in existing]
     if missing:
         print(f"Nothing to capture: {', '.join(missing)} doesn't exist (start the scenario first).")
@@ -597,9 +723,13 @@ def uncapture(checkpoint: str) -> int:
 
 
 def main(argv: list[str]) -> int:
-    global VNC
+    global VNC, DEPLOY
     VNC = "--vnc" in argv
     argv = [a for a in argv if a != "--vnc"]
+    if "--env" in argv:
+        i = argv.index("--env")
+        DEPLOY = CONF["deployments"][argv[i + 1]]
+        argv = argv[:i] + argv[i + 2:]
     cmd = argv[1] if len(argv) > 1 else "list"
     if cmd == "list":
         print("Scenarios:")
@@ -611,7 +741,7 @@ def main(argv: list[str]) -> int:
             print(f"  {name:<22} {c['about']}" + (f"  [captured {cap['captured_at'][:16]}]" if cap else ""))
         print("Personas:")
         for name, p in CONF["personas"].items():
-            print(f"  {name:<22} VM {p['vm']}, from snapshot {p['snapshot']}")
+            print(f"  {name:<22} " + ("headless, on the mini" if p.get("headless") else f"VM {p['vm']}, from snapshot {p['snapshot']}"))
         print("Snapshots:")
         for name, about in CONF["snapshots"].items():
             print(f"  {name:<22} {about}")
@@ -631,7 +761,7 @@ def main(argv: list[str]) -> int:
         if snap.startswith("cp-") and capture_of(snap[3:]):
             print(f"{snap} is the capture of {snap[3:]} -- use: tools/scenario.py uncapture {snap[3:]}")
             return 2
-        users = [n for n, p in CONF["personas"].items() if p["snapshot"] == snap]
+        users = [n for n, p in CONF["personas"].items() if p.get("snapshot") == snap]
         if users:
             print(f"{snap} is the starting point for {', '.join(users)} -- point them elsewhere in tools/scenarios.toml first.")
             return 2
@@ -692,9 +822,30 @@ def main(argv: list[str]) -> int:
                    f"snapshot = \"{dst}\" in tools/scenarios.toml")
         return 0
     if cmd == "stop":
-        for p in CONF["personas"].values():
-            if p["vm"] in running_vms():
+        only = argv[2] if len(argv) > 2 else None  # a scenario: just its personas
+        personas = ([checkpoint_plan(cp)[0] for cp in CONF["scenarios"][only]["checkpoints"]] if only in CONF["scenarios"]
+                    else CONF["personas"].values())
+        for p in personas:
+            if p.get("headless"):
+                if headless_state(p):
+                    say(p["username"], headless_stop(p))
+            elif p["vm"] in running_vms():
                 say("mac", f"{p['vm']}: {shutdown_vm(p['vm'])}")
+        return 0
+    if cmd == "mail":
+        # The newest email the deployment kept instead of sending (MAIL_SINK: the test stack).
+        to = argv[2] if len(argv) > 2 else ""
+        msgs = dev("GET", "/dev/mail?" + urllib.parse.urlencode({"to": to}))["messages"]
+        if not msgs:
+            print("No email kept" + (f" for {to}" if to else "") + " (only the test stack keeps email: --env test).")
+            return 1
+        m = msgs[0]
+        print(f"To: {m['to']}\nFrom: {m['from']}\nSubject: {m['subject']}\n\n{m['text']}")
+        return 0
+    if cmd == "ask" and len(argv) > 3:
+        cont = "-c" in argv
+        rest = [a for a in argv[2:] if a != "-c"]
+        print(ask(rest[0], rest[1], continue_=cont))
         return 0
     if cmd in ("start", "reset") and len(argv) > 2:
         # Either takes a scenario (every persona in it) or one checkpoint.
@@ -707,7 +858,8 @@ def main(argv: list[str]) -> int:
             print(f"No scenario or checkpoint called {name!r}.\n"
                   f"  scenarios:   {', '.join(CONF['scenarios'])}\n  checkpoints: {', '.join(CONF['checkpoints'])}")
             return 2
-        prepare_host(keep={checkpoint_plan(cp)[0]["vm"] for cp in checkpoints}, stop_others=cmd == "start")
+        prepare_host(keep={checkpoint_plan(cp)[0]["vm"] for cp in checkpoints if not checkpoint_plan(cp)[0].get("headless")},
+                     stop_others=cmd == "start")
         errors = run_parallel(checkpoints)
         if errors:
             print("\nNot ready:\n  " + "\n  ".join(errors))

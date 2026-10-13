@@ -14,9 +14,17 @@
 # create_account, pair,
 # connect_claude, publish_offering <GB>, chat_folder.
 
-[deployment]
+[deployments.dev]
 auth_url = "https://dev-auth.casperagent.dev"
 download_url = "https://dev-auth.casperagent.dev/download/casper/macos"
+auth_domain = "dev-auth.casperagent.dev"
+relay_domain = "dev-relay.casperagent.dev"
+
+[deployments.test]  # the end-to-end test stack (tools/test_stack.sh); --env test
+auth_url = "https://test-auth.casperagent.dev"
+download_url = "https://test-auth.casperagent.dev/download/casper/macos"
+auth_domain = "test-auth.casperagent.dev"
+relay_domain = "test-relay.casperagent.dev"
 
 [snapshots]
 # Local-only starting points (Tart VMs on this Mac).
@@ -29,6 +37,11 @@ vm = "riley-mac"
 snapshot = "riley-base"
 username = "riley"
 accounts = ["riley", "riley_*", "riley-*"]  # every reset deletes these (names made up during a walkthrough too)
+
+[personas.riley-headless]  # Riley without a VM: a headless Mac on the mini, and a Claude with only Casper's tools
+headless = true
+username = "riley"
+accounts = ["riley", "riley_*", "riley-*"]
 
 [personas.noah]  # uses the Principal's own Telegram and Gmail (noah-base)
 vm = "noah-mac"
@@ -51,6 +64,11 @@ persona = "noah"
 about = "Noah: a Mac that's never seen Casper, and no Casper account."
 steps = ["name_mac Noah's MacBook Air", "quiet_apps Telegram Safari System_Settings"]
 
+[checkpoints.riley-headless-before-invite]
+persona = "riley-headless"
+about = "Riley, headless: an always-on Mac on the mini offering 20 GB of mirror space; no invites yet."
+steps = ["name_mac Riley's MacBook", "create_account", "pair", "publish_offering 20"]
+
 [scenarios.publish]
 about = "Riley offers space and invites Noah, from scratch."
 checkpoints = ["riley-before-publish", "noah-fresh"]
@@ -65,4 +83,11 @@ checkpoints = ["riley-before-invite", "noah-fresh"]
 next = """
 In riley-mac: open Terminal, run `cd ~/chat && claude`, and say
 "Invite my friend Noah to Mutual Aid."
+Then follow the invitation in noah-mac."""
+
+[scenarios.invite-headless]
+about = "Like invite, with one VM: Riley is headless (for automated runs, tools/e2e.sh)."
+checkpoints = ["riley-headless-before-invite", "noah-fresh"]
+next = """
+Riley: tools/scenario.py ask riley-headless "Invite my friend Noah to Mutual Aid."
 Then follow the invitation in noah-mac."""
