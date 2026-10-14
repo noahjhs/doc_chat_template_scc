@@ -42,6 +42,12 @@ more than one host, and it is the simplest concrete form of goals 2 and 3.
   is addressed.
 - [v1-implementation-plan.md](v1-implementation-plan.md): the phased
   build plan for the peer-backup scenario.
+- [gates.md](gates.md): how Casper decides it may act.
+- [recovery.md](recovery.md): getting folders back on a new Mac (master
+  key, shares on friends' Macs, PIN); decided 2026-10-14.
+- [research/](research/): prior art for design conversations.
+  - [mutual-arrangements.md](research/mutual-arrangements.md): friend
+    storage, gift economics, graph models, spreading copies.
 - [scenarios/](scenarios/): step-by-step workflow models, written before
   building each workflow.
   - [peer-backup.md](scenarios/peer-backup.md): the v1 scenario.
