@@ -45,6 +45,9 @@ more than one host, and it is the simplest concrete form of goals 2 and 3.
 - [gates.md](gates.md): how Casper decides it may act.
 - [recovery.md](recovery.md): getting folders back on a new Mac (master
   key, shares on friends' Macs, PIN); decided 2026-10-14.
+- [recovery-v2-design.md](recovery-v2-design.md): the technical design
+  for it (master key derivation, keepers, threshold-OPRF PIN check, opt-in
+  failsafe, guided recovery, build phases, pilot-safe minimum); 2026-10-15.
 - [community-model.md](community-model.md): gift exchange and baseline
   communism, giving visible and owing never, Ostrom, groups and pairs,
   naming; decided 2026-10-15.
