@@ -45,9 +45,15 @@ more than one host, and it is the simplest concrete form of goals 2 and 3.
 - [gates.md](gates.md): how Casper decides it may act.
 - [recovery.md](recovery.md): getting folders back on a new Mac (master
   key, shares on friends' Macs, PIN); decided 2026-10-14.
+- [community-model.md](community-model.md): gift exchange and baseline
+  communism, giving visible and owing never, Ostrom, groups and pairs,
+  naming; decided 2026-10-15.
 - [research/](research/): prior art for design conversations.
   - [mutual-arrangements.md](research/mutual-arrangements.md): friend
     storage, gift economics, graph models, spreading copies.
+  - [commons-governance.md](research/commons-governance.md): genuine
+    gratitude in public, Ostrom's principles applied, group governance
+    patterns.
 - [scenarios/](scenarios/): step-by-step workflow models, written before
   building each workflow.
   - [peer-backup.md](scenarios/peer-backup.md): the v1 scenario.
