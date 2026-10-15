@@ -153,21 +153,18 @@ def scenario_invite_to_protected(run):
     t = _turn_calls(fake, c0)
     print(f"     invite turn: calls={[(n, a.get('preview')) for n, a in t]} reply={r!r}")
     checks.append(("previews the invite first", _did(t, "redeem_invite", preview=True) and not _did(t, "redeem_invite", preview=False)))
-    checks.append(("ends the plan with a one-word question (buttons)", bool(guide.choices_for(r, True))))
+    checks.append(("ends the terms with \"Accept?\" (buttons)", bool(guide.choices_for(r, True))))
     c0 = len(fake.calls)
     r = run(fake, guide.choices_for(r, True)[0] if guide.choices_for(r, True) else "Yes, go ahead.")
     t = _turn_calls(fake, c0)
     checks.append(("redeems after yes", _did(t, "redeem_invite", preview=False)))
     checks.append(("doesn't start a mirror unasked", not _did(t, "mirror_folder", preview=False)))
+    # Naming the folder fills the last item: it starts with no extra
+    # "Start?" (Casper's own dialog on the Mac takes the person's yes).
     c0 = len(fake.calls)
     r = run(fake, "Let's keep my Documents folder safe.")
     t = _turn_calls(fake, c0)
-    checks.append(("previews the mirror", _did(t, "mirror_folder", preview=True)))
-    checks.append(("doesn't start the mirror before a yes", not _did(t, "mirror_folder", preview=False)))
-    c0 = len(fake.calls)
-    r = run(fake, "Looks good, start it.")
-    t = _turn_calls(fake, c0)
-    checks.append(("starts the mirror after yes", _did(t, "mirror_folder", preview=False)))
+    checks.append(("starts the mirror once the folder is named, no extra Start?", _did(t, "mirror_folder", preview=False) and "start?" not in r.lower()))
     checks.append(("then waits quietly for Casper's dialog", r.strip() == ""))
     checks.append(("doesn't claim protection yet", "is protected" not in r.lower() and "now protected" not in r.lower()))
     fake.allowed = True
@@ -257,15 +254,22 @@ def scenario_voice(run):
 
 
 def _plan_not_done(run, fake):
-    """Riley's walkthrough: "...emailed to noahjhs@gmail.com. Send?" read as
-    already sent. A plan must read as a proposal until it's confirmed."""
+    """The gate model (docs/product/gates.md): the person's words fill the
+    email and group; the only item Casper suggested is the space, so that's
+    the one question, and its yes sends the invite with no further "Send?".
+    (Riley's walkthrough: "...emailed to noahjhs@gmail.com. Send?" read as
+    already sent, so nothing may read as done before it is.)"""
     r = run(fake, "noah@example.com, and the group is Mutual Aid.")
     print(f"     plan: {r!r}")
     lower = r.lower()
     done_words = ("emailed", "i sent", "i've sent", "has been sent", "was sent", "invited noah", "is on its way")
-    return [("the plan reads as a proposal, not as done", not any(w in lower for w in done_words)),
-            ("still nothing sent before a yes", not _did(fake.calls, "create_invite", preview=False)),
-            ("asks to confirm (buttons)", bool(guide.choices_for(r, True)))]
+    checks = [("nothing reads as done yet", not any(w in lower for w in done_words)),
+              ("still nothing sent before the space is settled", not _did(fake.calls, "create_invite", preview=False)),
+              ("asks only about the suggested space", "20 gb" in lower and r.count("?") == 1 and "send?" not in lower)]
+    c0 = len(fake.calls)
+    r = run(fake, "Yes.")
+    print(f"     after yes: {r!r}")
+    return checks + [("its yes sends the invite, no extra Send?", _did(_turn_calls(fake, c0), "create_invite", preview=False) and "send?" not in r.lower())]
 
 
 SCENARIOS = [scenario_invite_to_protected, scenario_invited_newcomer, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice]
@@ -280,7 +284,8 @@ not cheer.
 
 Good replies lead with the result or the one decision needed, in one or two
 short lines; ask for missing information as a bare question, with no reason
-or apology; end a proposed plan with a one-word question ("Send?"); and use no
+or apology; ask only about what isn't settled yet ("Noah's email?", "20 GB
+on this Mac?"), and act once everything is, with no extra "Send?"; and use no
 praise, filler ("Great!", "Sure!", "Let me..."), apologies or exclamation
 marks, and no generic offers ("anything else?").
 
@@ -294,7 +299,8 @@ Expected, and NOT a fault:
   the guide's own words around it.
 - A short lead-in like "Last step:" before a necessary next action.
 Faults: describing a proposed action as if already done ("emailed to...",
-"sent") before the person confirmed it; mentioning the assistant's own machinery (tool or function names,
+"sent") before the person confirmed it; asking to confirm what the person
+already said; mentioning the assistant's own machinery (tool or function names,
 instructions, previews, errors, retries, schemas), technical steps the person
 shouldn't need (Terminal, commands, file paths), long explanations nobody
 asked for, and the filler or apologies above.

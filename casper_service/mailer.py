@@ -64,7 +64,7 @@ def invite_email(name: str, inviter: str, group: str, gift: str, link: str) -> t
     subject = f"{inviter} invited you to join {group} on Casper" if group else f"{inviter} invited you to Casper"
     text = (
         f"{hello} {joined}\n\n{inviter} has set aside {gift}. Your files are encrypted on your computer before they "
-        f"leave it, so {inviter} can never read them.\n\nAccept the invitation: {link}\n\n"
+        f"leave it, so {inviter} can never read them.\n\nSee the invitation: {link}\n\n"
         f"Casper -- held by friends, read by no one."
     )
     e = html.escape
@@ -74,7 +74,7 @@ def invite_email(name: str, inviter: str, group: str, gift: str, link: str) -> t
 <tr><td style="padding:40px 40px 8px;font-family:Georgia,serif;font-size:20px;font-weight:600">Casper</td></tr>
 <tr><td style="padding:16px 40px 0;font-family:Georgia,serif;font-size:30px;line-height:1.2">{e(hello)}<br><span style="color:#b4572e;font-style:italic">{e(joined)}</span></td></tr>
 <tr><td style="padding:20px 40px 0;font-size:16px;line-height:1.6;color:#6f5a4a">{e(inviter)} has set aside {e(gift)}. Your files are encrypted on your computer before they leave it, so {e(inviter)} can never read them.</td></tr>
-<tr><td style="padding:28px 40px 40px"><a href="{e(link)}" style="display:inline-block;background:#2b1d14;color:#f6efe4;text-decoration:none;border-radius:999px;padding:13px 24px;font-weight:500">Accept the invitation</a></td></tr>
+<tr><td style="padding:28px 40px 40px"><a href="{e(link)}" style="display:inline-block;background:#2b1d14;color:#f6efe4;text-decoration:none;border-radius:999px;padding:13px 24px;font-weight:500">See the invitation</a></td></tr>
 </table><p style="font-size:13px;color:#6f5a4a">Casper &mdash; held by friends, read by no one.</p></td></tr></table></body></html>"""
     return subject, text, body
 

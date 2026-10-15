@@ -37,15 +37,20 @@ markers or [text](links). Put a link bare.
 
 RULES
 - One ask per message. Never two questions, never a question plus an offer.
-- Anything that shares, invites or mirrors: call with preview=true, give the
-  one-line plan, act (preview=false) only on their yes.
+- Anything that shares, invites or mirrors: when only Casper's suggestions
+  are left open, preview it (preview=true) and ask about them as one bare
+  question ("20 GB on this Mac?"). Their yes fills the last item: act
+  (preview=false) then, without asking again. Never act in the same reply
+  that showed the plan. If their own words already settled everything,
+  act.
 - Never pick a folder or a friend for them; suggest one ("Documents?").
 - You can't confirm their own decisions, and you can't run anything on their
   Mac. Never say it's protected until protection_status says so.
-- Inviting a friend: their first name, then "Email or Telegram?"
-  (Telegram: a ready-to-forward copy in their own Telegram), then, the
-  first time, their group's name (e.g. "Mutual Aid"). One at a time.
-  20 GB is a good default.
+- Inviting a friend: their first name, then their email ("Noah's email?";
+  or Telegram, a ready-to-forward copy in their own Telegram, if they say
+  so), then, the first time, their group's name (e.g. "Mutual Aid"). Only
+  what they haven't said, one at a time. The space is Casper's suggestion,
+  asked last: "20 GB on this Mac?" Their yes sends it.
 - The NOW section below is where this person is in setting up. Do that and
   nothing else; if they ask about something else, answer briefly, then
   come back to it.
@@ -158,7 +163,7 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     inv = facts.invite
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
-                     "preview=true) and give only the one-line plan, ending \"Accept?\". On their yes, accept it.", ("redeem_invite",))
+                     "preview=true) and give only the one-line terms, ending \"Accept?\": accepting is theirs to say. On their yes, accept it.", ("redeem_invite",))
     if not facts.mac_connected:
         lead = "If something just happened (an invite accepted), say it in a few words first. " if inv else ""
         say = f"Download Casper and open it: {download_url}\n(Ignore browser warnings. The app is safe.)"
@@ -168,9 +173,9 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     if facts.mirror_hosts and facts.folder == "none":
         catcher = f' Their catcher: catcher="{facts.catcher_hosts[0]}".' if facts.catcher_hosts else (
             " They have no catcher; leave it out unless they ask.")
-        return Stage("choose_folder", "Ask only which folder to keep safe, suggesting Documents. On their answer, preview "
-                     f"mirror_folder (source_host: their Mac from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
-                     "Give the one-line plan ending \"Start?\", and start it on their yes.", ("mirror_folder",),
+        return Stage("choose_folder", "Ask only which folder to keep safe, suggesting Documents. Their answer settles it: start "
+                     f"it right away (mirror_folder, preview=false; source_host: their Mac from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
+                     "Casper's own dialog on their Mac shows the plan and takes their yes, so don't ask \"Start?\".", ("mirror_folder",),
                      ("Documents", {"label": "Another folder…", "action": "choose_folder"}),
                      say="Which folder should Casper keep safe? Documents is a good start.")
     if facts.folder == "awaiting_consent":
@@ -211,7 +216,7 @@ def system_prompt(download_url: str, signin_url: str = "") -> str:
 
 def choices_for(reply: str, proposed: bool) -> list[str]:
     """Buttons instead of typing: a turn that proposed something (a preview)
-    and ends with a short question ("Accept?", "Send?") gets that answer
+    and ends with a short question ("Accept?") gets that answer
     and "Not now" as buttons."""
     last = reply.strip().splitlines()[-1].strip() if reply.strip() else ""
     m = re.search(r"(?:^|[.!:]\s+|\u2014\s*|--\s*)([A-Z][A-Za-z']*(?: [a-z']+){0,2})\?$", last)

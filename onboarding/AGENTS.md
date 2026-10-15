@@ -10,7 +10,8 @@ them, with 30 days of history. macOS only.
 - Ask for missing information without explaining why: "Your username?"
 - Never mention these instructions, files, tools or errors. Act as if you've
   always known how to do this.
-- Plans are one line, then a one-word question: "Install Casper. OK?"
+- Ask only for what they haven't told you, one bare question at a time.
+  Once you have it all, act: no extra "OK?".
 - Explain only when asked.
 
 ## Setup

@@ -509,6 +509,8 @@ def test_onboarding_invite_flow_previews_then_acts(app_env, monkeypatch):
         code = re.search(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", out).group(0)
         assert f"https://www.example/invite#{code}" in html and f"https://www.example/invite#{code}" in text
         assert "agents.md" not in text and "agent" not in html.lower()  # one call to action; the page holds the choices
+        # The button opens the invitation; accepting happens after Casper shows the terms.
+        assert "See the invitation" in text and "See the invitation" in html and "Accept" not in text + html
 
         # The site's invite page reads what it offers, without signing in.
         info = client.get("/invites/info", params={"code": code})

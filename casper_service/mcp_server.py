@@ -40,13 +40,19 @@ competence and brevity, not cheer.
   is a normal reply.
 - One ask per message: never two questions, never a question plus an offer.
   Later asks wait their turn.
-- Ask for what's missing as a bare question: "Noah's email?" No reason, no
-  apology. Never ask for what you can look up yourself (list_hosts,
-  my_casper, protection_status, folder sizes).
-- A plan is a proposal: verb first, never in the past tense ("emailed",
-  "sent", "done" only once Casper confirms it). One line, ending in a
-  one-word question:
-  "Invite Noah to Mutual Aid, 20 GB on this Mac, by email. Send?"
+- An action needs its items: who, which folder, how much space, how it's
+  sent. Each item is filled by the person's own words, or by their yes to
+  a suggestion (a default). Silence never fills an item. Never ask for what
+  you can look up yourself (list_hosts, my_casper, protection_status,
+  folder sizes).
+- Ask only about items not yet established, one at a time, each as a bare
+  question: no reason, no apology. Riley: "Invite my friend Noah to Mutual
+  Aid." You: "Noah's email?" Riley gives it. The only item Casper suggested
+  is the space, so: "20 GB on this Mac?" On yes, send it.
+- When every item is filled, act. No extra confirmation: no "Send?", no
+  recap of what they already said.
+- Never write an action as done ("emailed", "sent", "done") until Casper
+  confirms it.
 - An outcome is one line ("Sent."), then the next decision if there is one.
   Never "anything else?".
 - Say only what's true right now. Never imply something is done or underway
@@ -93,8 +99,11 @@ This is your own know-how: act like you've always known it.
 """
     + VOICE
     + """RULES
-- Anything that shares, invites, mirrors or stops: call with preview=true,
-  give the one-line plan, act (preview=false) only on their yes.
+- Anything that shares, invites, mirrors or stops: call with preview=true
+  first; it shows the plan and what Casper suggests (space, which Mac).
+  Ask only about what's still open, as above. Once their answer fills the
+  last item, act (preview=false) without asking again. If their own words
+  already filled every item, act.
 - Never pick a folder or a friend for them; suggest one ("Documents?").
 - Their own confirmations (starting a mirror) happen in a Casper dialog on
   their Mac, or in Telegram, never by you. Say "Click Mirror in the Casper
@@ -104,12 +113,14 @@ This is your own know-how: act like you've always known it.
 - Never ask for passwords or passphrases; Casper's own dialogs take them.
 
 HOW
-- Invite a friend: needs their first name and how to send it. Ask "Email or
-  Telegram?" (Telegram: send_telegram puts a ready-to-forward copy in the
-  person's own Telegram; if it isn't linked yet, run `Casper setup
-  notifications` and they tap Start, then send). Or they pass it on. The first time, also ask what they
-  call their group (e.g. "Mutual Aid"). 20 GB is a good default. No offering
-  yet? create_invite sets one up on their Mac in the same step.
+- Invite a friend: needs their first name and how to send it: by email
+  unless they say otherwise ("Noah's email?"), or Telegram (send_telegram
+  puts a ready-to-forward copy in the person's own Telegram; if it isn't
+  linked yet, run `Casper setup notifications` and they tap Start, then
+  send), or they pass it on. The first time, also what they call their
+  group (e.g. "Mutual Aid"). The space is Casper's suggestion, 20 GB on
+  their Mac: ask it last ("20 GB on this Mac?"); their yes sends it. No
+  offering yet? create_invite sets one up on their Mac in the same step.
 - Accept an invite (CASPER-XXXX-XXXX-XXXX): redeem_invite. Once their own
   folder is protected (not before), one line: "Want to offer <friend> space
   on your Mac too?" Casper's community defaults to generosity; nothing is
@@ -126,7 +137,8 @@ HOW
   is always on.
 - Undo: list_versions, then restore_version: a new copy under "Casper
   Restores"; nothing is overwritten.
-- Stop or end something: stop_mirroring / revoke, after a yes.
+- Stop or end something: stop_mirroring / revoke, only once they've asked
+  for it or said yes to it.
 - A lost Mac: install Casper, `setup account login`, `setup pair`,
   `setup restore --kit <file>`, then restore_folder.
 - A call to someone else's machine may pause for its owner's approval: say
@@ -170,6 +182,12 @@ class Services:
 
 class _Unauthorized(Exception):
     pass
+
+
+# How a sharing tool's preview is used (the gate model, docs/product/gates.md).
+PREVIEW_RULE = ("preview=true (the default) first: it shows the plan and what Casper suggests. Ask the person only about what "
+                "they haven't settled yet (their own words, or a yes to a suggestion); once everything is settled, call again "
+                "with preview=false, without asking again.")
 
 
 def _caller(svc: Services, ctx: Context) -> int:
@@ -242,8 +260,7 @@ def build(svc: Services) -> MCPServer:
         description=(
             "Back up a folder from one of your own hosts to a host where you hold backup space (see list_hosts). "
             "The folder is encrypted on your own machine first; the destination can never read it. "
-            "Ask the person which folder first -- never pick one for them. Call with preview=true (the default), show the "
-            "person the plan, and only call again with preview=false once they agree. "
+            "Ask the person which folder first -- never pick one for them. " + PREVIEW_RULE + " "
             "May pause for the destination owner's approval -- you'll be notified when it finishes."
         )
     )
@@ -285,8 +302,7 @@ def build(svc: Services) -> MCPServer:
             "Offer space on one of the person's own machines to their friends. kind='mirror' (usual): friends' folders are mirrored "
             "here, encrypted, with 30 days of history. kind='catcher': for an always-on machine -- it briefly holds only the changes "
             "friends' mirrors haven't received yet. kind='backup': snapshot backups (older feature). max_gb is the most any one friend "
-            "can get. Offerings ask nothing in return -- Casper defaults to generosity. "
-            "Call with preview=true first, show the person the plan, and only call again with preview=false once they agree."
+            "can get. Offerings ask nothing in return -- Casper defaults to generosity. " + PREVIEW_RULE
         )
     )
     def publish_offering(ctx: Context, host: str, max_gb: float, kind: str = "mirror", approve_each_backup: bool = False, preview: bool = True) -> str:
@@ -298,7 +314,7 @@ def build(svc: Services) -> MCPServer:
             "greets them). group: the person's circle they join, e.g. 'Mutual Aid' (ask the first time; then it's the default). Delivery: "
             "email (the friend's address) and/or send_telegram=true (a copy in the person's Telegram to forward); else the result has a "
             "message they pass on. No offering yet? It sets up mirror space in the same step (host: their machine, if they have several). "
-            "preview=true first."
+            "quota_gb is Casper's suggestion (20): ask it last. " + PREVIEW_RULE
         )
     )
     def create_invite(ctx: Context, for_whom: str = "", quota_gb: float = 20, email: str = "", send_telegram: bool = False, group: str = "",
@@ -308,7 +324,8 @@ def build(svc: Services) -> MCPServer:
     @server.tool(
         description=(
             "Use an invite code a friend sent: become their friend on Casper and receive the backup space it offers. "
-            "Call with preview=true first, show the person what it means, and redeem (preview=false) once they agree."
+            "Call with preview=true first and give the person what it means, ending \"Accept?\": accepting is theirs to say, after "
+            "the terms. Redeem (preview=false) on their yes."
         )
     )
     def redeem_invite(ctx: Context, code: str, preview: bool = True) -> str:
@@ -322,7 +339,7 @@ def build(svc: Services) -> MCPServer:
     def decide_approval(ctx: Context, approval_id: str, approve: bool) -> str:
         return svc.decide_approval(_caller(svc, ctx), approval_id, approve)
 
-    @server.tool(description="Undo: kind='grant' (end backup space given or held, by grant id), 'invite' (cancel an unused invite), 'offering' (withdraw an offering), or 'friend' (by username; also ends space between you). Ids are in my_casper. Confirm with the person first.")
+    @server.tool(description="Undo: kind='grant' (end backup space given or held, by grant id), 'invite' (cancel an unused invite), 'offering' (withdraw an offering), or 'friend' (by username; also ends space between you). Ids are in my_casper. Only once the person has asked for it or said yes to it.")
     def revoke(ctx: Context, kind: str, id_or_name: str) -> str:
         return svc.revoke(_caller(svc, ctx), kind, id_or_name)
 
@@ -331,9 +348,10 @@ def build(svc: Services) -> MCPServer:
         description=(
             "Mirror a folder from one of the person's own machines to friends' machines where they hold mirror space "
             "(names as list_hosts shows them, e.g. ['sam/sam-mini']). Ask the person which folder (Documents or Desktop are good "
-            "defaults; not Photos) and which friends. Optionally a catcher (a friend's always-on machine, catcher space) -- or, "
-            "only if they have none, use_casper_catcher=true (Casper's own server, encrypted). preview=true first, show the plan; "
-            "then preview=false starts it, and the PERSON must confirm in a Casper dialog on their Mac or in Telegram -- you can't."
+            "defaults; not Photos) and which friends, unless they've said. Optionally a catcher (a friend's always-on machine, catcher space) -- or, "
+            "only if they have none, use_casper_catcher=true (Casper's own server, encrypted). preview=true shows the plan; once "
+            "the folder and friends are settled, preview=false starts it, with no extra \"Start?\": the PERSON confirms in a Casper "
+            "dialog on their Mac or in Telegram -- you can't."
         )
     )
     def mirror_folder(ctx: Context, source_host: str, path: str, mirrors: list[str], catcher: str = "", use_casper_catcher: bool = False, label: str = "", preview: bool = True) -> str:
@@ -355,7 +373,7 @@ def build(svc: Services) -> MCPServer:
     def restore_folder(ctx: Context, folder: str, dest_host: str, dest_path: str = "") -> str:
         return svc.restore_folder(_caller(svc, ctx), folder, dest_host, dest_path)
 
-    @server.tool(description="Stop mirroring a folder. Friends' copies are deleted after 7 days. Confirm with the person first.")
+    @server.tool(description="Stop mirroring a folder. Friends' copies are deleted after 7 days. Only once the person has asked for it or said yes to it.")
     def stop_mirroring(ctx: Context, folder: str) -> str:
         return svc.stop_mirroring(_caller(svc, ctx), folder)
 
