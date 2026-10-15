@@ -71,3 +71,34 @@ how the gift cycle starts.
 - **Ghost-themed names are out for this subject.** The Casper "friendly
   ghost" brand is about sociable agents interacting with each other and
   with people. Arrangements between people get plain human words.
+
+## Decisions, 2026-10-15 (later)
+
+The Principal's answers to the questions in
+[research/commons-governance.md](research/commons-governance.md), part 5.
+
+1. **Where giving is visible.** Within the circles the viewer shares with
+   that person. There is no public profile across all of Casper.
+2. **Governance shows up only when it matters.** It appears when it becomes
+   relevant to agreements people are forming, not before. A new circle is
+   understood to be its creator's: they're its sole administrator.
+   Governance is brought forward when other members ask to change things.
+3. **Options, with one happy path.** Circles can have policy options, but
+   Casper promotes a branded "happy path" template: inclusive and
+   welcoming, and forgiving of mistakes (inviting the wrong person, for
+   example). Time will tell whether a more cautious default is needed. An
+   administrator can tighten their own circle's policy either way.
+4. **Each circle has a shared space** (a feed, bulletin board or
+   newspaper; the name is still to be decided) showing what concerns the
+   circle: membership, available resources, public agreements, thanks,
+   kudos, announcements, messages, and possibly badges and leaderboards.
+   Thanks appears there for a while, then falls off.
+   *Open tension:* badges and leaderboards run against the research's
+   "no counts, no leaderboards" recommendation (part 4, item 3). To be
+   resolved when the feed is designed.
+5. **When an organizer is unreachable**, what happens depends on what the
+   circle is for and what it means to its members. Either way, governance
+   should let the circle's business carry on through changes of people.
+6. **Scope.** Most of this looks ahead. It isn't in scope for the pilot, or
+   even for the first application. The social side gets designed further
+   once the applications after that are sketched.
