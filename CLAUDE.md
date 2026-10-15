@@ -20,6 +20,15 @@ pytest tests/
 
 Background agents work on a branch in their own git worktree and land it themselves with `tools/land.sh` (run from that worktree, everything committed). It rebases onto origin/dev (on a conflict it stops and lists the files: resolve and rerun, or escalate), runs pytest (minus the two integration suites) and, if `agent/` changed, `go test ./...`, then, holding a lock so only one landing/deploy happens at a time, pushes fast-forward to origin/dev (rebasing and retesting if dev moved), deploys dev on the mini (auth, www; plus the dev Mac app, served and reinstalled on the mini, when `agent/` or `build/` changed), and starts `tools/e2e.sh` for the landed commit in the background (one e2e run at a time, on its own lock) and prints where the report will be. Escalate only for conflicts you can't resolve or decisions only the Principal can make. Never land to main or touch prod. The work board is `~/Documents/Casper-board.md`: update it when you start (In flight), land (Landed) or need a decision (Needs you).
 
+## Background agents
+
+Every background agent follows these conventions, so briefs can stay short:
+
+- **Landing.** Land code with `tools/land.sh` from your worktree. Docs-only changes: commit on dev and push (if the push is rejected: `git pull --rebase`, retry, never force). Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never touch main or prod unless the brief says so.
+- **Board.** Keep `~/Documents/Casper-board.md` current (edit it with bash; the Write tool can't write in `~/Documents`): "In flight" while working, "Landed" when done, questions under "Needs you".
+- **Report.** Write the full details (what changed, decisions, findings, verification) to `~/Documents/Casper-reports/<YYYY-MM-DD>-<short-slug>.md` (create the folder if needed).
+- **Final reply.** At most 3 short lines: the outcome, the report file's path, and any decision needed. No lists of files, no command output, no markdown documents in the reply.
+
 ## Architecture
 
 **Product direction (2026-09-26 pivot):** Casper is becoming social, policy-governed host-sharing infrastructure exposed over MCP, where users bring their own agent. The built-in OpenAI conversation loop is slated for removal. Read `docs/product/` (values, trust framework, risk model, the v1 peer-backup scenario) before planning new work. The architecture below describes the code as it stands today.
