@@ -126,7 +126,7 @@ func (c *cli) chooseKitPath(username, explicit string) (string, error) {
 		return explicit, checkKitPath(explicit, roots)
 	}
 	for i := 0; i < 5; i++ {
-		path, ok := dialog.SaveFile("Where should Casper save your recovery kit? Keep it away from this Mac, like on a USB drive.",
+		path, ok := dialog.SaveFile("Save your recovery kit, ideally on a USB drive.",
 			kitDefaultDir("/Volumes"), kitFileName(username))
 		if !ok {
 			return "", errors.New("no place was chosen for the kit -- run `setup recovery-kit` again when the person is ready")

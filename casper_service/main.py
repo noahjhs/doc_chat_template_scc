@@ -294,6 +294,16 @@ def _resolve_user_id(db, authorization: str) -> int | None:
 # there's nothing to persist here, unlike the identity half above.
 _live: dict[str, dict] = {}
 _live_lock = threading.Lock()
+# The app re-announces every minute; a Mac silent for this long is gone (a
+# lost Mac never says goodbye), so it stops counting as connected.
+LIVE_TTL_SECONDS = 180
+
+
+def _live_prune() -> None:
+    """Drops presence that has stopped being refreshed. Caller holds _live_lock."""
+    cutoff = time.monotonic() - LIVE_TTL_SECONDS
+    for key in [k for k, v in _live.items() if v.get("seen", 0) < cutoff]:
+        del _live[key]
 
 
 def _pairing_by_device_token(db, token: str):
@@ -314,6 +324,7 @@ def _resolve_attached(db, authorization: str) -> dict | None:
     if row is None:
         return None
     with _live_lock:
+        _live_prune()
         live = dict(_live.get(row["routing_key"], {}))
     return {
         "routing_key": row["routing_key"],
@@ -503,6 +514,7 @@ def _connected_host_configs(db, user_id: int) -> dict[str, dict]:
         ).fetchall()
     }
     with _live_lock:
+        _live_prune()
         live_snapshot = {k: dict(v) for k, v in _live.items()}
     configs = {}
     for r in rows:
@@ -631,7 +643,7 @@ def report_host_presence(body: HostPresenceReport, authorization: str = Header(d
     if attached is None:
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with _live_lock:
-        _live[attached["routing_key"]] = {"local_agent_url": body.local_agent_url, "cwd": body.cwd}
+        _live[attached["routing_key"]] = {"local_agent_url": body.local_agent_url, "cwd": body.cwd, "seen": time.monotonic()}
     return HostInfo(
         host_id=attached["host_id"], label="", connected=True,
         local_agent_url=body.local_agent_url, cwd=body.cwd,
@@ -647,7 +659,7 @@ def clear_host_presence(authorization: str = Header(default="")):
     if attached is None:
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with _live_lock:
-        _live[attached["routing_key"]] = {"local_agent_url": None, "cwd": ""}
+        _live[attached["routing_key"]] = {"local_agent_url": None, "cwd": "", "seen": time.monotonic()}
     return HostInfo(host_id=attached["host_id"], label="", connected=False)
 
 
@@ -711,6 +723,7 @@ def list_hosts(authorization: str = Header(default="")):
         )
     pairings_by_routing_key = {r["routing_key"]: r for r in pairing_rows}
     with _live_lock:
+        _live_prune()
         live_snapshot = {k: dict(v) for k, v in _live.items()}
     hosts_out = []
     for r in rows:

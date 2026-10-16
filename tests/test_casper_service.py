@@ -1182,3 +1182,25 @@ def test_dockerfile_copies_every_module():
     copied = set(re.search(r"^COPY (main\.py.*) \./$", (root / "Dockerfile").read_text(), re.M).group(1).split())
     modules = {p.name for p in root.glob("*.py")}
     assert modules <= copied, f"missing from the Dockerfile COPY line: {sorted(modules - copied)}"
+
+
+def test_presence_expires_when_heartbeats_stop(client):
+    """A Mac that disappears never says goodbye: once its presence is older
+    than LIVE_TTL_SECONDS it stops counting as connected."""
+    import main as auth_main
+
+    signup = _signup(client, "expiry1")
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    pair = client.post("/hosts/pair", json={"routing_key": "rk-expiry-1"}, headers=headers).json()
+    device_headers = {"Authorization": f"Bearer {pair['device_token']}"}
+    client.post("/hosts/presence", json={"local_agent_url": "https://relay.example/a", "cwd": "/Users/e"},
+                headers=device_headers)
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["connected"] is True
+
+    for entry in auth_main._live.values():
+        entry["seen"] -= auth_main.LIVE_TTL_SECONDS + 1
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["connected"] is False
+
+    client.post("/hosts/presence", json={"local_agent_url": "https://relay.example/a", "cwd": "/Users/e"},
+                headers=device_headers)
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["connected"] is True
