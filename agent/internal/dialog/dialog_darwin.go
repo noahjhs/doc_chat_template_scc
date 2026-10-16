@@ -192,6 +192,31 @@ function run() {
 	return strings.TrimRight(path, "/"), true
 }
 
+// SaveFile shows the standard Save panel, starting in defaultDir with
+// defaultName filled in: the chosen path, or false if they cancelled.
+func SaveFile(message, defaultDir, defaultName string) (string, bool) {
+	script := fmt.Sprintf(`
+ObjC.import('Cocoa');
+function run() {
+    $.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    var panel = $.NSSavePanel.savePanel;
+    panel.message = "%s";
+    panel.prompt = "Save";
+    panel.canCreateDirectories = true;
+    panel.directoryURL = $.NSURL.fileURLWithPath("%s");
+    panel.nameFieldStringValue = "%s";
+    if (panel.runModal != $.NSModalResponseOK) return "";
+    return ObjC.unwrap(panel.URL.path);
+}`, escapeForJavaScriptString(message), escapeForJavaScriptString(defaultDir), escapeForJavaScriptString(defaultName))
+	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
+	path := strings.TrimSpace(string(out))
+	if err != nil || path == "" {
+		return "", false
+	}
+	return path, true
+}
+
 func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
 	script := fmt.Sprintf(`set r to display dialog %q with title "Casper" buttons {%q, %q} default button %q cancel button %q giving up after %d
 if gave up of r then return "timeout"

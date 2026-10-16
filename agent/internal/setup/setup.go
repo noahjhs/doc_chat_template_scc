@@ -52,6 +52,7 @@ func Main(args []string) int {
 	fs.StringVar(&c.account, "account", "", "which Casper account (when this Mac has more than one)")
 	username := fs.String("username", "", "username")
 	client := fs.String("client", "claude-code", "which agent to connect")
+	fs.StringVar(&c.kitTo, "to", "", "recovery-kit: file to save to")
 	kitPath := fs.String("kit", "", "recovery kit file (for restore)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -95,7 +96,7 @@ Every command is safe to re-run.
   pair                          connect this Mac to the account
   agent [--client claude-code]  connect your AI agent to Casper (then restart the agent)
   notifications                 link Telegram for nudges and approvals (optional)
-  recovery-kit                  save what's needed to recover (folder passwords, keys), locked by a passphrase you type
+  recovery-kit [--to FILE]      save what's needed to recover (folder passwords, keys), locked by a passphrase you type; never inside a mirrored folder
   restore --kit FILE            on a new Mac: import a recovery kit, so mirrored folders can be rebuilt here
 
 Flags: --json (machine-readable), --account U (if this Mac has several accounts).
@@ -105,6 +106,7 @@ type cli struct {
 	authDomain string
 	account    string
 	json       bool
+	kitTo      string // recovery-kit: save here instead of asking (still refused inside a mirrored folder)
 	out        io.Writer
 }
 

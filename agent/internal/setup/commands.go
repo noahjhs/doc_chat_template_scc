@@ -149,10 +149,11 @@ func (c *cli) status() error {
 		} else {
 			lines = append(lines, "Notifications: not linked (optional -- `setup notifications`)")
 		}
-		_, kitErr := os.Stat(recoveryKitPath(acct.Username))
-		st["recovery_kit"] = kitErr == nil
-		if kitErr == nil {
-			lines = append(lines, "Recovery kit: saved in Documents")
+		kitFile, kitSaved := c.savedKitPath(acct.Username)
+		st["recovery_kit"] = kitSaved
+		if kitSaved {
+			st["recovery_kit_path"] = kitFile
+			lines = append(lines, "Recovery kit: saved at "+kitFile)
 		} else {
 			lines = append(lines, "Recovery kit: not made (needed before relying on backups -- `setup recovery-kit`)")
 		}
@@ -405,6 +406,24 @@ func (c *cli) recoveryKit() error {
 	if kit.BackupKeys == nil && len(kit.MirrorPasswords) == 0 {
 		return errors.New("this Mac has no keys or mirrored folders yet -- make the kit after setting up mirroring (or after pairing, for backups)")
 	}
+	// Decide where it goes before asking for a passphrase: never inside a
+	// mirrored folder.
+	roots, err := c.mirroredRoots(acct.Username)
+	if err != nil {
+		return err
+	}
+	moved, err := c.offerMoveOldKit(acct.Username, roots, "")
+	if err != nil {
+		return err
+	}
+	if moved != "" {
+		c.emit(fmt.Sprintf("Moved the existing recovery kit out of a mirrored folder, to %s.", moved), map[string]any{"ok": true, "moved_to": moved})
+		return nil
+	}
+	path, err := c.chooseKitPath(acct.Username, c.kitTo)
+	if err != nil {
+		return err
+	}
 	pass, err := askHidden("Choose a passphrase for your Casper recovery kit (12+ characters). Keep it somewhere other than this Mac.")
 	if err != nil {
 		return err
@@ -432,10 +451,10 @@ passphrase, somewhere other than this Mac (a password manager is ideal).
 Make a new kit whenever you start mirroring another folder.
 
 %s`, acct.Username, hostname(), time.Now().Format("2 Jan 2006"), len(kit.MirrorPasswords), armored)
-	path := recoveryKitPath(acct.Username)
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		return err
 	}
+	c.recordKitPath(acct.Username, path)
 	// Tell Casper a kit was made (only that -- the kit stays here), so the
 	// guide knows the step is done. Best effort.
 	report()

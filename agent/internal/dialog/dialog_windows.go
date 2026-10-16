@@ -87,3 +87,6 @@ func ChooseFolder() (string, bool) { return "", false }
 func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
 	return false, false
 }
+
+// SaveFile isn't implemented on Windows yet.
+func SaveFile(message, defaultDir, defaultName string) (string, bool) { return "", false }
