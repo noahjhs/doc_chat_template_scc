@@ -41,7 +41,17 @@ main() {
 
 Follow CLAUDE.md › Background agents. You are in your own worktree on branch $branch." \
     --dangerously-skip-permissions --output-format text < /dev/null > "$log" 2>&1) || echo "(the agent exited with an error)" >> "$log"
+  # Agents don't reliably wait for the e2e runs they queue (land.sh starts
+  # one; their session ends at their reply). Wait here, then add the runs'
+  # summaries, so the one notice the coordinator gets carries the outcome.
+  local started=$(date -r "$log" +%s) runs=()
+  sleep 10
+  while pgrep -f "tools/e2e.sh" >/dev/null; do sleep 60; done
+  for r in "$HOME/Documents/Casper e2e runs"/*/; do
+    [ "$(stat -f %B "$r")" -ge "$((started - 7200))" ] && [ -f "$r/notes.md" ] && [ "$(stat -f %m "$r/notes.md")" -ge "$started" ] && runs+=("$r")
+  done
   cat "$log"
+  for r in "${runs[@]}"; do echo; echo "e2e: $r"; sed -n '1,8p' "$r/notes.md"; done
 
   if [ -z "$(git log --oneline "origin/dev..$branch" 2>/dev/null)" ] && git -C "$wt" diff --quiet && git -C "$wt" diff --cached --quiet; then
     git worktree remove --force "$wt" && git branch -q -D "$branch"
