@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -130,6 +133,16 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 		return map[string]any{"asked": true}, nil
 	case "mirror_choose_folder":
 		m.ChooseFolder(req.ApprovalID, h.HomeRoot())
+		return map[string]any{"opened": true}, nil
+	case "mirror_show_restores":
+		// Opens the Casper Restores folder in Finder (macOS), where restored folders land.
+		dir := filepath.Join(h.HomeRoot(), RestoresDirName)
+		if _, err := os.Stat(dir); err != nil {
+			return nil, &ActionError{Detail: "There's no Casper Restores folder on this Mac."}
+		}
+		if err := exec.Command("open", dir).Run(); err != nil {
+			return nil, &ActionError{Detail: "Couldn't open it in Finder."}
+		}
 		return map[string]any{"opened": true}, nil
 	case "mirror_version_trailers":
 		items, err := m.VersionTrailers(req.FolderID)

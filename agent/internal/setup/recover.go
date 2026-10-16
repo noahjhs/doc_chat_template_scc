@@ -224,19 +224,29 @@ func (c *cli) recover(kitPath string) error {
 		return errors.New("this Mac isn't signed in to Casper yet -- sign in first")
 	}
 	if kitPath == "" {
-		p, ok := dialog.OpenFile("Choose your Casper recovery kit", kitDefaultDir("/Volumes"))
+		home, _ := os.UserHomeDir()
+		p, ok := dialog.OpenFile("Choose your Casper recovery kit", filepath.Join(home, "Downloads"))
 		if !ok {
 			return errors.New("cancelled -- no kit was chosen")
 		}
 		kitPath = p
 	}
-	pass, err := askHidden("Passphrase for your Casper recovery kit:")
-	if err != nil {
-		return err
-	}
-	kit, err := ReadKitFile(kitPath, pass)
-	if err != nil {
-		return err
+	// A wrong passphrase asks again for the same file; cancelling the question ends it.
+	var kit Kit
+	for try := 1; ; try++ {
+		prompt := "Passphrase for your Casper recovery kit:"
+		if try > 1 {
+			prompt = "That passphrase didn't open the kit. Try again:"
+		}
+		pass, err := askHidden(prompt)
+		if err != nil {
+			return err
+		}
+		if kit, err = ReadKitFile(kitPath, pass); err == nil {
+			break
+		} else if try >= 5 || !strings.Contains(err.Error(), "wrong passphrase") {
+			return err
+		}
 	}
 	home, _ := os.UserHomeDir()
 	where, err := Recover(RecoverArgs{

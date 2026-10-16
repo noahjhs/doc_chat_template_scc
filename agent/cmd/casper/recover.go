@@ -97,6 +97,5 @@ func recoverFromLostMac(logf func(format string, args ...any)) {
 		return
 	}
 	logf("Recovering %d folder(s)", len(result.Folders))
-	dialog.Confirm("Restoring your folders now. They come back from your friends' computers, and Casper keeps them mirrored afterwards.",
-		"OK", "Close", time.Minute)
+	dialog.Info("Restoring your folders now. They come back from your friends' computers, and Casper keeps them mirrored afterwards.")
 }

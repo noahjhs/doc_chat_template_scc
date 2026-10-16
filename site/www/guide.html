@@ -37,7 +37,8 @@ function dots(reason, on) {
 function setChoices(list) {
   $("choices").innerHTML = "";
   const has = (list || []).length > 0;
-  $("f").classList.toggle("hide", has);
+  // Optional buttons ("box") sit beside the text box; the others replace it.
+  $("f").classList.toggle("hide", has && !(list || []).every(c => typeof c === "object" && c.box));
   // The folder step (its buttons include the folder chooser): sizing the folder
   // picked makes macOS ask whether Casper may see it. Say so before it pops up.
   const folderStep = (list || []).some(c => typeof c === "object" && c.action === "choose_folder");
@@ -69,7 +70,10 @@ async function refresh() {
   setChoices(last && last.role === "assistant" ? last.choices : []);
   renderPicker(last && last.role === "assistant" ? last.picker : null);
   // A button in the message itself (Download Casper) is the call to action too.
-  if (last && last.role === "assistant" && last.text.includes(Casper.DOWNLOAD_URL)) $("f").classList.add("hide");
+  // Only while that step is current: once the Mac is connected the text box is always back.
+  if (last && last.role === "assistant" && last.text.includes(Casper.DOWNLOAD_URL)) {
+    try { if (["install", "recover_install"].includes((await Casper.api("/guide/state")).stage)) $("f").classList.add("hide"); } catch (e) {}
+  }
 }
 
 // The restore picker, drawn on the page: pick files and versions (search,
@@ -164,7 +168,8 @@ async function act(action) {
   setChoices([]); $("f").classList.add("hide");
   try {
     const r = await Casper.api("/guide/action", { method: "POST", body: { action } });
-    if (r.opened) waiting(true);
+    if (action === "show_restores") { $("f").classList.remove("hide"); if (!r.opened) bubble("assistant", Casper.render(r.message)); }
+    else if (r.opened) waiting(true);
     else { bubble("assistant", Casper.render(r.message)); rendered = -1; await refresh(); }
   } catch (e) { bubble("assistant", Casper.render(e.message)); }
 }

@@ -93,6 +93,12 @@ func ShowError(message string) {
 	_ = exec.Command("osascript", "-e", script).Run()
 }
 
+// Info tells the person something, with one OK button.
+func Info(message string) {
+	script := fmt.Sprintf(`display dialog "%s" with title "Casper" buttons {"OK"} default button "OK"`, escapeForAppleScript(message))
+	_ = exec.Command("osascript", "-e", script).Run()
+}
+
 // escapeForJavaScriptString makes an arbitrary string safe to embed inside
 // a JavaScript double-quoted string literal -- ConfirmWithDontAskAgain's own
 // equivalent of escapeForAppleScript above, needed because it drives Cocoa

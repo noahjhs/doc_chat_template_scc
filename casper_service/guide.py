@@ -188,6 +188,8 @@ class Stage:
     silent: bool = False  # a waiting step: no message when it begins (the page shows it's waiting)
 
 
+RECOVERING_STAGES = ("recover_install", "recover_unlock", "recover_choose", "recover_copy")
+
 READ_ONLY = ("my_casper", "list_hosts", "list_offerings", "protection_status", "list_versions", "list_approvals")
 
 
@@ -198,6 +200,14 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     answered = _answered(history)
     inv = facts.invite
     spoken = {m["_stage"] for m in history if m.get("role") == "assistant" and m.get("_stage") and m.get("content")}
+    # Once the recovery's closing line is said, it's over for good (until they say they lost a Mac again,
+    # which starts a fresh thread): a Mac that is briefly unreachable never sends them back to a recovery step.
+    stages = [m["_stage"] for m in history if m.get("role") == "assistant" and m.get("_stage") and m.get("content")]
+    recovery_over = "recovered" in stages and not any(x in RECOVERING_STAGES for x in stages[len(stages) - stages[::-1].index("recovered"):])
+    if recovery_over:
+        facts.recovering = False
+        if facts.recovered:
+            return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
     if facts.recovering:
         return _recover_stage(facts, download_url)
     if facts.recovered:
@@ -205,7 +215,7 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         if "recovered" in spoken:
             return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
         say = "Your folders are back on this Mac, and Casper keeps them mirrored." + _landing(facts)
-        return Stage("recovered", f"Say only: \"{say}\"", say=say)
+        return Stage("recovered", f"Say only: \"{say}\"", (), ({"label": "Show me in Finder", "action": "show_restores", "box": True},) if facts.restore_places else (), say=say)
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
                      "preview=true) and give only the one-line terms, ending \"Accept?\": accepting is theirs to say. On their yes, accept it.", ("redeem_invite",))
@@ -387,7 +397,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
         messages.append(entry)
         if not calls:
             reply = (msg.content or "").strip()
-            if stage and stage.silent and not proposed and "?" not in user_text:
+            if stage and stage.silent and event and not proposed and "?" not in user_text:
                 reply = ""  # a waiting step: the page shows the wait
                 entry["content"] = ""
             elif stage and stage.say and not proposed and _entering(stage, history) and "?" not in user_text:

@@ -1227,7 +1227,7 @@ def test_restore_without_an_agent_then_promotion(app_env):
 
         # They say so on the sign-in page: the guide recovers instead of setting up.
         import guide
-        guide.save_new(rid, 0, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Old chat.", "_stage": "open"}])
+        guide.save_new(rid, 0, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Old chat.", "_stage": "recovery_kit"}])
         assert client.post("/profile/lost-mac", headers=riley).status_code == 200
         assert guide.load_history(rid) == []  # recovery opens a fresh thread, not the old chat
         assert main._guide_stage(rid, []).name == "recover_unlock"
@@ -1286,3 +1286,35 @@ def test_legacy_bundle_is_ciphertext_written_once_and_key_scheme_is_served(app_e
             db.execute("UPDATE mirror_folders SET status = 'active' WHERE id = ?", (folder,))
         owned = client.get("/hosts/mirror-config", headers=mac).json()["owned"]
         assert {f["label"]: f["key_scheme"] for f in owned} == {"Old": "legacy", "New": "derived1"}
+
+
+def test_recovery_never_returns_once_closed(app_env):
+    import guide
+
+    def _facts(**kw):
+        return guide.Facts(mac_connected=True, folder="active", protected=True, recovery_kit=True, **kw)
+
+    history = [{"role": "assistant", "content": "Your folders are back.", "_stage": "recovered"}]
+    # A Mac briefly unreachable makes the facts say "recovering" again: the closing line already said, so no.
+    assert guide.stage_for(_facts(recovering=True, recover_folders=["Documents"]), history, "u").name == "open"
+    # A new loss starts a fresh thread, so recovery steps work again there.
+    assert guide.stage_for(_facts(recovering=True, recover_folders=["Documents"]), [], "u").name.startswith("recover")
+
+
+def test_typed_message_in_a_silent_step_is_not_dropped(app_env):
+    import guide
+
+    stage = guide.Stage("consent", "wait", silent=True)
+
+    class Msg:
+        content = "Casper's dialog is on your Mac."
+        tool_calls = None
+
+    class Resp:
+        choices = [type("C", (), {"message": Msg})]
+
+    client = type("Cl", (), {"chat": type("Ch", (), {"completions": type("Co", (), {"create": staticmethod(lambda **k: Resp)})})})
+    reply, _ = guide.run(client, "m", None, 1, [], "keep my Pictures safe too", "p", stage_fn=lambda m: stage)
+    assert reply
+    reply, _ = guide.run(client, "m", None, 1, [], "news", "p", stage_fn=lambda m: stage, event=True)
+    assert reply == ""

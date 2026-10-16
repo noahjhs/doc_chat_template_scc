@@ -95,3 +95,6 @@ func SaveFile(message, defaultDir, defaultName string) (string, bool) { return "
 
 // OpenFile isn't implemented on Windows yet.
 func OpenFile(message, defaultDir string) (string, bool) { return "", false }
+
+// Info tells the person something, with one OK button.
+func Info(message string) { ShowError(message) }

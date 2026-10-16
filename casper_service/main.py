@@ -3543,6 +3543,18 @@ def _spoken_stage(history: list[dict]) -> str | None:
     return last["_stage"] if last else None
 
 
+def _news_for(stage: str, history: list[dict]) -> str | None:
+    """What moved them on, if the guide hasn't carried on for it yet."""
+    spoken = _spoken_stage(history)
+    if not history or stage == spoken:
+        return None
+    if stage in _STEP_NEWS:
+        return _STEP_NEWS[stage]
+    if spoken == "consent":  # the dialog was answered while the guide waited silently: say how it went
+        return "They answered Casper's dialog about the folder. Say in a line whether it started or not."
+    return None
+
+
 def _guide_reply(user_id: int, text: str, event: bool = False,
                  only_if: Callable[[list[dict]], str | None] | None = None) -> tuple[str, list[dict]]:
     """One turn with the guide, serialized per person (web and Telegram
@@ -3565,7 +3577,10 @@ def _guide_reply(user_id: int, text: str, event: bool = False,
                                         stage_fn=lambda msgs: _guide_stage(user_id, msgs), event=event)
         except Exception as e:  # the model provider being down shouldn't 500 the page
             print(f"guide failed for user {user_id}: {e}")
-            return "Sorry -- I'm having trouble thinking right now. Please try again in a minute.", []
+            sorry = "Sorry -- I'm having trouble thinking right now. Please try again in a minute."
+            if not event:  # their words and an answer are kept, so a reload shows the turn
+                guide.save_new(user_id, before, [{"role": "user", "content": text[:4000]}, {"role": "assistant", "content": sorry}])
+            return sorry, []
         guide.save_new(user_id, before, messages)
     return reply, messages
 
@@ -3682,7 +3697,10 @@ def lost_mac(authorization: str = Header(default="")):
     a new Mac (see _guide_facts)."""
     with get_db() as db:
         user_id = _require_user(db, authorization)
-    fresh = not any(str(m.get("_stage", "")).startswith("recover") for m in guide.load_history(user_id))
+    # Fresh unless a recovery is already under way (a second click): the setup chat's own stage "recovery_kit"
+    # is not one, and neither is a recovery that's finished.
+    stages = [m["_stage"] for m in guide.load_history(user_id) if m.get("_stage")]
+    fresh = not (stages and stages[-1] in guide.RECOVERING_STAGES)
     with get_db() as db:
         _get_or_create_profile(db, user_id)
         db.execute("UPDATE user_profile SET lost_mac_at = ?, recovery_unlocked_at = NULL WHERE user_id = ?", (trust.now_iso(), user_id))
@@ -3753,7 +3771,7 @@ def guide_state(authorization: str = Header(default="")):
     stage, spoken = _guide_stage(user_id, history).name, _spoken_stage(history)
     picking = any(uid == user_id for uid, _ in _folder_requests.values())
     return {"stage": stage, "spoken": spoken, "count": len(guide.visible(history)),
-            "due": bool(history) and stage != spoken and stage in _STEP_NEWS,
+            "due": _news_for(stage, history) is not None,
             # Show the thinking dots whenever Casper is waiting on something on their Mac (a
             # dialog, the folder panel) or the guide is writing its reply.
             "waiting": picking or stage == "consent" or _guide_lock(user_id).locked(),
@@ -3769,10 +3787,7 @@ def guide_continue(authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _require_user(db, authorization)
     def due(history):
-        stage = _guide_stage(user_id, history).name
-        if history and stage != _spoken_stage(history) and stage in _STEP_NEWS:
-            return _STEP_NEWS[stage]
-        return None
+        return _news_for(_guide_stage(user_id, history).name, history)
 
     reply, messages = _guide_reply(user_id, "", event=True, only_if=due)
     if not messages:
@@ -3804,6 +3819,12 @@ def _choose_folder(user_id: int, reply_to: str = "web") -> str:
 def guide_action(body: dict, authorization: str = Header(default="")):
     with get_db() as db:
         user_id = _require_user(db, authorization)
+    if body.get("action") == "show_restores":
+        hosts = [h for h in _mcp_list_hosts(user_id) if h["role"] == "owner" and h["connected"]]
+        host_id = _own_host_id(user_id, hosts[0]["host"]) if hosts else None
+        config = _host_config(user_id, host_id) if host_id else None
+        r = backups.daemon_call(config, "mirror_show_restores") if config else {}
+        return {"opened": bool(r.get("success")), "message": "" if r.get("success") else "Open the Casper Restores folder in your home folder."}
     if body.get("action") != "choose_folder":
         raise HTTPException(status_code=400, detail="Unknown action.")
     problem = _choose_folder(user_id)
