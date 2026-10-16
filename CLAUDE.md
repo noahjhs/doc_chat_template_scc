@@ -24,6 +24,7 @@ Background agents work on a branch in their own git worktree and land it themsel
 
 Every background agent follows these conventions, so briefs can stay short:
 
+- Finish the whole task before your final reply: if it includes an e2e run (yours or one land.sh started), wait for it to finish (poll its log or report file) and include its outcome. A detached agent's session ends at its final reply, and nobody follows up after.
 - **Landing.** Land code with `tools/land.sh` from your worktree. Docs-only changes: commit on dev and push (if the push is rejected: `git pull --rebase`, retry, never force). Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never touch main or prod unless the brief says so.
 - **Board.** Keep `~/Documents/Casper-board.md` current (edit it with bash; the Write tool can't write in `~/Documents`): "In flight" while working, "Landed" when done, questions under "Needs you".
 - **Report.** Write the full details (what changed, decisions, findings, verification) to `~/Documents/Casper-reports/<YYYY-MM-DD>-<short-slug>.md` (create the folder if needed).

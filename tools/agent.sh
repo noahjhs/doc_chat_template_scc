@@ -40,7 +40,7 @@ main() {
   (cd "$wt" && claude -p "$brief
 
 Follow CLAUDE.md › Background agents. You are in your own worktree on branch $branch." \
-    --dangerously-skip-permissions --output-format text > "$log" 2>&1) || echo "(the agent exited with an error)" >> "$log"
+    --dangerously-skip-permissions --output-format text < /dev/null > "$log" 2>&1) || echo "(the agent exited with an error)" >> "$log"
   cat "$log"
 
   if [ -z "$(git log --oneline "origin/dev..$branch" 2>/dev/null)" ] && git -C "$wt" diff --quiet && git -C "$wt" diff --cached --quiet; then
