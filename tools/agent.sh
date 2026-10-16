@@ -31,7 +31,7 @@ main() {
   wt="$HOME/.cache/casper-agents/$when-$slug"
   branch="agent/$when-$slug"
   mkdir -p "$(dirname "$wt")"
-  git worktree add -q -b "$branch" "$wt" origin/dev
+  git worktree add -q --no-track -b "$branch" "$wt" origin/dev  # --no-track: parallel launches would race on .git/config
   ln -s "$repo/.venv" "$wt/.venv"                      # tests, tools/vmgui.py
   cp "$repo"/*_server*.txt "$wt"/ 2>/dev/null || true  # untracked: app builds need them
   mkdir -p "$wt/agent/internal/config/embedded"        # untracked; go:embed needs the files
