@@ -140,6 +140,11 @@ class Facts:
     protected: bool = False
     recovery_kit: bool = False
     offers_space: bool = False
+    # Recovering after a lost Mac (they said so, and folders still need a Mac):
+    recovering: bool = False
+    recover_mac: bool = False  # the new Mac is connected
+    unlocked: bool = False  # it has the key (the kit was opened there)
+    restoring: bool = False  # a restore is under way on it
 
 
 @dataclass
@@ -161,6 +166,8 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     person has answered it -- not merely once it was asked."""
     answered = _answered(history)
     inv = facts.invite
+    if facts.recovering:
+        return _recover_stage(facts, download_url)
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
                      "preview=true) and give only the one-line terms, ending \"Accept?\": accepting is theirs to say. On their yes, accept it.", ("redeem_invite",))
@@ -195,6 +202,27 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
                      "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"),
                      say=f"Want to offer {inv['inviter']} space on your Mac too?")
     return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
+
+
+def _recover_stage(facts: Facts, download_url: str) -> Stage:
+    """Getting folders back on a new Mac, instead of setting up (recovery v2
+    P1: the kit is the key). The key and the Restore yes are given in
+    Casper's own window on the Mac, never here."""
+    if not facts.recover_mac:
+        say = f"Download Casper and open it on the new Mac: {download_url}\n(Ignore browser warnings. The app is safe.)"
+        return Stage("recover_install", f"They lost their Mac and are signed in on a new one. Say exactly \"{say}\" and nothing more. "
+                     "Opening it connects the new Mac.", say=say)
+    if facts.restoring:
+        return Stage("recover_copy", "Their folders are coming back; the page shows its progress. Say only: \"Restoring now. You can leave "
+                     "this page open.\" If they ask how it's going, check protection_status.",
+                     say="Restoring now. You can leave this page open.")
+    if not facts.unlocked:
+        return Stage("recover_unlock", "Say only: \"In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your "
+                     "recovery kit file and its passphrase ready.\" If they have no kit: it can't be rebuilt without it yet; say so plainly.",
+                     say="In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your recovery kit file and its passphrase ready.")
+    return Stage("recover_choose", "Say only: \"Casper's window on your Mac lists your folders. Choose Restore there.\" Restoring is theirs to "
+                 "say, in that window; you can't do it for them.",
+                 say="Casper's window on your Mac lists your folders. Choose Restore there.")
 
 
 def _answered(history: list[dict]) -> set[str]:

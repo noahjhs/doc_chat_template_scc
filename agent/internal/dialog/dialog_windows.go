@@ -90,3 +90,6 @@ func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool,
 
 // SaveFile isn't implemented on Windows yet.
 func SaveFile(message, defaultDir, defaultName string) (string, bool) { return "", false }
+
+// OpenFile isn't implemented on Windows yet.
+func OpenFile(message, defaultDir string) (string, bool) { return "", false }

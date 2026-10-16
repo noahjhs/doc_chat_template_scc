@@ -76,6 +76,8 @@ func Main(args []string) int {
 		run = c.recoveryKit
 	case "restore":
 		run = func() error { return c.restore(*kitPath) }
+	case "recover":
+		run = func() error { return c.recover(*kitPath) }
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %q.\n\n%s", cmd, usage)
 		return 2
@@ -98,6 +100,7 @@ Every command is safe to re-run.
   notifications                 link Telegram for nudges and approvals (optional)
   recovery-kit [--to FILE]      save what's needed to recover (folder passwords, keys), locked by a passphrase you type; never inside a mirrored folder
   restore --kit FILE            on a new Mac: import a recovery kit, so mirrored folders can be rebuilt here
+  recover [--kit FILE]          on a new Mac: Casper's "Recover from a Lost Mac" -- kit, passphrase and the Restore yes are all given in Casper's own windows
 
 Flags: --json (machine-readable), --account U (if this Mac has several accounts).
 `

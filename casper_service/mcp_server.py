@@ -139,8 +139,10 @@ HOW
   Restores"; nothing is overwritten.
 - Stop or end something: stop_mirroring / revoke, only once they've asked
   for it or said yes to it.
-- A lost Mac: install Casper, `setup account login`, `setup pair`,
-  `setup restore --kit <file>`, then restore_folder.
+- A lost Mac: have them sign in on the new Mac and choose "Recover from a
+  Lost Mac" in Casper's menu; the kit, its passphrase and the Restore yes
+  are given in Casper's own window, so there is nothing for you to run.
+  (restore_folder remains for a Mac you set up yourself.)
 - A call to someone else's machine may pause for its owner's approval: say
   who decides; they'll be notified. Don't poll."""
 )

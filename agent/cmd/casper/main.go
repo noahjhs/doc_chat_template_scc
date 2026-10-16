@@ -247,6 +247,9 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 	// as `Casper setup recovery-kit`, which asks for the passphrase in
 	// macOS dialogs.
 	mKit := systray.AddMenuItem("Make Recovery Kit…", "")
+	// Shown only while this account has folders whose Mac is another one.
+	mRecover := systray.AddMenuItem("Recover from a Lost Mac…", "")
+	mRecover.Hide()
 	systray.AddSeparator()
 	// Restart, not just Quit -- a manual fallback for cases the automatic
 	// refresh triggers (pairing/resume, and the Resources page's own
@@ -285,6 +288,12 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 			makeRecoveryKit(logf)
 		}
 	}()
+	go func() {
+		for range mRecover.ClickedCh {
+			recoverFromLostMac(logf)
+		}
+	}()
+	go watchRecoverable(state, mRecover, logf)
 	go func() {
 		<-mRestart.ClickedCh
 		restart()

@@ -192,6 +192,32 @@ function run() {
 	return strings.TrimRight(path, "/"), true
 }
 
+// OpenFile shows the standard Open panel for one file, starting in
+// defaultDir: the chosen path, or false if they cancelled.
+func OpenFile(message, defaultDir string) (string, bool) {
+	script := fmt.Sprintf(`
+ObjC.import('Cocoa');
+function run() {
+    $.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    var panel = $.NSOpenPanel.openPanel;
+    panel.canChooseFiles = true;
+    panel.canChooseDirectories = false;
+    panel.allowsMultipleSelection = false;
+    panel.message = "%s";
+    panel.prompt = "Open";
+    panel.directoryURL = $.NSURL.fileURLWithPath("%s");
+    if (panel.runModal != $.NSModalResponseOK) return "";
+    return ObjC.unwrap(panel.URLs.objectAtIndex(0).path);
+}`, escapeForJavaScriptString(message), escapeForJavaScriptString(defaultDir))
+	out, err := exec.Command("osascript", "-l", "JavaScript", "-e", script).Output()
+	path := strings.TrimSpace(string(out))
+	if err != nil || path == "" {
+		return "", false
+	}
+	return path, true
+}
+
 // SaveFile shows the standard Save panel, starting in defaultDir with
 // defaultName filled in: the chosen path, or false if they cancelled.
 func SaveFile(message, defaultDir, defaultName string) (string, bool) {

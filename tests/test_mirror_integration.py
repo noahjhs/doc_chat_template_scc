@@ -6,8 +6,11 @@ running its own real Syncthing. Driven through MCP as agents would:
   Riley confirms outside the agent (the native-dialog endpoint); the agent
   itself can't. Sam and Cat hold only ciphertext. An old version comes back.
   Sam sleeps; a new change is caught by Cat. Riley's Mac is then lost; Sam
-  wakes; a replacement Mac with Riley's "recovery kit" rebuilds Documents
-  from Sam plus Cat's gap -- including the change Sam never saw.
+  wakes; a replacement Mac opens Riley's real recovery kit file (locked with
+  a passphrase) and rebuilds Documents from Sam plus Cat's gap -- including
+  the change Sam never saw -- through /hosts/restore, with no agent. It is
+  then promoted to Documents' Mac: new changes on it reach Sam's mirror, and
+  the lost Mac, if it turns up again, gets nothing.
 
 Skipped without Go or a syncthing binary ($CASPER_TEST_SYNCTHING, or
 ~/st-spike/bin/syncthing)."""
@@ -17,6 +20,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -78,7 +82,12 @@ class World:
         self.people[name] = {"token": token, "agent": agent}
         return self.people[name]
 
-    def host(self, person, hostname, data_from=None):
+    def make_kit(self, h, path, passphrase):
+        """A real recovery kit file from a (stopped) Mac's folder passwords."""
+        subprocess.run([str(self.bin), "-auth-domain", self.domain, "-username", h["person"], "-data", str(h["data"]),
+                        "-kit-out", str(path), "-kit-pass", passphrase, "-kit-only"], check=True)
+
+    def host(self, person, hostname, kit=None, kit_pass=""):
         p = self.people[person]
         pair = requests.post(self.base + "/hosts/pair", json={"routing_key": f"rk-{hostname}", "hostname": hostname},
                              headers={"Authorization": f"Bearer {p['token']}"}).json()
@@ -86,17 +95,17 @@ class World:
         data = self.tmp / hostname / "data"
         home.mkdir(parents=True)
         data.mkdir(parents=True)
-        if data_from:  # the "recovery kit": folder passwords from the lost Mac
-            shutil.copy(self.tmp / data_from / "data" / "mirror-passwords.json", data / "mirror-passwords.json")
-        h = {"pair": pair, "home": home, "data": data, "http": _port(), "st": _port(), "person": person, "name": hostname}
+        h = {"pair": pair, "home": home, "data": data, "http": _port(), "st": _port(), "person": person, "name": hostname,
+             "kit": kit, "kit_pass": kit_pass}
         self.start(h)
         return h
 
     def start(self, h):
+        recover = ["-recover-kit", str(h["kit"]), "-kit-pass", h["kit_pass"]] if h.get("kit") else []
         p = subprocess.Popen(
             [str(self.bin), "-port", str(h["http"]), "-auth-domain", self.domain, "-username", h["person"],
              "-device-token", h["pair"]["device_token"], "-command-key", h["pair"]["command_key"],
-             "-home", str(h["home"]), "-data", str(h["data"]), "-syncthing", SYNCTHING, "-st-listen", f"tcp://127.0.0.1:{h['st']}"],
+             "-home", str(h["home"]), "-data", str(h["data"]), "-syncthing", SYNCTHING, "-st-listen", f"tcp://127.0.0.1:{h['st']}", *recover],
             stdout=subprocess.PIPE, stderr=open(h["data"] / "daemon.log", "a"), text=True,
         )
         assert p.stdout.readline().strip() == "ready"
@@ -206,14 +215,17 @@ def test_mirroring_end_to_end(world):
     cat_held = world.tmp / "cat-server" / "data" / "mirror" / "held"
     assert not _leaks(cat_held, b"a new idea", b"written-while")
 
-    # Riley's Mac is lost before Sam wakes. Sam wakes. A replacement Mac,
-    # with the recovery kit, rebuilds Documents from Sam + Cat's gap.
+    # Riley's Mac is lost before Sam wakes. (Her kit was saved earlier, in the
+    # real file format, outside any mirrored folder.) Sam wakes. A replacement
+    # Mac opens the kit and rebuilds Documents from Sam + Cat's gap.
     world.stop(riley)
+    kit_file = world.tmp / "Casper Recovery Kit (riley).txt"
+    world.make_kit(riley, kit_file, "a long kit passphrase")
+    assert b"receipts" not in kit_file.read_bytes() and b"casper-" not in kit_file.read_bytes().split(b"-----BEGIN")[1]
     world.start(sam)
-    replacement = world.host("riley", "riley-new-mac", data_from="riley-mac")
-    target = replacement["home"] / "Documents"
-    out = world.mcp("riley", "restore_folder", folder="Documents", dest_host="riley-new-mac", dest_path=str(target))
-    assert "Restoring Documents" in out, out
+    replacement = world.host("riley", "riley-new-mac", kit=kit_file, kit_pass="a long kit passphrase")
+    # Riley's old home isn't this Mac's home, so Documents can't return to its original place.
+    target = replacement["home"] / "Casper Restores" / "Documents"
 
     def rebuilt():
         try:
@@ -224,3 +236,38 @@ def test_mirroring_end_to_end(world):
             return False
 
     _wait(rebuilt, "the replacement Mac to rebuild Documents, including the caught change", timeout=240)
+
+    # Promotion: the replacement becomes Documents' Mac (no agent involved).
+    def owner():
+        con = sqlite3.connect(world.tmp / "users.db")
+        try:
+            return con.execute("SELECT h.routing_key, mf.restore_host_id FROM mirror_folders mf JOIN hosts h ON h.id = mf.owner_host_id").fetchone()
+        finally:
+            con.close()
+
+    _wait(lambda: owner() == ("rk-riley-new-mac", None), "the replacement Mac to be promoted", timeout=120)
+    config = requests.get(world.base + "/hosts/mirror-config", headers={"Authorization": f"Bearer {replacement['pair']['device_token']}"}).json()
+    [mine] = config["owned"]
+    assert mine["restore"] is False and mine["path"] == str(target)
+
+    # New changes on it reach Sam's mirror: its encrypted files there become all four (return.pdf, notes,
+    # the change only the catcher had -- which the new Mac now sends on -- and the one written after recovery).
+    def held_files():
+        return [f for f in (sam["data"] / "mirror" / "held").rglob("*")
+                if f.is_file() and ".stversions" not in f.parts and ".stfolder" not in f.parts]
+
+    (target / "notes.txt").write_text("receipts are in the green folder")
+    (target / "after-recovery.txt").write_text("written on the new Mac")
+    _wait(lambda: len(held_files()) == 4, "the new Mac's files to reach Sam's mirror", timeout=180)
+    _wait(lambda: "Every change is on at least one mirror" in world.mcp("riley", "protection_status"), "the new Mac's changes to be on a mirror", timeout=180)
+    assert not _leaks(sam["data"] / "mirror" / "held", b"after-recovery", b"green folder")
+
+    # The lost Mac turns up: it has nothing to send, and nothing it writes spreads.
+    (riley["home"] / "Documents").mkdir(exist_ok=True)
+    world.start(riley)
+    old = requests.get(world.base + "/hosts/mirror-config", headers={"Authorization": f"Bearer {riley['pair']['device_token']}"}).json()
+    assert old["owned"] == []
+    (riley["home"] / "Documents" / "ghost.txt").write_text("from the replaced Mac")
+    time.sleep(15)
+    assert not (target / "ghost.txt").exists()
+    assert "ghost" not in world.mcp("riley", "list_versions", folder="Documents", name_contains="ghost")

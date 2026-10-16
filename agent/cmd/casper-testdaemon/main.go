@@ -27,6 +27,7 @@ import (
 	"casper-agent/internal/mirror"
 	"casper-agent/internal/mirrord"
 	"casper-agent/internal/server"
+	"casper-agent/internal/setup"
 	"casper-agent/internal/tunnel"
 )
 
@@ -42,7 +43,22 @@ func main() {
 	stListen := flag.String("st-listen", "", "syncthing listen address, e.g. tcp://127.0.0.1:22101")
 	relayDomain := flag.String("relay-domain", "", "join this relay and report presence (a headless persona)")
 	routingKey := flag.String("routing-key", "", "the routing key paired with (with -relay-domain)")
+	kitOut := flag.String("kit-out", "", "write a recovery kit (the folder passwords this daemon holds) to this file, then carry on")
+	kitPass := flag.String("kit-pass", "", "the kit's passphrase (with -kit-out / -recover-kit)")
+	kitOnly := flag.Bool("kit-only", false, "with -kit-out: write the kit and exit")
+	recoverKit := flag.String("recover-kit", "", "recover from this kit file: import it, restore every folder it covers (the person's yes is given)")
 	flag.Parse()
+
+	passwords := &mirrord.FilePasswords{Path: filepath.Join(*data, "mirror-passwords.json")}
+	if *kitOut != "" {
+		kit := setup.NewKit(*authDomain, *username, nil, passwords.All(mirrord.Account(*authDomain, *username, "")))
+		if err := setup.WriteKitFile(*kitOut, kit, *kitPass); err != nil {
+			log.Fatal(err)
+		}
+		if *kitOnly {
+			return
+		}
+	}
 
 	logger := log.New(os.Stderr, "testdaemon "+*username+": ", log.LstdFlags)
 	handler := commands.New(*home)
@@ -63,7 +79,7 @@ func main() {
 			AuthDomain: *authDomain,
 			Mgr:        mirror.New(*syncthing, filepath.Join(*data, "syncthing"), filepath.Join(*data, "mirror"), *stListen, logger.Printf),
 			Bin:        *syncthing,
-			Passwords:  &mirrord.FilePasswords{Path: filepath.Join(*data, "mirror-passwords.json")},
+			Passwords:  passwords,
 			Identities: func() []mirrord.Identity { return []mirrord.Identity{{Username: *username, DeviceToken: *deviceToken}} },
 			Logf:       logger.Printf,
 			Interval:   2 * time.Second, // tests want quick reconciliation
@@ -78,6 +94,21 @@ func main() {
 			svc.Mgr.Stop()
 			os.Exit(0)
 		}()
+	}
+
+	if *recoverKit != "" {
+		kit, err := setup.ReadKitFile(*recoverKit, *kitPass)
+		if err != nil {
+			logger.Fatal(err)
+		}
+		where, err := setup.Recover(setup.RecoverArgs{
+			AuthDomain: *authDomain, Username: *username, DeviceToken: *deviceToken, Home: *home, Kit: kit, Passwords: passwords,
+			Confirm: func(string) bool { return true },
+		})
+		if err != nil {
+			logger.Fatal(err)
+		}
+		logger.Printf("recovering %v", where)
 	}
 
 	srv := server.New(logger)

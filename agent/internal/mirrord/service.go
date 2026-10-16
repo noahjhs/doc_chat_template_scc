@@ -43,6 +43,7 @@ type Service struct {
 	mu      sync.Mutex
 	desired map[string]mirror.Desired // per username, with passwords filled in
 	pruned  time.Time
+	settled map[string]time.Time // restoring folder -> since when it has looked finished
 }
 
 func (s *Service) init() {
@@ -152,8 +153,10 @@ func (s *Service) Step() {
 				if f.Catcher != "" && err == nil && need == 0 && state == "idle" {
 					overlaid, _ = s.Mgr.OverlayCatcher(f)
 				}
+				local := len(filesUnder(f.Path))
 				statuses = append(statuses, map[string]any{"folder_id": f.ID, "restoring": true, "need_files": need, "state": state,
-					"local_files": len(filesUnder(f.Path)), "overlaid_from_catcher": overlaid, "error": errString(err)})
+					"local_files": local, "overlaid_from_catcher": overlaid, "error": errString(err),
+					"settled_for_s": s.settledFor(f, err == nil && need == 0 && state == "idle" && local > 0)})
 				continue
 			}
 			st, risk := s.Mgr.OwnedStatus(f)
@@ -192,6 +195,32 @@ func (s *Service) Step() {
 			}
 		}
 	}
+}
+
+// settledFor is how long (seconds) a restoring folder has looked finished:
+// the mirrors' copy in, and the catcher's gap (if any) received and laid
+// over it. casper_service promotes this Mac to the folder's Mac only after
+// it has held for a while, so a half-arrived index can't end the restore early.
+func (s *Service) settledFor(f mirror.OwnedFolder, looksDone bool) int {
+	if looksDone && f.Catcher != "" {
+		need, state, err := s.Mgr.FolderState(mirror.CatchFolderID(f.ID))
+		looksDone = err == nil && need == 0 && state == "idle"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled == nil {
+		s.settled = map[string]time.Time{}
+	}
+	if !looksDone {
+		delete(s.settled, f.ID)
+		return 0
+	}
+	since, ok := s.settled[f.ID]
+	if !ok {
+		since = time.Now()
+		s.settled[f.ID] = since
+	}
+	return int(time.Since(since).Seconds())
 }
 
 func union(a, b []string) []string {

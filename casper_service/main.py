@@ -2827,7 +2827,14 @@ def mirror_config(authorization: str = Header(default="")):
 def report_mirror_status(body: dict, authorization: str = Header(default="")):
     with get_db() as db:
         attached = _attached_or_401(db, authorization)
-        nudges = mirroring.store_status(db, attached["user_id"], body.get("folders") or [])
+        nudges, promoted = mirroring.store_status(db, attached["user_id"], body.get("folders") or [], attached["host_id"])
+        new_home = trust.host_label(db, attached["user_id"], attached["host_id"])
+    for f in promoted:  # the old row still names the lost Mac; the peers must learn the new one
+        with get_db() as db:
+            now = mirroring.folder_row(db, f["id"])
+        _refresh_folder_parties(now)
+        _mirror_refresh(f["owner_user_id"], f["owner_host_id"])  # the lost Mac, if it turns up: it has nothing to send now
+        notify(attached["user_id"], f"{f['label']} is back on {new_home}, and this Mac keeps it mirrored now.")
     for n in nudges:
         st = n["status"]
         notify(
@@ -3090,10 +3097,22 @@ def _mcp_restore_version(user_id: int, folder: str, name: str, at: str) -> str:
     return f"Restored {name} as it was at {v['at']} to {json.loads(done['stdout'])['restored_to']} -- a new copy; nothing was overwritten."
 
 
+def _start_restore(f, dest_host_id: int, abs_path: str, dest_label: str) -> str:
+    """Point a folder's rebuild at a replacement Mac (the mirrors, plus the
+    catcher's gap). The Mac needs the folder's password first -- from the
+    recovery kit (`Casper setup restore`)."""
+    with get_db() as db:
+        db.execute("UPDATE mirror_folders SET restore_host_id = ?, restore_path = ? WHERE id = ?", (dest_host_id, abs_path, f["id"]))
+        f = mirroring.folder_row(db, f["id"])
+    _refresh_folder_parties(f)
+    return (
+        f"Restoring {f['label']} onto {dest_label} at {abs_path} from its mirrors"
+        + (" and catcher" if f["use_casper_catcher"] or _has_catcher(f["id"]) else "")
+        + ". This needs the folder's password on that Mac (from the recovery kit: `Casper setup restore`). Check progress with protection_status."
+    )
+
+
 def _mcp_restore_folder(user_id: int, folder: str, dest_host: str, dest_path: str) -> str:
-    """A replacement (or second) Mac rebuilds a mirrored folder from the
-    mirrors, plus the catcher's gap. The Mac needs the folder's password
-    first: `Casper setup restore` imports it from the recovery kit."""
     with get_db() as db:
         try:
             f = mirroring.find_owned(db, user_id, folder)
@@ -3108,15 +3127,48 @@ def _mcp_restore_folder(user_id: int, folder: str, dest_host: str, dest_path: st
     path = dest_path or f"~/Casper Restores/{f['label']}"
     home = configs[dest_host].get("cwd") or ""
     abs_path = path.replace("~", home, 1) if path.startswith("~") and home else path
+    return _start_restore(f, host_id, abs_path, dest_host)
+
+
+@app.post("/hosts/restore")
+def host_restore(body: dict, authorization: str = Header(default="")):
+    """Recovery without an agent, from the new Mac's own Casper app (device
+    token; an agent never holds it, so the Restore intent is filled in
+    Casper's window). {"action": "list"} (default): the folders whose Mac
+    is another one. {"action": "start", "folders": [{"id", "path"?}]}: begin
+    rebuilding them here -- path defaults to ~/Casper Restores/<label>."""
+    action = str(body.get("action") or "list")
     with get_db() as db:
-        db.execute("UPDATE mirror_folders SET restore_host_id = ?, restore_path = ? WHERE id = ?", (host_id, abs_path, f["id"]))
-        f = mirroring.folder_row(db, f["id"])
-    _refresh_folder_parties(f)
-    return (
-        f"Restoring {f['label']} onto {dest_host} at {abs_path} from its mirrors"
-        + (" and catcher" if f["use_casper_catcher"] or _has_catcher(f["id"]) else "")
-        + ". This needs the folder's password on that Mac (from the recovery kit: `Casper setup restore`). Check progress with protection_status."
-    )
+        attached = _attached_or_401(db, authorization)
+        user_id, host_id = attached["user_id"], attached["host_id"]
+        rows = db.execute(
+            "SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' AND owner_host_id != ? "
+            "AND (restore_host_id IS NULL OR restore_host_id = ?) ORDER BY created_at", (user_id, host_id, host_id)).fetchall()
+        if action == "list":
+            if body.get("unlocked"):  # they opened their kit here: the guide's cue for the next step
+                _get_or_create_profile(db, user_id)
+                db.execute("UPDATE user_profile SET recovery_unlocked_at = ? WHERE user_id = ?", (trust.now_iso(), user_id))
+            return {"folders": [{"id": f["id"], "label": f["label"], "path": f["path"], "restoring": f["restore_host_id"] == host_id,
+                                 "restore_path": f["restore_path"]} for f in rows]}
+    if action != "start":
+        raise HTTPException(status_code=400, detail="action must be list or start.")
+    by_id = {f["id"]: f for f in rows}
+    config = _host_config(user_id, host_id) or {}
+    home = (config.get("cwd") or "").rstrip("/")
+    started = []
+    for item in body.get("folders") or []:
+        f = by_id.get(str(item.get("id", "")))
+        if f is None:
+            raise HTTPException(status_code=404, detail=f"No such folder to restore: {item.get('id')}.")
+        path = str(item.get("path") or f"~/Casper Restores/{f['label']}")
+        if path.startswith("~") and not home:
+            raise HTTPException(status_code=409, detail="This Mac isn't reachable yet; try again in a moment.")
+        abs_path = path.replace("~", home, 1) if path.startswith("~") else path
+        if home and not (abs_path == home or abs_path.startswith(home + "/")):
+            raise HTTPException(status_code=400, detail="A folder can only be restored inside this Mac's home folder.")
+        _start_restore(f, host_id, abs_path, "this Mac")
+        started.append({"id": f["id"], "label": f["label"], "path": abs_path})
+    return {"started": started}
 
 
 def _has_catcher(folder_id: str) -> bool:
@@ -3208,6 +3260,10 @@ _STEP_NEWS = {
     "install": "Their invite is accepted.",
     "choose_folder": "Their Mac is connected now.",
     "syncing": "They clicked Mirror; the first copy is under way.",
+    "recover_install": "They lost their Mac and signed in on a new one.",
+    "recover_unlock": "Their new Mac is connected.",
+    "recover_choose": "They opened their recovery kit on the new Mac.",
+    "recover_copy": "They chose Restore; the folders are coming back.",
     "recovery_kit": "Their folder is protected now.",
     "give_back": "Their recovery kit is done.",
 }
@@ -3247,6 +3303,16 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             recovery_kit=bool(kit and kit["recovery_kit_at"]),
             offers_space=bool(trust.list_offerings(db, user_id)["mine"]),
         )
+        profile = db.execute("SELECT lost_mac_at, recovery_unlocked_at FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+        if profile and profile["lost_mac_at"]:
+            connected = {c["host_id"] for c in _own_configs(user_id).values()}
+            folders = db.execute("SELECT owner_host_id, restore_host_id FROM mirror_folders WHERE owner_user_id = ? AND status = 'active'",
+                                 (user_id,)).fetchall()
+            facts.restoring = any(r["restore_host_id"] in connected for r in folders)
+            lost = any(r["restore_host_id"] is None and r["owner_host_id"] not in connected for r in folders)
+            facts.recovering = facts.restoring or lost
+            facts.recover_mac = bool(connected)
+            facts.unlocked = bool(profile["recovery_unlocked_at"])
     # "Has a Mac" (paired), not "connected this second": the service forgets who's connected
     # when it restarts, and that must never send someone back to the download step.
     facts.mac_connected = any(h["role"] == "owner" for h in _mcp_list_hosts(user_id))
@@ -3266,6 +3332,18 @@ def recovery_kit_saved(authorization: str = Header(default="")):
     return {"ok": True}
 
 
+@app.post("/profile/lost-mac")
+def lost_mac(authorization: str = Header(default="")):
+    """The person said "I lost my Mac" (the sign-in page): the guide helps
+    them recover instead of setting up. Ends by itself once every folder has
+    a new Mac (see _guide_facts)."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        _get_or_create_profile(db, user_id)
+        db.execute("UPDATE user_profile SET lost_mac_at = ?, recovery_unlocked_at = NULL WHERE user_id = ?", (trust.now_iso(), user_id))
+    return {"ok": True}
+
+
 def _copy_progress(user_id: int) -> str:
     """How the first copy is going, in a few words (from the owner's own report)."""
     with get_db() as db:
@@ -3280,6 +3358,18 @@ def _copy_progress(user_id: int) -> str:
         return f"Connecting to your friend's Mac to copy {f['label']}…"
     pct = max((p.get("completion", 0) for p in mirrors), default=0)
     return f"Copying {f['label']}: {pct:.0f}%"
+
+
+def _restore_progress(user_id: int) -> str:
+    """How a restore is going, in a few words (from the new Mac's own report)."""
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' AND restore_host_id IS NOT NULL",
+                          (user_id,)).fetchall()
+        lines = []
+        for f in rows:
+            st = mirroring.latest_status(db, f["id"]) or {}
+            lines.append(f"Restoring {f['label']}: {st.get('local_files', 0)} files so far…")
+    return "\n".join(lines)
 
 
 @app.post("/guide/message")
@@ -3308,7 +3398,7 @@ def guide_state(authorization: str = Header(default="")):
             # dialog, the folder panel) or the guide is writing its reply.
             "waiting": picking or stage == "consent" or _guide_lock(user_id).locked(),
             # While the first copy runs: a live line (the page shows it under the last message).
-            "progress": _copy_progress(user_id) if stage == "syncing" else ""}
+            "progress": _copy_progress(user_id) if stage == "syncing" else (_restore_progress(user_id) if stage == "recover_copy" else "")}
 
 
 @app.post("/guide/continue")

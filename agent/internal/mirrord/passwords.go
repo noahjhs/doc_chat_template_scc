@@ -90,3 +90,16 @@ func (p *FilePasswords) Set(a, pw string) error {
 	data, _ := json.Marshal(m)
 	return os.WriteFile(p.Path, data, 0o600)
 }
+
+// All returns every stored account's password whose account starts with prefix.
+func (p *FilePasswords) All(prefix string) map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]string{}
+	for a, pw := range p.load() {
+		if len(a) >= len(prefix) && a[:len(prefix)] == prefix {
+			out[a[len(prefix):]] = pw
+		}
+	}
+	return out
+}

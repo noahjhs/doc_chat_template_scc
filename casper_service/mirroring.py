@@ -359,16 +359,38 @@ def peers_of(db, folder_id: str) -> list:
 
 
 # --- Protection status -----------------------------------------------------------------
-def store_status(db, user_id: int, folders: list[dict]) -> list[dict]:
-    """Saves the owner daemon's reports; returns the rows that now need a
-    nudge (unprotected changes older than the threshold, not recently
-    nudged)."""
+PROMOTE_AFTER_SECONDS = 10  # a restore must look finished (mirrors and catcher) this long first
+
+
+def promote_restored(db, f, st: dict, host_id: int | None) -> bool:
+    """A restoring Mac that has everything -- the mirrors' copy plus the
+    catcher's gap, settled for a while -- becomes the folder's Mac: the lost
+    one stops being it, and the folder goes back to being sent from here."""
+    if host_id is None or f["restore_host_id"] != host_id or not st.get("restoring"):
+        return False
+    if st.get("settled_for_s", 0) < PROMOTE_AFTER_SECONDS:
+        return False
+    db.execute(
+        "UPDATE mirror_folders SET owner_host_id = ?, path = ?, restore_host_id = NULL, restore_path = NULL WHERE id = ?",
+        (host_id, f["restore_path"], f["id"]),
+    )
+    db.execute("DELETE FROM mirror_status WHERE folder_id = ?", (f["id"],))
+    return True
+
+
+def store_status(db, user_id: int, folders: list[dict], host_id: int | None = None) -> tuple[list[dict], list]:
+    """Saves the owner daemon's reports; returns (the rows that now need a
+    nudge -- unprotected changes older than the threshold, not recently
+    nudged -- and the folders this report promoted, see promote_restored)."""
     import time
 
-    nudges = []
+    nudges, promoted = [], []
     for st in folders or []:
         f = folder_row(db, st.get("folder_id", ""))
         if f is None or f["owner_user_id"] != user_id:
+            continue
+        if f["restore_host_id"] and promote_restored(db, f, st, host_id):
+            promoted.append(f)
             continue
         prev = db.execute("SELECT nudged_at FROM mirror_status WHERE folder_id = ?", (f["id"],)).fetchone()
         db.execute(
@@ -384,7 +406,7 @@ def store_status(db, user_id: int, folders: list[dict]) -> list[dict]:
             if not last or (time.time() - _iso_to_unix(last)) > NUDGE_EVERY_SECONDS:
                 db.execute("UPDATE mirror_status SET nudged_at = ? WHERE folder_id = ?", (trust.now_iso(), f["id"]))
                 nudges.append({"folder": f, "status": st})
-    return nudges
+    return nudges, promoted
 
 
 def _iso_to_unix(s: str) -> float:

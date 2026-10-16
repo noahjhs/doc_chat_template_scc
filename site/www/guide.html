@@ -13,6 +13,7 @@ const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
 let busy = false, rendered = -1;
 const invite = Casper.param("invite");
+const lost = Casper.param("lost");
 
 function bubble(role, html, extra = "") {
   const d = document.createElement("div"); d.className = "msg " + role + " " + extra;
@@ -60,7 +61,7 @@ async function refresh() {
   if (msgs.length === rendered) return;
   rendered = msgs.length; $("log").innerHTML = ""; dotsEl = null;
   // Arriving from an invitation: the guide's first line is about the invite.
-  if (!msgs.length && !invite) bubble("assistant", Casper.render("I'm Casper's guide. Keep your files safe, or offer space to friends?"));
+  if (!msgs.length && !invite && !lost) bubble("assistant", Casper.render("I'm Casper's guide. Keep your files safe, or offer space to friends?"));
   msgs.forEach(m => bubble(m.role, Casper.render(m.text)));
   const reasons = [...dotsFor]; dotsFor.clear(); reasons.forEach(r => dots(r, true));
   const last = msgs[msgs.length - 1];
@@ -120,7 +121,7 @@ document.addEventListener("click", ev => {
   if (!a || hinted) return;
   hinted = true;
   setTimeout(async () => {
-    try { if ((await Casper.api("/guide/state")).stage !== "install") return; } catch (e) { return; }
+    try { if (!["install", "recover_install"].includes((await Casper.api("/guide/state")).stage)) return; } catch (e) { return; }
     bubble("assistant", "Chrome blocked it? Click the download arrow in Chrome's toolbar, then Download suspicious file.", "note-bubble");
   }, 5000);
 });
@@ -139,6 +140,11 @@ tabs.onmessage = ev => { if (ev.data === "anyone?") tabs.postMessage("guide-open
     const msgs = (await Casper.api("/guide/history")).messages;
     // The invite code goes to the guide as news (not shown as something they said).
     if (!msgs.length) await send("They arrived from a friend's invitation. Their invite code is " + invite + ".", { hidden: true });
+  }
+  if (lost) {
+    history.replaceState(null, "", location.pathname);
+    const msgs = (await Casper.api("/guide/history")).messages;
+    if (!msgs.length) await send("They lost their Mac and are signed in on a new one.", { hidden: true });
   }
   setInterval(tick, 3000);
 })();

@@ -9,17 +9,25 @@
 <button class="btn" type="submit">Sign in</button>
 <p class="err" id="err"></p>
 <p class="muted small">New to Casper? <a id="toSignup" href="/signup">Create an account</a></p>
+<p class="muted small" id="lostLine">Lost your Mac? <a id="lostLink" href="/signin?lost=1">I lost my Mac</a></p>
 </form>
 <div id="status" class="panel hide"><h3 id="statusTitle">One moment…</h3><p class="muted" id="statusText"></p><p id="statusAction"></p></div>
 </section>
 <footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
 const fromApp = Casper.param("from") === "app";
-const next = Casper.param("next") || "/guide";
+const lost = Casper.param("lost") === "1";
+const next = Casper.param("next") || (lost ? "/guide?lost=1" : "/guide");
 const carry = new URLSearchParams();
 if (Casper.param("invite")) carry.set("invite", Casper.param("invite"));
 if (fromApp) carry.set("from", "app");
 if (Casper.param("pair")) carry.set("pair", Casper.param("pair"));
 if ([...carry].length) document.getElementById("toSignup").href = "/signup?" + carry;
+if (fromApp) document.getElementById("lostLink").href = "/signin?lost=1&from=app";
+if (lost) {
+  document.getElementById("lostLine").classList.add("hide");
+  document.getElementById("eyebrow").innerText = "Getting your folders back";
+  document.getElementById("title").innerText = "Sign in on this Mac";
+}
 if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this Mac"; }
 const $ = id => document.getElementById(id);
 // One thing on screen at a time: the form, or the connection status -- never both.
@@ -52,6 +60,8 @@ function guideOpen(ms = 500) {
     ch.postMessage("anyone?");
   });
 }
+// "I lost my Mac": tell Casper, so its guide helps them recover instead of setting up.
+async function markLost() { if (lost) { try { await Casper.api("/profile/lost-mac", { method: "POST" }); } catch (e) {} } }
 const pairCode = Casper.param("pair");
 async function connect() {
   const before = (await Casper.connectedHosts()) || new Set();
@@ -83,7 +93,7 @@ async function connect() {
 (async () => {
   if (Casper.session()) {
     showStatus("One moment…");
-    try { await Casper.api("/hosts"); if (fromApp) return connect(); location.href = next; return; } catch (e) {}
+    try { await Casper.api("/hosts"); await markLost(); if (fromApp) return connect(); location.href = next; return; } catch (e) {}
   }
   showForm();
 })();
@@ -92,6 +102,7 @@ $("f").addEventListener("submit", async ev => {
   const d = Object.fromEntries(new FormData(ev.target));
   try { Casper.saveSession(await Casper.api("/login", { method: "POST", body: d })); }
   catch (e) { $("err").innerText = e.message; return; }
+  await markLost();
   if (fromApp) connect(); else location.href = next;
 });
 </script></body></html>

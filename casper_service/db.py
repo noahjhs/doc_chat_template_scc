@@ -503,6 +503,12 @@ def _add_telegram_columns_to_user_profile(db):
         # When the person last saved a recovery kit (Casper reports it), so
         # the guide knows that step is done.
         db.execute("ALTER TABLE user_profile ADD COLUMN recovery_kit_at TEXT")
+    if "lost_mac_at" not in columns:
+        # The person said "I lost my Mac" (sign-in page): the guide recovers
+        # instead of setting up. recovery_unlocked_at: the new Mac has the key.
+        db.execute("ALTER TABLE user_profile ADD COLUMN lost_mac_at TEXT")
+    if "recovery_unlocked_at" not in columns:
+        db.execute("ALTER TABLE user_profile ADD COLUMN recovery_unlocked_at TEXT")
 
 
 def _add_mock_tier_column_to_pending_approvals(db):

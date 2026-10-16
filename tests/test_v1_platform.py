@@ -875,6 +875,12 @@ def test_guide_setup_gates_go_one_step_at_a_time(app_env):
     assert step(F(**connected, folder="active", protected=True), answered_both) == "open"
     assert guide.stage_for(F(**connected, folder="awaiting_consent"), [], url).silent  # Casper's dialog is up: just wait
     assert step(F(mac_connected=True)) == "open"  # no invite, nothing held: free to ask what they want
+    # Recovering after a lost Mac replaces setup, whatever else is true.
+    r = dict(recovering=True, invite=inv_open, mac_connected=True)
+    assert step(F(**r)) == "recover_install"  # the new Mac isn't connected yet
+    assert "Download Casper" in guide.stage_for(F(**r), [], url).say
+    assert [step(F(**r, recover_mac=True, **s)) for s in ({}, {"unlocked": True}, {"unlocked": True, "restoring": True}, {"restoring": True})] == [
+        "recover_unlock", "recover_choose", "recover_copy", "recover_copy"]
 
 
 def test_guide_facts_come_from_caspers_state(app_env):
@@ -1121,3 +1127,61 @@ def test_a_giver_sees_what_they_hold_without_folder_names(app_env, monkeypatch):
         monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: st)
         got = main._holding(7)
         assert got.startswith(", holding 1 folder of theirs (") and got.endswith(want) and "Documents" not in got
+
+
+def test_restore_without_an_agent_then_promotion(app_env):
+    """Recovery v2 P1: a replacement Mac lists and restores the folders whose
+    Mac is another one (device token only), and once the restore has settled it
+    becomes the folder's Mac. The guide follows the same facts."""
+    main, client = app_env
+    main.notify = lambda *a, **k: None
+    _, riley = _signup(client, "riley")
+    _, sam = _signup(client, "sam")
+    with FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        old = _pair(client, riley, "rk-old", "old-mac", sd.url)
+        client.delete("/hosts/presence", headers=old)  # the lost Mac: paired, not connected
+        new = _pair(client, riley, "rk-new", "new-mac", sd.url)  # cwd /Users/x
+        sams_mac = _pair(client, sam, "rk-sam", "sam-mac", sd.url)
+        rid, old_id, new_id = _user_id(main, "riley"), _host_id(client, riley, "old-mac"), _host_id(client, riley, "new-mac")
+        with main.get_db() as db:
+            db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES "
+                       "('casper-f1', ?, ?, '/Users/x/Documents', 'Documents', 'active')", (rid, old_id))
+        list_ = lambda headers, **extra: client.post("/hosts/restore", json={"action": "list", **extra}, headers=headers)  # noqa: E731
+        start = lambda headers, folders: client.post("/hosts/restore", json={"action": "start", "folders": folders}, headers=headers)  # noqa: E731
+
+        assert list_(new).json()["folders"] == [{"id": "casper-f1", "label": "Documents", "path": "/Users/x/Documents", "restoring": False, "restore_path": None}]
+        assert list_(old).json()["folders"] == [] and list_(sams_mac).json()["folders"] == []  # not its own Mac's, nor someone else's
+        assert list_({}).status_code == 401
+        assert main._guide_stage(rid, []).name != "recover_install"  # no "I lost my Mac" yet: setup as usual
+
+        # They say so on the sign-in page: the guide recovers instead of setting up.
+        assert client.post("/profile/lost-mac", headers=riley).status_code == 200
+        assert main._guide_stage(rid, []).name == "recover_unlock"
+        assert list_(new, unlocked=True).status_code == 200  # the kit was opened on the new Mac
+        assert main._guide_stage(rid, []).name == "recover_choose"
+
+        assert start(new, [{"id": "casper-nope"}]).status_code == 404
+        assert start(sams_mac, [{"id": "casper-f1"}]).status_code == 404
+        assert start(new, [{"id": "casper-f1", "path": "/etc/passwd-dir"}]).status_code == 400  # only inside this Mac's home
+        done = start(new, [{"id": "casper-f1"}]).json()
+        assert done["started"] == [{"id": "casper-f1", "label": "Documents", "path": "/Users/x/Casper Restores/Documents"}]
+        config = client.get("/hosts/mirror-config", headers=new).json()
+        assert [(o["folder_id"], o["path"], o["restore"]) for o in config["owned"]] == [("casper-f1", "/Users/x/Casper Restores/Documents", True)]
+        assert main._guide_stage(rid, []).name == "recover_copy"
+
+        # Only the restoring Mac's own settled report promotes it.
+        report = lambda headers, settled: client.post("/hosts/mirror-status", headers=headers, json={"folders": [  # noqa: E731
+            {"folder_id": "casper-f1", "restoring": True, "need_files": 0, "state": "idle", "local_files": 3, "settled_for_s": settled}]})
+        assert report(new, 3).status_code == 200 and client.get("/hosts/mirror-config", headers=new).json()["owned"][0]["restore"] is True
+        report(old, 99)
+        report(sams_mac, 99)
+        assert client.get("/hosts/mirror-config", headers=new).json()["owned"][0]["restore"] is True  # none of those promote
+        report(new, 10)
+        owned = client.get("/hosts/mirror-config", headers=new).json()["owned"]
+        assert [(o["folder_id"], o["path"], o["restore"]) for o in owned] == [("casper-f1", "/Users/x/Casper Restores/Documents", False)]
+        assert client.get("/hosts/mirror-config", headers=old).json()["owned"] == []  # the lost Mac, if it turns up, has nothing to send
+        with main.get_db() as db:
+            row = db.execute("SELECT owner_host_id, restore_host_id, restore_path, path FROM mirror_folders WHERE id = 'casper-f1'").fetchone()
+        assert (row["owner_host_id"], row["restore_host_id"], row["restore_path"], row["path"]) == (new_id, None, None, "/Users/x/Casper Restores/Documents")
+        assert main._guide_stage(rid, []).name not in ("recover_install", "recover_unlock", "recover_choose", "recover_copy")
+        assert list_(new).json()["folders"] == []  # nothing left to recover here

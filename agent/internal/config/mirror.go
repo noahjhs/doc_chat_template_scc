@@ -68,3 +68,32 @@ func PostFolderChosen(authDomain, deviceToken string, report map[string]any) err
 func PostConsent(authDomain, deviceToken, approvalID string, approve bool) error {
 	return deviceCall("POST", authDomain, deviceToken, "/hosts/consent", map[string]any{"approval_id": approvalID, "approve": approve}, nil)
 }
+
+// RestorableFolder is a mirrored folder whose Mac is another one -- what
+// this (replacement) Mac can bring back.
+type RestorableFolder struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Path        string `json:"path"` // where it lived on the lost Mac
+	Restoring   bool   `json:"restoring"`
+	RestorePath string `json:"restore_path"`
+}
+
+// ListRestorable asks casper_service which folders this Mac could restore.
+// unlocked: the person has just opened their kit here (the guide's next step).
+func ListRestorable(authDomain, deviceToken string, unlocked bool) ([]RestorableFolder, error) {
+	var out struct {
+		Folders []RestorableFolder `json:"folders"`
+	}
+	err := deviceCall("POST", authDomain, deviceToken, "/hosts/restore", map[string]any{"action": "list", "unlocked": unlocked}, &out)
+	return out.Folders, err
+}
+
+// StartRestore begins rebuilding folders (id -> where) on this Mac.
+func StartRestore(authDomain, deviceToken string, where map[string]string) error {
+	items := []map[string]string{}
+	for id, path := range where {
+		items = append(items, map[string]string{"id": id, "path": path})
+	}
+	return deviceCall("POST", authDomain, deviceToken, "/hosts/restore", map[string]any{"action": "start", "folders": items}, nil)
+}
