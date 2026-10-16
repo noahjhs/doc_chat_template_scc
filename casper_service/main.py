@@ -2973,6 +2973,13 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
     )
 
 
+def _first_copy_done(db, f) -> bool:
+    """A mirror really holds everything (its own completion report), not
+    merely "connected and nothing flagged"."""
+    st = mirroring.latest_status(db, f["id"]) or {}
+    return any(p.get("role") == "mirror" and p.get("completion", 0) >= 100 for p in st.get("peers", []))
+
+
 def _status_text(db, f) -> str:
     st = mirroring.latest_status(db, f["id"]) or {}
     names = {}
@@ -3299,6 +3306,7 @@ _STEP_NEWS = {
     "recover_unlock": "Their new Mac is connected.",
     "recover_choose": "They opened their recovery kit on the new Mac.",
     "recover_copy": "They chose Restore; the folders are coming back.",
+    "recovered": "Their folders are back on the new Mac.",
     "recovery_kit": "Their folder is protected now.",
     "give_back": "Their recovery kit is done.",
 }
@@ -3334,7 +3342,7 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             mirror_hosts=[f"{g['owner']}/{g['host']}" for g in held if g["relation"] == "mirror_peer"],
             catcher_hosts=[f"{g['owner']}/{g['host']}" for g in held if g["relation"] == "catcher_peer"],
             folder=f["status"] if f else "none",
-            protected=bool(f) and f["status"] == "active" and ": protected." in _status_text(db, f),
+            protected=bool(f) and f["status"] == "active" and ": protected." in _status_text(db, f) and _first_copy_done(db, f),
             recovery_kit=bool(kit and kit["recovery_kit_at"]),
             offers_space=bool(trust.list_offerings(db, user_id)["mine"]),
         )
@@ -3348,6 +3356,7 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             facts.recovering = facts.restoring or lost
             facts.recover_mac = bool(connected)
             facts.unlocked = bool(profile["recovery_unlocked_at"])
+            facts.recovered = bool(profile["recovery_unlocked_at"]) and bool(folders) and not facts.recovering
     # "Has a Mac" (paired), not "connected this second": the service forgets who's connected
     # when it restarts, and that must never send someone back to the download step.
     facts.mac_connected = any(h["role"] == "owner" for h in _mcp_list_hosts(user_id))

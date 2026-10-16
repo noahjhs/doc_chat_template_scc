@@ -37,13 +37,18 @@ func (d *daemonState) restorableFolders() (n int, labels []string) {
 func watchRecoverable(state *daemonState, mRecover *systray.MenuItem, logf func(format string, args ...any)) {
 	dir, _ := config.AppConfigDir()
 	offered := filepath.Join(dir, "recovery-offered")
-	for ; ; time.Sleep(time.Minute) {
+	// Looks often while the item is hidden: the guide tells a newly paired
+	// person to choose it as soon as the Mac is connected.
+	wait := 5 * time.Second
+	for ; ; time.Sleep(wait) {
 		n, labels := state.restorableFolders()
 		if n == 0 {
 			mRecover.Hide()
+			wait = 5 * time.Second
 			continue
 		}
 		mRecover.Show()
+		wait = time.Minute
 		if _, err := os.Stat(offered); err == nil {
 			continue
 		}

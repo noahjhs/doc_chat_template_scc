@@ -145,6 +145,7 @@ class Facts:
     recover_mac: bool = False  # the new Mac is connected
     unlocked: bool = False  # it has the key (the kit was opened there)
     restoring: bool = False  # a restore is under way on it
+    recovered: bool = False  # every folder has its new Mac again
 
 
 @dataclass
@@ -166,8 +167,15 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     person has answered it -- not merely once it was asked."""
     answered = _answered(history)
     inv = facts.invite
+    spoken = {m["_stage"] for m in history if m.get("role") == "assistant" and m.get("_stage") and m.get("content")}
     if facts.recovering:
         return _recover_stage(facts, download_url)
+    if facts.recovered:
+        # The recovery's closing line, once; after it they're simply set up.
+        if "recovered" in spoken:
+            return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
+        return Stage("recovered", "Say only: \"Your folders are back on this Mac, and Casper keeps them mirrored.\"",
+                     say="Your folders are back on this Mac, and Casper keeps them mirrored.")
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
                      "preview=true) and give only the one-line terms, ending \"Accept?\": accepting is theirs to say. On their yes, accept it.", ("redeem_invite",))
@@ -189,7 +197,10 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         # Casper's own dialog is in front of them: nothing to say, just wait.
         return Stage("consent", "Casper's dialog is in front of them asking to start mirroring; wait. If they ask, it's the "
                      "Casper dialog on their Mac: Mirror starts it.", silent=True)
-    if facts.folder == "active" and not facts.protected:
+    # "Protected" is said once, after a real finished first copy; a later dip in the
+    # copy doesn't take it back.
+    protected = facts.protected or "recovery_kit" in spoken
+    if facts.folder == "active" and not protected:
         return Stage("syncing", "The first copy is under way; the page shows its progress. Say only: \"Copying now. You can leave "
                      "this page open.\" If they ask how it's going, check protection_status.",
                      say="Copying now. You can leave this page open.")

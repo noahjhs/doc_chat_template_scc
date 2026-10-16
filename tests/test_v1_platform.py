@@ -881,6 +881,13 @@ def test_guide_setup_gates_go_one_step_at_a_time(app_env):
     assert "Download Casper" in guide.stage_for(F(**r), [], url).say
     assert [step(F(**r, recover_mac=True, **s)) for s in ({}, {"unlocked": True}, {"unlocked": True, "restoring": True}, {"restoring": True})] == [
         "recover_unlock", "recover_choose", "recover_copy", "recover_copy"]
+    # Once folders are back: one closing line, then simply set up.
+    back = dict(mac_connected=True, recovered=True, folder="active")
+    assert step(F(**back)) == "recovered"
+    assert step(F(**back), [{"role": "assistant", "content": "Your folders are back", "_stage": "recovered"}]) == "open"
+    # "Protected" is said once: a later dip in the copy doesn't take it back to "Copying now".
+    said_kit = [{"role": "assistant", "content": "Protected.", "_stage": "recovery_kit"}]
+    assert step(F(**connected, folder="active", protected=False), said_kit) == "recovery_kit"
 
 
 def test_guide_facts_come_from_caspers_state(app_env):
