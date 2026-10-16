@@ -15,6 +15,9 @@ running its own real Syncthing. Driven through MCP as agents would:
 Skipped without Go or a syncthing binary ($CASPER_TEST_SYNCTHING, or
 ~/st-spike/bin/syncthing)."""
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -82,10 +85,10 @@ class World:
         self.people[name] = {"token": token, "agent": agent}
         return self.people[name]
 
-    def make_kit(self, h, path, passphrase):
-        """A real recovery kit file from a (stopped) Mac's folder passwords."""
+    def make_kit(self, h, path, passphrase, *extra):
+        """A real recovery kit file from a (stopped) Mac's keys and folder passwords."""
         subprocess.run([str(self.bin), "-auth-domain", self.domain, "-username", h["person"], "-data", str(h["data"]),
-                        "-kit-out", str(path), "-kit-pass", passphrase, "-kit-only"], check=True)
+                        "-kit-out", str(path), "-kit-pass", passphrase, "-kit-only", *extra], check=True)
 
     def host(self, person, hostname, kit=None, kit_pass=""):
         p = self.people[person]
@@ -271,3 +274,110 @@ def test_mirroring_end_to_end(world):
     time.sleep(15)
     assert not (target / "ghost.txt").exists()
     assert "ghost" not in world.mcp("riley", "list_versions", folder="Documents", name_contains="ghost")
+
+
+def _derived_password(master: bytes, folder_id: str) -> str:
+    """recovery-v2-design.md 2.2: HKDF-SHA256, salt "casper-v2", info "folder-password\\0<id>" -- computed
+    here independently of the Go code."""
+    prk = hmac.new(b"casper-v2", master, hashlib.sha256).digest()
+    okm = hmac.new(prk, b"folder-password\x00" + folder_id.encode() + b"\x01", hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(okm).decode().rstrip("=")
+
+
+def test_master_key_kit_covers_later_and_legacy_folders(world):
+    """P2: Riley has an old folder with a random password (Documents -> legacy)
+    and, after she made her kit, a new one (Photos -> derived from her master key).
+    The one kit, with no copy of the old password in it, brings both back on a
+    replacement Mac (Documents via the sealed bundle on casper_service). The
+    server's database holds no folder password and no master key."""
+    for name in ("riley", "sam"):
+        world.person(name)
+    riley = world.host("riley", "riley-mac")
+    world.host("sam", "sam-mac")
+    world.mcp("sam", "publish_offering", host="sam-mac", max_gb=1, preview=False)
+    out = world.mcp("sam", "create_invite", quota_gb=0.5, for_whom="Riley", preview=False)
+    assert "Done" in world.mcp("riley", "redeem_invite", code=re.search(r"CASPER-[A-Z2-9-]{14}", out).group(0), preview=False)
+
+    def db():
+        return sqlite3.connect(world.tmp / "users.db")
+
+    def mirror(path, legacy_password=None):
+        folder = riley["home"] / path
+        folder.mkdir(parents=True)
+        (folder / "note.txt").write_text(f"{path} is safe")
+        (folder / "blob.bin").write_bytes(os.urandom(300_000))
+        world.mcp("riley", "mirror_folder", source_host="riley-mac", path=path, mirrors=["sam/sam-mac"], preview=False)
+        con = db()
+        [(folder_id,)] = con.execute("SELECT id FROM mirror_folders WHERE label = ?", (path,)).fetchall()
+        if legacy_password:  # a folder from before the master key: random password, already on her Mac
+            con.execute("UPDATE mirror_folders SET key_scheme = 'legacy' WHERE id = ?", (folder_id,))
+            con.commit()
+            (riley["data"] / "mirror-passwords.json").write_text(json.dumps({f"{world.domain}/riley/{folder_id}": legacy_password}))
+        con.close()
+        pending = requests.get(world.base + "/conversations/pending-approvals", headers={"Authorization": f"Bearer {world.people['riley']['token']}"}).json()["pending_approvals"]
+        [consent] = [p for p in pending if p["kind"] == "mirror_consent"]
+        assert requests.post(world.base + "/hosts/consent", json={"approval_id": consent["id"], "approve": True},
+                             headers={"Authorization": f"Bearer {riley['pair']['device_token']}"}).status_code == 200
+        held = world.tmp / "sam-mac" / "data" / "mirror" / "held" / folder_id
+        _wait(lambda: sum(f.is_file() and ".stfolder" not in f.parts for f in held.rglob("*")) >= 2, f"{path} to reach Sam's mirror", timeout=180)
+        _wait(lambda: "Every change is on at least one mirror" in world.mcp("riley", "protection_status"), f"{path} to be mirrored", timeout=180)
+        return folder_id
+
+    old_password = "legacy-" + base64.urlsafe_b64encode(os.urandom(24)).decode()
+    docs_id = mirror("Documents", legacy_password=old_password)
+
+    # The master key now exists, and the old folder's password is carried -- sealed.
+    master = base64.b64decode(json.loads((riley["data"] / "keystore.json").read_text())[f"{world.domain}/riley"])
+    assert len(master) == 32
+    con = db()
+    [(blob,)] = _wait(lambda: con.execute("SELECT blob FROM legacy_bundles").fetchall(), "the legacy bundle to be stored")
+    con.close()
+    assert old_password not in blob and old_password.encode() not in base64.b64decode(blob)
+
+    kit = world.tmp / "Casper Recovery Kit (riley).txt"
+    world.stop(riley)
+    world.make_kit(riley, kit, "a long kit passphrase", "-kit-no-bundle")
+    world.start(riley)
+    assert old_password.encode() not in kit.read_bytes()
+
+    # A folder made after the kit: its password is derived, never stored anywhere.
+    photos_id = mirror("Photos")
+    con = db()
+    assert dict(con.execute("SELECT id, key_scheme FROM mirror_folders").fetchall()) == {docs_id: "legacy", photos_id: "derived1"}
+    con.close()
+    assert photos_id not in (riley["data"] / "mirror-passwords.json").read_text()
+
+    # Nothing in casper_service's database lets it open a folder.
+    con = db()
+    con.close()
+    dump = (world.tmp / "users.db").read_bytes()
+    for secret in (old_password, _derived_password(master, photos_id), _derived_password(master, docs_id),
+                   base64.b64encode(master).decode(), base64.urlsafe_b64encode(master).decode(), base64.urlsafe_b64encode(master).decode().rstrip("=")):
+        assert secret.encode() not in dump, "a secret reached casper_service"
+    assert master not in dump
+
+    # Riley's Mac is lost; the replacement opens the one older kit.
+    world.stop(riley)
+    replacement = world.host("riley", "riley-new-mac", kit=kit, kit_pass="a long kit passphrase")
+    for label in ("Documents", "Photos"):
+        target = replacement["home"] / "Casper Restores" / label
+
+        def back(target=target, label=label):
+            try:
+                return (target / "note.txt").read_text() == f"{label} is safe" and (target / "blob.bin").stat().st_size == 300_000
+            except OSError:
+                return False
+
+        _wait(back, f"{label} to come back from the kit made before Photos existed", timeout=240)
+
+    def owners():
+        con = db()
+        try:
+            return dict(con.execute("SELECT mf.label, h.routing_key FROM mirror_folders mf JOIN hosts h ON h.id = mf.owner_host_id").fetchall())
+        finally:
+            con.close()
+
+    _wait(lambda: owners() == {"Documents": "rk-riley-new-mac", "Photos": "rk-riley-new-mac"}, "both folders to be promoted", timeout=120)
+    # The replacement derives Photos' password from the key in the kit -- the same one the first Mac used.
+    new_master = base64.b64decode(json.loads((replacement["data"] / "keystore.json").read_text())[f"{world.domain}/riley"])
+    assert new_master == master

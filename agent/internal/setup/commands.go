@@ -12,6 +12,7 @@ import (
 	"casper-agent/internal/backup"
 	"casper-agent/internal/config"
 	"casper-agent/internal/mirrord"
+	"casper-agent/internal/recovery"
 )
 
 // --- status ---------------------------------------------------------------------
@@ -373,15 +374,43 @@ func (c *cli) kitAccount() (*storedAccount, func(), error) {
 	}
 }
 
-// recoveryKit is what a kit holds (version 2): this account's backup keys
-// and every mirrored folder's password, so a replacement Mac can read the
-// mirrors. Locked with a passphrase the person types into a macOS dialog.
+// recoveryKit is what a kit holds. Version 3 (recovery-v2-design.md 2.7):
+// the master key, from which every newer folder's password derives, plus the
+// frozen passwords of folders that predate it (LegacyBundle) and the backup
+// keys. Version 2 (still read): every folder's password, so it goes stale
+// when a folder is added. Locked with a passphrase the person types into a
+// macOS dialog.
 type recoveryKit struct {
 	Version         int               `json:"version"`
 	Account         string            `json:"account"`
 	AuthDomain      string            `json:"auth_domain"`
 	BackupKeys      []byte            `json:"backup_keys,omitempty"`
-	MirrorPasswords map[string]string `json:"mirror_passwords"` // folder ID -> password
+	MasterKey       []byte            `json:"master_key,omitempty"`              // v3
+	LegacyBundle    map[string]string `json:"legacy_bundle_plaintext,omitempty"` // v3: folder ID -> password
+	MirrorPasswords map[string]string `json:"mirror_passwords,omitempty"`        // v2: folder ID -> password
+}
+
+// folderPasswords is every folder password the kit carries outright.
+func (k recoveryKit) folderPasswords() map[string]string {
+	out := map[string]string{}
+	for id, pw := range k.MirrorPasswords {
+		out[id] = pw
+	}
+	for id, pw := range k.LegacyBundle {
+		out[id] = pw
+	}
+	return out
+}
+
+func (c *cli) keys() *recovery.Keys {
+	return NewKeys(recovery.KeychainStore{}, mirrord.KeychainPasswords{}, c.authDomain)
+}
+
+// NewKeys is the master-key source over a store and the legacy passwords.
+func NewKeys(store recovery.KeyStore, pw mirrord.Passwords, authDomain string) *recovery.Keys {
+	return &recovery.Keys{Store: store, Legacy: func(identity, folderID string) (string, error) {
+		return pw.Get(mirrord.Account(authDomain, strings.TrimPrefix(identity, authDomain+"/"), folderID))
+	}}
 }
 
 func (c *cli) recoveryKit() error {
@@ -390,6 +419,9 @@ func (c *cli) recoveryKit() error {
 		return err
 	}
 	kit := recoveryKit{Version: 2, Account: acct.Username, AuthDomain: c.authDomain, MirrorPasswords: map[string]string{}}
+	if m, _ := c.keys().Master(recovery.Identity(c.authDomain, acct.Username), false); m != nil {
+		kit.Version, kit.MasterKey = 3, m
+	}
 	if data, _ := (backup.MacKeychain{}).Load(c.backupKeyAccount(acct.Username)); data != nil {
 		kit.BackupKeys = data
 	}
@@ -402,7 +434,10 @@ func (c *cli) recoveryKit() error {
 			}
 		}
 	}
-	if kit.BackupKeys == nil && len(kit.MirrorPasswords) == 0 {
+	if kit.Version == 3 { // the stored passwords are the legacy ones; newer folders derive from the key
+		kit.LegacyBundle, kit.MirrorPasswords = kit.MirrorPasswords, nil
+	}
+	if kit.BackupKeys == nil && len(kit.folderPasswords()) == 0 && kit.MasterKey == nil {
 		return errors.New("this Mac has no keys or mirrored folders yet -- make the kit after setting up mirroring (or after pairing, for backups)")
 	}
 	// Decide where it goes before asking for a passphrase: never inside a
@@ -445,8 +480,8 @@ func (c *cli) recoveryKit() error {
 	// Tell Casper a kit was made (only that -- the kit stays here), so the
 	// guide knows the step is done. Best effort.
 	report()
-	c.emit(fmt.Sprintf("Saved the recovery kit (%d mirrored folder(s)) to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.", len(kit.MirrorPasswords), path),
-		map[string]any{"ok": true, "path": path, "mirrored_folders": len(kit.MirrorPasswords)})
+	c.emit(fmt.Sprintf("Saved the recovery kit to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.", path),
+		map[string]any{"ok": true, "path": path, "version": kit.Version, "mirrored_folders": len(kit.folderPasswords())})
 	return nil
 }
 
@@ -472,17 +507,15 @@ func (c *cli) restore(kitPath string) error {
 	if kit.Account != "" && kit.Account != acct.Username {
 		return fmt.Errorf("this kit is for %s, but this Mac is signed in as %s", kit.Account, acct.Username)
 	}
-	for folderID, pw := range kit.MirrorPasswords {
-		if err := (mirrord.KeychainPasswords{}).Set(mirrord.Account(c.authDomain, acct.Username, folderID), pw); err != nil {
-			return err
-		}
+	if err := importKitKeys(c.keys(), mirrord.KeychainPasswords{}, c.authDomain, acct.Username, kit); err != nil {
+		return err
 	}
 	if kit.BackupKeys != nil {
 		if existing, _ := (backup.MacKeychain{}).Load(c.backupKeyAccount(acct.Username)); existing == nil {
 			_, _ = (backup.MacKeychain{}).Save(c.backupKeyAccount(acct.Username), kit.BackupKeys)
 		}
 	}
-	c.emit(fmt.Sprintf("Imported the recovery kit: %d mirrored folder(s) can now be rebuilt on this Mac (ask the agent to restore_folder, or choose Recover from a Lost Mac in Casper's menu).", len(kit.MirrorPasswords)),
-		map[string]any{"ok": true, "mirrored_folders": len(kit.MirrorPasswords)})
+	c.emit("Imported the recovery kit: this Mac can now rebuild the mirrored folders (ask the agent to restore_folder, or choose Recover from a Lost Mac in Casper's menu).",
+		map[string]any{"ok": true, "mirrored_folders": len(kit.folderPasswords())})
 	return nil
 }

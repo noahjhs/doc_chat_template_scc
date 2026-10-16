@@ -5,10 +5,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"casper-agent/internal/backup"
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/mirror"
 	"casper-agent/internal/mirrord"
+	"casper-agent/internal/recovery"
+	"casper-agent/internal/setup"
 )
 
 // startMirroring runs the bundled Syncthing (Contents/MacOS/syncthing, next
@@ -36,6 +39,11 @@ func (d *daemonState) startMirroring() {
 		Mgr:        mirror.New(bin, filepath.Join(dir, "syncthing"), filepath.Join(dir, "mirror"), "default", d.logf),
 		Bin:        bin,
 		Passwords:  mirrord.KeychainPasswords{},
+		Keys:       setup.NewKeys(recovery.KeychainStore{}, mirrord.KeychainPasswords{}, d.authDomain),
+		BackupKeys: func(username string) []byte {
+			data, _ := (backup.MacKeychain{}).Load(d.authDomain + "/" + username)
+			return data
+		},
 		Identities: d.mirrorIdentities,
 		Ask: func(text string) (bool, bool) {
 			return dialog.Confirm(text, "Mirror", "Cancel", 10*time.Minute)

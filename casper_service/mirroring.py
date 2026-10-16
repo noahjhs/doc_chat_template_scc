@@ -258,6 +258,7 @@ def desired_state(db, user_id: int, host_id: int) -> dict:
             "folder_id": f["id"], "label": f["label"],
             "path": f["restore_path"] if restoring else f["path"],
             "mirrors": mirrors, "catcher": catcher, "restore": restoring,
+            "key_scheme": f["key_scheme"],
         })
 
     # Folders this identity holds for friends: targets on THIS host, under
@@ -322,7 +323,7 @@ def create_folder(db, user_id: int, host_id: int, path: str, label: str, mirror_
                   catcher_grant: dict | None, use_casper_catcher: bool) -> str:
     folder_id = "casper-" + secrets.token_hex(8)
     db.execute(
-        "INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status, use_casper_catcher) VALUES (?, ?, ?, ?, ?, 'awaiting_consent', ?)",
+        "INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status, use_casper_catcher, key_scheme) VALUES (?, ?, ?, ?, ?, 'awaiting_consent', ?, 'derived1')",
         (folder_id, user_id, host_id, path, label, int(use_casper_catcher)),
     )
     for g in mirror_grants:

@@ -77,6 +77,7 @@ type RestorableFolder struct {
 	Path        string `json:"path"` // where it lived on the lost Mac
 	Restoring   bool   `json:"restoring"`
 	RestorePath string `json:"restore_path"`
+	KeyScheme   string `json:"key_scheme"` // "derived1" | "legacy"
 }
 
 // ListRestorable asks casper_service which folders this Mac could restore.
@@ -96,4 +97,21 @@ func StartRestore(authDomain, deviceToken string, where map[string]string) error
 		items = append(items, map[string]string{"id": id, "path": path})
 	}
 	return deviceCall("POST", authDomain, deviceToken, "/hosts/restore", map[string]any{"action": "start", "folders": items}, nil)
+}
+
+// PutLegacyBundle stores the sealed legacy bundle (ciphertext only) with
+// casper_service; the first write stands.
+func PutLegacyBundle(authDomain, deviceToken, blob string) error {
+	return deviceCall("PUT", authDomain, deviceToken, "/hosts/legacy-bundle", map[string]any{"blob": blob}, nil)
+}
+
+// FetchLegacyBundle returns the sealed legacy bundle, or "" if none was stored.
+func FetchLegacyBundle(authDomain, deviceToken string) (string, error) {
+	var out struct {
+		Blob *string `json:"blob"`
+	}
+	if err := deviceCall("GET", authDomain, deviceToken, "/hosts/legacy-bundle", nil, &out); err != nil || out.Blob == nil {
+		return "", err
+	}
+	return *out.Blob, nil
 }

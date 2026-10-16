@@ -13,6 +13,7 @@ import (
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/mirrord"
+	"casper-agent/internal/recovery"
 )
 
 // Recovery on a replacement Mac, with no agent (docs/product/recovery-v2-design.md,
@@ -29,6 +30,13 @@ func NewKit(authDomain, username string, backupKeys []byte, passwords map[string
 	return recoveryKit{Version: 2, Account: username, AuthDomain: authDomain, BackupKeys: backupKeys, MirrorPasswords: passwords}
 }
 
+// NewKitV3 is a version-3 kit: the master key, plus the passwords of folders
+// that predate it (legacy; may be nil -- the sealed copy on casper_service
+// covers them) and the backup keys.
+func NewKitV3(authDomain, username string, master, backupKeys []byte, legacy map[string]string) Kit {
+	return recoveryKit{Version: 3, Account: username, AuthDomain: authDomain, BackupKeys: backupKeys, MasterKey: master, LegacyBundle: legacy}
+}
+
 // kitFileText is the kit file: a short explanation, then the locked kit.
 func kitFileText(kit Kit, host string, made time.Time, passphrase string) (string, error) {
 	data, _ := json.Marshal(kit)
@@ -36,18 +44,21 @@ func kitFileText(kit Kit, host string, made time.Time, passphrase string) (strin
 	if err != nil {
 		return "", err
 	}
+	staleNote := ""
+	if kit.Version < 3 {
+		staleNote = "Make a new kit whenever you start mirroring another folder.\n"
+	}
 	return fmt.Sprintf(`Casper recovery kit -- %s (made on %s, %s)
 
 This file holds what's needed to get your data back if this Mac is lost:
-the passwords of the %d folder(s) you mirror to friends, and your backup keys,
-all locked with the passphrase you chose. With this file and that passphrase,
+the key to your mirrored folders (including ones you add later) and your
+backup keys, all locked with the passphrase you chose. With this file and that passphrase,
 a new Mac can rebuild your mirrored folders from your friends' computers:
 choose "Recover from a Lost Mac" in Casper's menu on the new Mac. Keep a copy
 of this file, and the passphrase, somewhere other than this Mac (a password
 manager is ideal).
-Make a new kit whenever you start mirroring another folder.
-
-%s`, kit.Account, host, made.Format("2 Jan 2006"), len(kit.MirrorPasswords), armored), nil
+%s
+%s`, kit.Account, host, made.Format("2 Jan 2006"), staleNote, armored), nil
 }
 
 // WriteKitFile locks a kit with a passphrase and saves it (headless tests).
@@ -74,7 +85,7 @@ func ReadKitFile(path, passphrase string) (Kit, error) {
 		return Kit{}, errors.New("couldn't open the kit -- wrong passphrase?")
 	}
 	var kit Kit
-	if json.Unmarshal(data, &kit) != nil || kit.Version != 2 {
+	if json.Unmarshal(data, &kit) != nil || (kit.Version != 2 && kit.Version != 3) {
 		kit = Kit{BackupKeys: data}
 	}
 	return kit, nil
@@ -98,7 +109,8 @@ func restorePath(f config.RestorableFolder, home string) string {
 func PlanRestore(folders []config.RestorableFolder, kit Kit, home string) (where map[string]string, labels []string, uncovered []config.RestorableFolder) {
 	where = map[string]string{}
 	for _, f := range folders {
-		if _, ok := kit.MirrorPasswords[f.ID]; !ok {
+		_, carried := kit.folderPasswords()[f.ID]
+		if !carried && !(kit.MasterKey != nil && f.KeyScheme == recovery.SchemeDerived1) {
 			uncovered = append(uncovered, f)
 			continue
 		}
@@ -113,9 +125,27 @@ type RecoverArgs struct {
 	AuthDomain, Username, DeviceToken, Home string
 	Kit                                     Kit
 	Passwords                               mirrord.Passwords
+	// Keys receives the kit's master key (nil: a version-2 kit only).
+	Keys *recovery.Keys
 	// Confirm is the Restore intent, answered only in Casper's own window
 	// (a dialog); it is shown the plan in plain words.
 	Confirm func(summary string) bool
+}
+
+// importKitKeys puts what a kit carries on this Mac: the master key and the
+// legacy folders' passwords.
+func importKitKeys(keys *recovery.Keys, pw mirrord.Passwords, authDomain, username string, kit Kit) error {
+	if kit.MasterKey != nil {
+		if err := keys.ImportMaster(recovery.Identity(authDomain, username), kit.MasterKey); err != nil {
+			return err
+		}
+	}
+	for folderID, p := range kit.folderPasswords() {
+		if err := pw.Set(mirrord.Account(authDomain, username, folderID), p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Recover puts the kit's folder passwords on this Mac, asks Casper which
@@ -124,10 +154,26 @@ func Recover(a RecoverArgs) (started map[string]string, err error) {
 	if a.Kit.Account != "" && a.Kit.Account != a.Username {
 		return nil, fmt.Errorf("this kit is for %s, but this Mac is signed in as %s", a.Kit.Account, a.Username)
 	}
-	for folderID, pw := range a.Kit.MirrorPasswords {
-		if err := a.Passwords.Set(mirrord.Account(a.AuthDomain, a.Username, folderID), pw); err != nil {
-			return nil, err
+	if a.Keys == nil {
+		a.Keys = NewKeys(recovery.KeychainStore{}, a.Passwords, a.AuthDomain)
+	}
+	// A kit that holds the master key opens the sealed legacy bundle too, so
+	// a kit made without the plaintext still covers the old folders.
+	if a.Kit.MasterKey != nil {
+		if blob, err := config.FetchLegacyBundle(a.AuthDomain, a.DeviceToken); err == nil && blob != "" {
+			if b, err := recovery.OpenBundle(a.Kit.MasterKey, blob); err == nil {
+				merged := a.Kit.folderPasswords()
+				for id, pw := range b.Passwords {
+					if _, ok := merged[id]; !ok {
+						merged[id] = pw
+					}
+				}
+				a.Kit.LegacyBundle, a.Kit.MirrorPasswords = merged, nil
+			}
 		}
+	}
+	if err := importKitKeys(a.Keys, a.Passwords, a.AuthDomain, a.Username, a.Kit); err != nil {
+		return nil, err
 	}
 	folders, err := config.ListRestorable(a.AuthDomain, a.DeviceToken, true) // also tells Casper the key is here
 	if err != nil {

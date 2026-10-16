@@ -348,9 +348,20 @@ CREATE TABLE IF NOT EXISTS mirror_folders (
     use_casper_catcher INTEGER NOT NULL DEFAULT 0,
     restore_host_id INTEGER REFERENCES hosts(id),
     restore_path TEXT,
+    key_scheme TEXT NOT NULL DEFAULT 'legacy',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     activated_at TEXT,
     stopped_at TEXT
+);
+
+-- Recovery v2 (docs/product/recovery-v2-design.md 2.2.1): the frozen
+-- passwords of a person's pre-master-key folders (and backup keys), sealed
+-- on their Mac under a key derived from the master key. Ciphertext only:
+-- casper_service cannot open it. Written once, at migration.
+CREATE TABLE IF NOT EXISTS legacy_bundles (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    blob TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Where a folder is mirrored: a friend's mirror, or a friend's catcher,
@@ -574,6 +585,17 @@ def init_db():
         _add_kind_columns_to_pending_approvals(db)
         _add_backup_key_columns_to_host_pairings(db)
         _add_group_columns_to_invites(db)
+        _add_key_scheme_to_mirror_folders(db)
+
+
+def _add_key_scheme_to_mirror_folders(db):
+    """One-time ALTER TABLE ADD COLUMN for mirror_folders.key_scheme: folders
+    that existed before the master key keep their random password ('legacy',
+    the column default, so the existing rows migrate); create_folder sets
+    'derived1' on every new one."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(mirror_folders)").fetchall()}
+    if "key_scheme" not in columns:
+        db.execute("ALTER TABLE mirror_folders ADD COLUMN key_scheme TEXT NOT NULL DEFAULT 'legacy'")
 
 
 def _add_group_columns_to_invites(db):

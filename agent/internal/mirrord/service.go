@@ -20,6 +20,7 @@ import (
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
 	"casper-agent/internal/mirror"
+	"casper-agent/internal/recovery"
 )
 
 type Identity struct{ Username, DeviceToken string }
@@ -28,7 +29,13 @@ type Service struct {
 	AuthDomain string
 	Mgr        *mirror.Manager
 	Bin        string
-	Passwords  Passwords
+	// Passwords holds the legacy (pre-master-key) folders' random passwords.
+	Passwords Passwords
+	// Keys holds each identity's master key; new folders' passwords are
+	// derived from it (internal/recovery).
+	Keys *recovery.Keys
+	// BackupKeys returns an identity's backup keys, carried in the legacy bundle.
+	BackupKeys func(username string) []byte
 	Identities func() []Identity
 	// Ask shows the person a native yes/no dialog (dialog.Confirm in the app;
 	// a no-op in the headless test daemon, whose test answers consent itself).
@@ -44,6 +51,7 @@ type Service struct {
 	desired map[string]mirror.Desired // per username, with passwords filled in
 	pruned  time.Time
 	settled map[string]time.Time // restoring folder -> since when it has looked finished
+	bundled map[string]bool      // identities whose legacy bundle casper_service is known to hold
 }
 
 func (s *Service) init() {
@@ -114,8 +122,26 @@ func (s *Service) Step() {
 			continue
 		}
 		owned := d.Owned[:0]
+		ident := recovery.Identity(s.AuthDomain, id.Username)
+		restoring := false
 		for _, f := range d.Owned {
-			pw, err := GetOrCreate(s.Passwords, Account(s.AuthDomain, id.Username, f.ID), !f.Restore)
+			restoring = restoring || f.Restore
+		}
+		if !restoring && len(d.Owned) > 0 {
+			// The master key is made the first time a Mac that owns folders
+			// reconciles; a Mac that is restoring never makes one -- it must
+			// come from the kit.
+			if _, err := s.Keys.Master(ident, true); err != nil {
+				s.Logf("mirroring: master key for %s: %s", id.Username, err)
+				continue
+			}
+			s.carryLegacy(id, ident, d)
+		}
+		for _, f := range d.Owned {
+			pw, err := s.Keys.FolderPassword(ident, f.ID, f.KeyScheme)
+			if err == nil && pw != "" && f.KeyScheme == recovery.SchemeDerived1 {
+				err = s.Keys.CheckPath(ident, f.ID, f.Path)
+			}
 			if err != nil || pw == "" {
 				s.Logf("mirroring: no password for %s (%v) -- %s", f.ID, err, map[bool]string{true: "restore it from the recovery kit", false: "skipping"}[f.Restore])
 				continue
@@ -195,6 +221,54 @@ func (s *Service) Step() {
 			}
 		}
 	}
+}
+
+// carryLegacy freezes the folders that still have random passwords into a
+// bundle sealed under the master key and leaves it with casper_service
+// (ciphertext only), once: it never grows, since every newer folder is derived.
+func (s *Service) carryLegacy(id Identity, ident string, d mirror.Desired) {
+	s.mu.Lock()
+	done := s.bundled[ident]
+	s.mu.Unlock()
+	if done {
+		return
+	}
+	b := recovery.LegacyBundle{Passwords: map[string]string{}}
+	for _, f := range d.Owned {
+		if f.KeyScheme == recovery.SchemeDerived1 {
+			continue
+		}
+		if pw, _ := s.Passwords.Get(Account(s.AuthDomain, id.Username, f.ID)); pw != "" {
+			b.Passwords[f.ID] = pw
+		}
+	}
+	if s.BackupKeys != nil {
+		b.BackupKeys = s.BackupKeys(id.Username)
+	}
+	if len(b.Passwords) > 0 || len(b.BackupKeys) > 0 {
+		have, err := config.FetchLegacyBundle(s.AuthDomain, id.DeviceToken)
+		if err != nil {
+			s.Logf("mirroring: checking the legacy bundle for %s: %s", id.Username, err)
+			return
+		}
+		if have == "" {
+			m, _ := s.Keys.Master(ident, false)
+			blob, err := recovery.SealBundle(m, b)
+			if err == nil {
+				err = config.PutLegacyBundle(s.AuthDomain, id.DeviceToken, blob)
+			}
+			if err != nil {
+				s.Logf("mirroring: storing the legacy bundle for %s: %s", id.Username, err)
+				return
+			}
+		}
+	}
+	s.mu.Lock()
+	if s.bundled == nil {
+		s.bundled = map[string]bool{}
+	}
+	s.bundled[ident] = true
+	s.mu.Unlock()
 }
 
 // settledFor is how long (seconds) a restoring folder has looked finished:

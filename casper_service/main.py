@@ -3130,6 +3130,28 @@ def _mcp_restore_folder(user_id: int, folder: str, dest_host: str, dest_path: st
     return _start_restore(f, host_id, abs_path, dest_host)
 
 
+@app.put("/hosts/legacy-bundle")
+def put_legacy_bundle(body: dict, authorization: str = Header(default="")):
+    """The sealed bundle of this person's pre-master-key folder passwords
+    (recovery-v2-design.md 2.2.1). Ciphertext only; written once -- a second
+    write is ignored, so a Mac that is mid-recovery can't replace it."""
+    blob = str(body.get("blob") or "")
+    if not blob or len(blob) > 1 << 20:
+        raise HTTPException(status_code=400, detail="blob is required (base64, under 1 MB).")
+    with get_db() as db:
+        attached = _attached_or_401(db, authorization)
+        cur = db.execute("INSERT OR IGNORE INTO legacy_bundles (user_id, blob) VALUES (?, ?)", (attached["user_id"], blob))
+        return {"stored": cur.rowcount > 0}
+
+
+@app.get("/hosts/legacy-bundle")
+def get_legacy_bundle(authorization: str = Header(default="")):
+    with get_db() as db:
+        attached = _attached_or_401(db, authorization)
+        row = db.execute("SELECT blob FROM legacy_bundles WHERE user_id = ?", (attached["user_id"],)).fetchone()
+        return {"blob": row["blob"] if row else None}
+
+
 @app.post("/hosts/restore")
 def host_restore(body: dict, authorization: str = Header(default="")):
     """Recovery without an agent, from the new Mac's own Casper app (device
@@ -3149,7 +3171,7 @@ def host_restore(body: dict, authorization: str = Header(default="")):
                 _get_or_create_profile(db, user_id)
                 db.execute("UPDATE user_profile SET recovery_unlocked_at = ? WHERE user_id = ?", (trust.now_iso(), user_id))
             return {"folders": [{"id": f["id"], "label": f["label"], "path": f["path"], "restoring": f["restore_host_id"] == host_id,
-                                 "restore_path": f["restore_path"]} for f in rows]}
+                                 "restore_path": f["restore_path"], "key_scheme": f["key_scheme"]} for f in rows]}
     if action != "start":
         raise HTTPException(status_code=400, detail="action must be list or start.")
     by_id = {f["id"]: f for f in rows}

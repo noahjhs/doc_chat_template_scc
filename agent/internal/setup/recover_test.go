@@ -11,6 +11,7 @@ import (
 
 	"casper-agent/internal/config"
 	"casper-agent/internal/mirrord"
+	"casper-agent/internal/recovery"
 )
 
 func TestKitFileRoundTrip(t *testing.T) {
@@ -121,5 +122,73 @@ func TestRecoverNeedsTheYes(t *testing.T) {
 	wrong.Kit.Account = "someone-else"
 	if _, err := Recover(wrong); err == nil || !strings.Contains(err.Error(), "someone-else") {
 		t.Fatalf("a kit for another account should be refused: %v", err)
+	}
+}
+
+// A version-3 kit holds the master key: it round-trips, covers a folder
+// created after the kit was made (derived1) and, via the sealed bundle on
+// casper_service, a legacy folder the kit carries no plaintext for.
+func TestKitV3CoversNewAndLegacyFolders(t *testing.T) {
+	master := make([]byte, 32)
+	master[0] = 9
+	path := filepath.Join(t.TempDir(), "kit.txt")
+	kit := NewKitV3("d", "riley", master, nil, map[string]string{"casper-old1": "pw-old1"})
+	if err := WriteKitFile(path, kit, "a long enough passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "make a new kit") || strings.Contains(string(raw), "Make a new kit") {
+		t.Fatal("a v3 kit never goes stale; it shouldn't tell the person to remake it")
+	}
+	got, err := ReadKitFile(path, "a long enough passphrase")
+	if err != nil || string(got.MasterKey) != string(master) || got.LegacyBundle["casper-old1"] != "pw-old1" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+
+	blob, _ := recovery.SealBundle(master, recovery.LegacyBundle{Passwords: map[string]string{"casper-old2": "pw-old2"}})
+	var started []map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hosts/legacy-bundle":
+			_, _ = w.Write([]byte(`{"blob":"` + blob + `"}`))
+		case "/hosts/restore":
+			var body struct {
+				Action  string              `json:"action"`
+				Folders []map[string]string `json:"folders"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Action == "start" {
+				started = body.Folders
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"folders":[
+			 {"id":"casper-old1","label":"A","path":"/x/A","key_scheme":"legacy"},
+			 {"id":"casper-old2","label":"B","path":"/x/B","key_scheme":"legacy"},
+			 {"id":"casper-new","label":"C","path":"/x/C","key_scheme":"derived1"}]}`))
+		}
+	}))
+	defer srv.Close()
+	domain := strings.TrimPrefix(srv.URL, "http://")
+	pw := mirrord.NewMemoryPasswords()
+	store := &recovery.MemoryStore{}
+	kit.AuthDomain = domain
+	if _, err := Recover(RecoverArgs{AuthDomain: domain, Username: "riley", DeviceToken: "dt", Home: t.TempDir(), Kit: got,
+		Passwords: pw, Keys: NewKeys(store, pw, domain), Confirm: func(string) bool { return true }}); err != nil {
+		t.Fatal(err)
+	}
+	if len(started) != 3 {
+		t.Fatalf("all three folders should restore: %v", started)
+	}
+	k := NewKeys(store, pw, domain)
+	id := recovery.Identity(domain, "riley")
+	if p, _ := k.FolderPassword(id, "casper-new", recovery.SchemeDerived1); p != recovery.FolderPassword(master, "casper-new") {
+		t.Fatal("the new folder's password isn't derived from the kit's key")
+	}
+	if p, _ := k.FolderPassword(id, "casper-old2", recovery.SchemeLegacy); p != "pw-old2" {
+		t.Fatalf("the legacy folder wasn't opened via the sealed bundle: %q", p)
+	}
+	if p, _ := k.FolderPassword(id, "casper-old1", recovery.SchemeLegacy); p != "pw-old1" {
+		t.Fatalf("the kit's own legacy password: %q", p)
 	}
 }

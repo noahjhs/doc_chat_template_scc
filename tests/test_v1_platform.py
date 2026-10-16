@@ -1149,7 +1149,7 @@ def test_restore_without_an_agent_then_promotion(app_env):
         list_ = lambda headers, **extra: client.post("/hosts/restore", json={"action": "list", **extra}, headers=headers)  # noqa: E731
         start = lambda headers, folders: client.post("/hosts/restore", json={"action": "start", "folders": folders}, headers=headers)  # noqa: E731
 
-        assert list_(new).json()["folders"] == [{"id": "casper-f1", "label": "Documents", "path": "/Users/x/Documents", "restoring": False, "restore_path": None}]
+        assert list_(new).json()["folders"] == [{"id": "casper-f1", "label": "Documents", "path": "/Users/x/Documents", "restoring": False, "restore_path": None, "key_scheme": "legacy"}]
         assert list_(old).json()["folders"] == [] and list_(sams_mac).json()["folders"] == []  # not its own Mac's, nor someone else's
         assert list_({}).status_code == 401
         assert main._guide_stage(rid, []).name != "recover_install"  # no "I lost my Mac" yet: setup as usual
@@ -1185,3 +1185,30 @@ def test_restore_without_an_agent_then_promotion(app_env):
         assert (row["owner_host_id"], row["restore_host_id"], row["restore_path"], row["path"]) == (new_id, None, None, "/Users/x/Casper Restores/Documents")
         assert main._guide_stage(rid, []).name not in ("recover_install", "recover_unlock", "recover_choose", "recover_copy")
         assert list_(new).json()["folders"] == []  # nothing left to recover here
+
+
+def test_legacy_bundle_is_ciphertext_written_once_and_key_scheme_is_served(app_env):
+    """Recovery v2 P2: casper_service keeps the sealed legacy bundle (write-once,
+    per person, only to that person's paired Mac) and says which key scheme each
+    folder uses; folders that predate the master key are 'legacy', new ones 'derived1'."""
+    main, client = app_env
+    _, riley = _signup(client, "riley")
+    _, sam = _signup(client, "sam")
+    with FakeDaemon(respond_with=lambda b: _ok()) as sd:
+        mac = _pair(client, riley, "rk-r", "r-mac", sd.url)
+        sams = _pair(client, sam, "rk-s", "s-mac", sd.url)
+        assert client.get("/hosts/legacy-bundle", headers=mac).json() == {"blob": None}
+        assert client.put("/hosts/legacy-bundle", json={"blob": "c2VhbGVk"}, headers=mac).json() == {"stored": True}
+        assert client.put("/hosts/legacy-bundle", json={"blob": "b3RoZXI="}, headers=mac).json() == {"stored": False}
+        assert client.get("/hosts/legacy-bundle", headers=mac).json() == {"blob": "c2VhbGVk"}
+        assert client.get("/hosts/legacy-bundle", headers=sams).json() == {"blob": None}  # someone else's is not yours
+        assert client.put("/hosts/legacy-bundle", json={}, headers=mac).status_code == 400
+        assert client.get("/hosts/legacy-bundle").status_code in (401, 422)
+        rid, host_id = _user_id(main, "riley"), _host_id(client, riley, "r-mac")
+        with main.get_db() as db:
+            db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES "
+                       "('casper-old', ?, ?, '/Users/x/Old', 'Old', 'active')", (rid, host_id))
+            folder = main.mirroring.create_folder(db, rid, host_id, "/Users/x/New", "New", [], None, False)
+            db.execute("UPDATE mirror_folders SET status = 'active' WHERE id = ?", (folder,))
+        owned = client.get("/hosts/mirror-config", headers=mac).json()["owned"]
+        assert {f["label"]: f["key_scheme"] for f in owned} == {"Old": "legacy", "New": "derived1"}

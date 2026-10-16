@@ -61,6 +61,9 @@ type OwnedFolder struct {
 	// Restore: this Mac is rebuilding the folder from its mirrors (a new or
 	// replacement machine) -- receive-only, decrypting with the password.
 	Restore bool `json:"restore"`
+	// KeyScheme is how the password comes about: "derived1" (from the master
+	// key) or "legacy" (a random one carried since before it).
+	KeyScheme string `json:"key_scheme"`
 	// Password is never sent by casper_service; the daemon fills it in from
 	// the Keychain (see PasswordStore).
 	Password string `json:"-"`
