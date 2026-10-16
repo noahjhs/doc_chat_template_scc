@@ -28,6 +28,7 @@ Every background agent follows these conventions, so briefs can stay short:
 - **Board.** Keep `~/Documents/Casper-board.md` current (edit it with bash; the Write tool can't write in `~/Documents`): "In flight" while working, "Landed" when done, questions under "Needs you".
 - **Report.** Write the full details (what changed, decisions, findings, verification) to `~/Documents/Casper-reports/<YYYY-MM-DD>-<short-slug>.md` (create the folder if needed).
 - **Final reply.** At most 3 short lines: the outcome, the report file's path, and any decision needed. No lists of files, no command output, no markdown documents in the reply.
+- **Launching (coordinator).** `tools/agent.sh <slug> "<brief>"` (or `@brief.md`) starts a detached agent: a separate `claude -p` in its own worktree on a fresh branch `agent/<when>-<slug>` off origin/dev, so its commands never show in the live conversation. Run it in the background; it returns when the agent is done and prints only the agent's final reply. That reply is also saved to `~/Documents/Casper-reports/logs/<when>-<slug>.log` (the full session stays under `~/.claude/projects/`). The worktree (`~/.cache/casper-agents/<when>-<slug>`) is removed once its work is on origin/dev; otherwise it is kept and its path printed.
 
 ## Architecture
 
