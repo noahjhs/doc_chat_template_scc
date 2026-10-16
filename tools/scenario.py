@@ -5,6 +5,7 @@
     tools/scenario.py start <name>         stop other VMs, free memory, then reset a scenario (every persona in it) or one checkpoint
     tools/scenario.py reset <name>         the same, but leave other running VMs alone
     tools/scenario.py stop [scenario]      shut every test VM down (or just the scenario's), and wipe headless personas' Macs
+    tools/scenario.py newmac <persona>     a lost Mac's replacement: discard the VM, clone a fresh one; the account stays
     tools/scenario.py mail [address]       the newest email the test stack kept instead of sending
     tools/scenario.py ask <persona> [-c] "text"   talk to a headless persona's own agent (-c: carry on the conversation)
     ... --env test                         use the end-to-end test deployment (tools/test_stack.sh) instead of dev
@@ -831,6 +832,22 @@ def main(argv: list[str]) -> int:
                     say(p["username"], headless_stop(p))
             elif p["vm"] in running_vms():
                 say("mac", f"{p['vm']}: {shutdown_vm(p['vm'])}")
+        return 0
+    if cmd == "newmac" and len(argv) > 2:
+        # A replacement Mac for a persona whose Mac was "lost": the VM is
+        # discarded and a fresh one cloned from the same snapshot. Unlike
+        # reset, the persona's Casper account (and the server's rows) stay.
+        persona = CONF["personas"].get(argv[2])
+        if not persona or persona.get("headless"):
+            print(f"{argv[2]!r} isn't a persona with a VM: {', '.join(n for n, p in CONF['personas'].items() if not p.get('headless'))}")
+            return 2
+        prepare_host(keep={persona["vm"]}, stop_others=False)
+        say(persona["username"], f"{persona['vm']}: the old Mac is gone; a new one from {persona['snapshot']}, starting…")
+        fresh_vm(persona)
+        ctx: dict = {}
+        for step in persona.get("newmac_steps", []):
+            fn, *args = step.split()
+            say(persona["username"], f"{fn}: {STEPS[fn](persona, ctx, *args)}")
         return 0
     if cmd == "mail":
         # The newest email the deployment kept instead of sending (MAIL_SINK: the test stack).

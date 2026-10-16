@@ -48,6 +48,7 @@ vm = "noah-mac"
 snapshot = "noah-base"
 username = "noah"
 accounts = ["noah", "noah_*", "noah-*"]
+newmac_steps = ["name_mac Noah's New MacBook Air", "quiet_apps Telegram Safari System_Settings"]  # tools/scenario.py newmac noah
 
 [checkpoints.riley-before-publish]
 persona = "riley"
@@ -91,3 +92,10 @@ checkpoints = ["riley-headless-before-invite", "noah-fresh"]
 next = """
 Riley: tools/scenario.py ask riley-headless "Invite my friend Noah to Mutual Aid."
 Then follow the invitation in noah-mac."""
+
+[scenarios.lost-mac]
+about = "Noah sets up with the guide, mirrors Documents to headless Riley and makes a recovery kit; his Mac is then lost, and a fresh Mac recovers from the kit (for automated runs: tools/e2e.sh lost-mac). Same start as invite-headless."
+checkpoints = ["riley-headless-before-invite", "noah-fresh"]
+next = """
+Run it as the e2e-run skill's "lost-mac" section says: the invite-headless run
+first, then `tools/scenario.py newmac noah --vnc --env test` for the new Mac."""

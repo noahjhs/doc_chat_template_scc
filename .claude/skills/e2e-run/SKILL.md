@@ -12,7 +12,7 @@ quietly, finish on your own, and leave a report.
 ## Inputs (in the prompt that started you)
 
 - `RUN`: the run directory. Everything you write goes there.
-- `SCENARIO`: default `invite-headless`.
+- `SCENARIO`: default `invite-headless`. `lost-mac` also has its own section at the end: do the run above first (steps 1 to 6), then that section.
 - `COMMIT`: the commit under test (the test stack already runs it).
 
 ## Ground rules
@@ -95,3 +95,96 @@ each one line, tagged **BUG**, **Friction**, **Observation** or **Good**, with
 the screenshot number. Then the full guide transcript (what Casper said,
 what Noah clicked). Then a "Suggested fixes" list. Plain, short sentences.
 Write the report as you go, so a run that stops early still leaves one.
+
+## Scenario `lost-mac`: Noah's Mac is lost and a new one recovers
+
+Tests recovery v2 as a person would live it: P0 (the kit is saved outside
+mirrored folders), P1 (the app's "Recover from a Lost Mac…") and P2 (the master
+key covers old and new folders). Same ground rules; still one VM at a time
+(the old VM is discarded before the new one starts). Write this part of the
+report in a section of its own, `## Lost Mac`, and number its screenshots on
+from the first part.
+
+Do the main run's steps 1 to 6 first, with these differences:
+
+- Note the username and password you give Noah's account: you need them on
+  the new Mac. Use `noah@casper-test.invalid`.
+- Before the kit: put a few extra files in Documents so the check is real
+  (`tart exec noah-mac ... 'echo hello > ~/Documents/lost-mac-check.txt'`),
+  and write down a checksum list of Documents:
+  `cd ~/Documents && find . -type f ! -name .DS_Store -exec shasum {} + | sort -k2 > /tmp/documents.sha`;
+  copy it to `$RUN/documents-before.sha`.
+- Make the kit through the ghost menu's Make Recovery Kit. In the Save
+  panel, **try saving it inside Documents first** and note that Casper
+  refuses (P0); then save it to the Desktop (any passphrase, twice; write
+  it down). Check the file is not in Documents.
+- Wait until the guide says Protected and Riley's agent agrees.
+- Also create a second folder before the loss, so old and new are both
+  covered: after the first copy, ask nothing of Riley; as Noah, mirror
+  `~/Pictures` too if the guide or the ghost menu offers it. If there is no
+  way to do that by clicking, say so as a finding and instead (from Riley's
+  side) skip it. The folder made before the master key existed can't be
+  recreated here, so this is "Documents (first) and Pictures (later)".
+- **Copy the kit out through the host**, as a person carrying a USB stick
+  would, then stop Noah's Mac. Kit file to `$RUN/kit/`:
+  `tart exec noah-mac /bin/zsh -lc 'cat ~/Desktop/"Casper Recovery Kit (<user>).txt"' > "$RUN/kit/kit.txt"`
+  (use the real file name). Do not copy anything else, and do not keep a
+  copy of the passphrase anywhere in the VM.
+
+Then the loss and the recovery:
+
+1. Add one more file in Documents on Noah's Mac, wait for the guide/status
+   to say it is protected, and checksum Documents again (`documents-before.sha`).
+2. **The Mac is lost.** `tools/scenario.py newmac noah --vnc --env test`
+   discards the VM and starts a fresh `noah-base` one (the account stays on
+   the server). Screenshot it: it must look like a Mac Casper has never seen.
+3. Put the kit where a person would find it, in Downloads:
+   `tart exec -i noah-mac /bin/zsh -lc 'cat > ~/Downloads/"Casper Recovery Kit.txt"' < "$RUN/kit/kit.txt"`.
+4. In Noah's Chrome, open the sign-in page of the test stack
+   (`https://test-app.casperagent.dev/signin`; check the real address in
+   the invitation link's host if unsure). By clicking only, as a person
+   would: use "I lost my Mac" → sign in as Noah → the guide's recovery steps
+   → download Casper → open it → the macOS dialogs → Move to Applications →
+   the app's pairing hand-off. Note every place it asks something that isn't
+   obvious to someone who just lost their Mac.
+5. From the ghost menu choose **Recover from a Lost Mac…**. Use only the
+   app's own dialogs: pick the kit in the Open panel (Downloads), type the
+   passphrase, read the Restore confirmation (it must list each folder and
+   where it goes: note the exact text), click Restore. Try a wrong
+   passphrase first and note the message.
+6. Wait for the copy to finish (progress line, then promotion; give it up
+   to 15 minutes). Screenshot the guide/app at each stage.
+7. **Check Documents came back intact**: checksum the restored folder
+   (find where it went; the dialog says) and diff against
+   `$RUN/documents-before.sha` (paths relative to the folder). Expect no
+   differences. Same for Pictures if it was made. Look for anything left
+   over (`.stfolder`, `.stversions`, `.syncthing.*` in the person's folder,
+   a stray "Casper Restores" folder when the original place was free).
+8. **The new Mac is now the folder's Mac**: create a new file in the
+   restored Documents on the new Mac (`echo after > ...`), wait a few
+   minutes, and ask Riley's agent "What am I holding for Noah?" (`-c`): the
+   size/up-to-date state must have moved on, and the Noah account's
+   `my_casper` (or the Mac name in Riley's answer) should name the new Mac,
+   not the lost one. Check again with `tools/scenario.py ask riley-headless -c`
+   that nothing says the folder is waiting for the old Mac. Log in
+   `transcript-riley.md`.
+9. **P2 check**: in the new Mac, `/Applications/Casper.app/Contents/MacOS/Casper setup status`
+   (find the binary path from the other steps) and look for the master key
+   being present: `security find-generic-password -s "Casper Master Key"`
+   (do not print the key: no `-w`, no `-g`). If a Pictures folder was made
+   after the master key, it must have restored too (it only can with the
+   key). If Documents was an older-scheme folder, it restored through the
+   sealed bundle; report which scheme each folder had if you can see it
+   (the dev endpoints or `mirror_folders.key_scheme` on the test stack via
+   `ssh casper-mini`). Don't paste any key, password or the kit's text into
+   the report.
+10. `tools/scenario.py stop lost-mac --env test`.
+
+What to look for in addition to the list above: the kit save panel's wording
+and default folder; whether the refusal in Documents is clear; whether "I
+lost my Mac" is findable and kind; the recovery guide's wording and its
+agreement with what the app shows; the length of each wait; whether anything
+asks for a second sign-in or the old Mac's name; and any leftover or
+duplicate Mac in Riley's or Noah's views (the lost Mac still listed).
+Passphrases and kit contents are secret: not in the report, not in
+screenshots left on screen longer than needed.
