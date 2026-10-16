@@ -4,6 +4,7 @@
 <div class="eyebrow">Casper's guide</div>
 <div id="log" class="log"></div>
 <div id="progress" class="note hide"></div>
+<div id="picker" class="picker hide"></div>
 <div id="choices" class="choices"></div>
 <form id="f" class="composer"><input id="t" placeholder="Message Casper's guide" autocomplete="off"><button class="btn" type="submit">Send</button></form>
 </section>
@@ -66,8 +67,80 @@ async function refresh() {
   const reasons = [...dotsFor]; dotsFor.clear(); reasons.forEach(r => dots(r, true));
   const last = msgs[msgs.length - 1];
   setChoices(last && last.role === "assistant" ? last.choices : []);
+  renderPicker(last && last.role === "assistant" ? last.picker : null);
   // A button in the message itself (Download Casper) is the call to action too.
   if (last && last.role === "assistant" && last.text.includes(Casper.DOWNLOAD_URL)) $("f").classList.add("hide");
+}
+
+// The restore picker, drawn on the page: pick files and versions (search,
+// deleted only), or whole folders as of a time. The person's click is the
+// choice; the guide can't press it.
+function renderPicker(p) {
+  const el = $("picker");
+  el.innerHTML = ""; el.classList.toggle("hide", !p);
+  if (p) loadPicker(p.folder || "", p.q || "", !!p.deleted_only, "files");
+}
+
+function pk(tag, attrs = {}, text = "") {
+  const e = document.createElement(tag); Object.assign(e, attrs); if (text) e.textContent = text; return e;
+}
+
+async function loadPicker(folder, q, deletedOnly, tab) {
+  const el = $("picker");
+  let d;
+  try { d = await Casper.api("/restore/picker?folder=" + encodeURIComponent(folder) + "&q=" + encodeURIComponent(q) + "&deleted_only=" + deletedOnly); }
+  catch (e) { el.textContent = e.message; return; }
+  el.innerHTML = "";
+  const tabs = pk("div", { className: "tabs" });
+  [["files", "A file"], ["folders", "A folder at a time"]].forEach(([k, label]) => {
+    const b = pk("button", { className: "btn inline" + (k === tab ? "" : " ghost"), type: "button" }, label);
+    b.onclick = () => loadPicker(d.folder, q, deletedOnly, k); tabs.appendChild(b);
+  });
+  el.appendChild(tabs);
+  if (d.error) { el.appendChild(pk("div", { className: "dim" }, d.error)); return; }
+  const done = async (body) => {
+    el.querySelectorAll("button").forEach(b => b.disabled = true); dots("reply", true);
+    try { await Casper.api("/restore/pick", { method: "POST", body }); } catch (e) { bubble("assistant", Casper.render(e.message)); }
+    dots("reply", false); el.classList.add("hide"); rendered = -1; await refresh();
+  };
+  if (tab === "folders") {
+    const picks = d.folders.map(f => { const c = pk("input", { type: "checkbox", checked: d.folders.length === 1, value: f });
+      const l = pk("label", { className: "row" }); l.appendChild(c); l.appendChild(pk("span", {}, f)); el.appendChild(l); return c; });
+    const when = pk("input", { type: "datetime-local" });
+    const bar = pk("div", { className: "bar" }); bar.appendChild(pk("span", {}, "As it was on")); bar.appendChild(when); el.appendChild(bar);
+    const go = pk("button", { className: "btn", type: "button" }, "Restore a copy");
+    go.onclick = () => {
+      const folders = picks.filter(c => c.checked).map(c => c.value);
+      if (!folders.length || !when.value) return;
+      done({ folders, as_of: when.value });
+    };
+    el.appendChild(go); return;
+  }
+  const bar = pk("div", { className: "bar" });
+  if (d.folders.length > 1) {
+    const sel = pk("select"); d.folders.forEach(f => sel.appendChild(pk("option", { value: f, selected: f === d.folder }, f)));
+    sel.onchange = () => loadPicker(sel.value, q, deletedOnly, "files"); bar.appendChild(sel);
+  }
+  const search = pk("input", { type: "search", placeholder: "Search by name", value: q });
+  let timer; search.oninput = () => { clearTimeout(timer); timer = setTimeout(() => loadPicker(d.folder, search.value, deletedOnly, "files"), 400); };
+  const del = pk("input", { type: "checkbox", checked: deletedOnly }); del.onchange = () => loadPicker(d.folder, search.value, del.checked, "files");
+  const dl = pk("label", { className: "row" }); dl.appendChild(del); dl.appendChild(pk("span", {}, "Deleted files only"));
+  bar.appendChild(search); bar.appendChild(dl); el.appendChild(bar);
+  const list = pk("div", { className: "list" }), boxes = [];
+  if (!d.versions.length) list.appendChild(pk("div", { className: "dim" }, "Nothing earlier matches."));
+  let last = null;
+  d.versions.sort((a, b) => a.name.localeCompare(b.name) || (a.at < b.at ? 1 : -1)).forEach(v => {
+    if (v.name !== last) { list.appendChild(pk("div", { className: "file" }, v.name)); last = v.name; }
+    const c = pk("input", { type: "checkbox" }); boxes.push([c, v]);
+    const l = pk("label", { className: "row" }); l.appendChild(c);
+    l.appendChild(pk("span", {}, "written " + v.written + " · " + v.size + (v.deleted ? " · deleted" : "")));
+    list.appendChild(l);
+  });
+  el.appendChild(list);
+  const go = pk("button", { className: "btn", type: "button" }, "Restore a copy"); go.disabled = true;
+  boxes.forEach(([c]) => c.onchange = () => go.disabled = !boxes.some(([x]) => x.checked));
+  go.onclick = () => done({ folder: d.folder, picks: boxes.filter(([c]) => c.checked).map(([, v]) => ({ name: v.name, at: v.at })) });
+  el.appendChild(go);
 }
 
 // Casper is waiting on something on their Mac (its dialog, the folder panel):

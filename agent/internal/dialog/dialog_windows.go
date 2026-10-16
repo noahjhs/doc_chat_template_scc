@@ -84,6 +84,8 @@ func ConfirmWithDontAskAgain(message, _ string) (accepted bool, dontAskAgain boo
 // alpha); it reports no answer, so consent falls back to Telegram.
 func ChooseFolder() (string, bool) { return "", false }
 
+func ChooseFromList(string, []string) ([]string, bool) { return nil, false }
+
 func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
 	return false, false
 }

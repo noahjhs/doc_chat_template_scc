@@ -178,7 +178,35 @@ Then the loss and the recovery:
    (the dev endpoints or `mirror_folders.key_scheme` on the test stack via
    `ssh casper-mini`). Don't paste any key, password or the kit's text into
    the report.
-10. `tools/scenario.py stop lost-mac --env test`.
+10. **Restore a deleted file** (docs/product/restore-design.md; Noah's new Mac
+    is now the folder's Mac, so this is the everyday "I deleted something"
+    case, through Casper's guide in Chrome, by typing as Noah would):
+    - On the new Mac, in the restored Documents, create `budget-2026.txt`
+      ("v1") and `budget-draft.txt` ("draft"). Wait until the guide/status
+      says protected (the files reached Riley's mirror), then delete both
+      (`rm`), and edit nothing else.
+    - **One match, no questions.** Type to the guide: "I deleted
+      budget-2026 by accident, can you get it back?". Expected: it acts at
+      once (no "Restore it?"), the answer names the file and where it went,
+      and `budget-2026 (as of <date time>).txt` now sits in Documents with
+      "v1" inside. Count the guide's messages before the file is back: more
+      than one is a finding.
+    - **Several matches, the inline picker.** Type "I also lost a budget
+      file". Expected: one short line and a picker drawn on the page (search
+      box, "Deleted files only", versions with written times). Screenshot
+      it. Pick the draft and click "Restore a copy"; the result appears as a
+      guide message and the dated copy exists with "draft" inside. The
+      guide must not list the files in prose or ask "which one?".
+    - **A folder at a time.** Type "Put Documents back the way it was an hour
+      ago" (a time before the files above existed): the new dated folder
+      `Documents (as of <date>)` next to Documents must hold the files as
+      they were then, without `budget-*`. The original Documents is untouched.
+    - **Nothing asked about disk.** Never ask Noah to free space. (The "doesn't
+      fit, replace instead?" answer is covered by tests; don't fill the VM's
+      disk.)
+    - Note every place the wording or the number of steps felt longer than a
+      Finder or Time Machine restore would be.
+11. `tools/scenario.py stop lost-mac --env test`.
 
 What to look for in addition to the list above: the kit save panel's wording
 and default folder; whether the refusal in Documents is clear; whether "I

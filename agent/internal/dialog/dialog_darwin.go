@@ -192,6 +192,24 @@ function run() {
 	return strings.TrimRight(path, "/"), true
 }
 
+// ChooseFromList shows a native list where several rows may be chosen
+// (AppleScript's "choose from list", which needs no Automation permission):
+// the rows picked, or false if they cancelled.
+func ChooseFromList(prompt string, rows []string) ([]string, bool) {
+	quoted := make([]string, len(rows))
+	for i, r := range rows {
+		quoted[i] = `"` + escapeForAppleScript(r) + `"`
+	}
+	script := fmt.Sprintf(`choose from list {%s} with title "Casper" with prompt "%s" OK button name "Restore" cancel button name "Cancel" with multiple selections allowed`,
+		strings.Join(quoted, ", "), escapeForAppleScript(prompt))
+	out, err := exec.Command("osascript", "-e", script).Output()
+	text := strings.TrimRight(string(out), "\n")
+	if err != nil || text == "" || text == "false" {
+		return nil, false
+	}
+	return strings.Split(text, ", "), true
+}
+
 // OpenFile shows the standard Open panel for one file, starting in
 // defaultDir: the chosen path, or false if they cancelled.
 func OpenFile(message, defaultDir string) (string, bool) {

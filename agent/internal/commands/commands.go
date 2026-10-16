@@ -106,6 +106,17 @@ type Request struct {
 	ApprovalID    string          `json:"approval_id,omitempty"`
 	Text          string          `json:"text,omitempty"`
 	Label         string          `json:"label,omitempty"`
+
+	// Restore (docs/product/restore-design.md): Mode is "copy" (default) or
+	// "replace"; Scope "file" or "folder"; Stamp names the result (a file's
+	// written time, or a folder's as-of time), RFC 3339; AsOf is the
+	// folder-restore moment; Names are folder-relative paths already restored
+	// from history; Path is a folder copy's destination root.
+	Mode  string   `json:"mode,omitempty"`
+	Scope string   `json:"scope,omitempty"`
+	Stamp string   `json:"stamp,omitempty"`
+	AsOf  string   `json:"as_of,omitempty"`
+	Names []string `json:"names,omitempty"`
 }
 
 // RequestOption is one model-supplied option entry for run_shell_command --

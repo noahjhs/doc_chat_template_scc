@@ -51,6 +51,15 @@ RULES
   so), then, the first time, their group's name (e.g. "Mutual Aid"). Only
   what they haven't said, one at a time. The space is Casper's suggestion,
   asked last: "20 GB on this Mac?" Their yes sends it.
+- Getting files back (a deleted file, an earlier version, a folder as it was
+  at some time): their request is enough, because a copy overwrites nothing:
+  no "Restore it?". Search first (list_versions with name_contains, or
+  deleted_only for deleted files); one match: restore_version. Several, or
+  they don't remember the name: show_restore_picker, one short line, stop.
+  Folders at a time: restore_as_of; if they gave no time ask only "Back to
+  when?". Only 30 days exist. If a copy doesn't fit on their disk, offer
+  replacing instead and act only on their yes. Never ask them to delete
+  anything.
 - The NOW section below is where this person is in setting up. Do that and
   nothing else; if they ask about something else, answer briefly, then
   come back to it.
@@ -83,8 +92,18 @@ TOOLS = [
           {"source_host": _S, "path": _S, "mirrors": {"type": "array", "items": _S}, "catcher": _S, "use_casper_catcher": _B, "preview": _B},
           ["source_host", "path", "mirrors"]),
     _tool("protection_status", "Whether each mirrored folder is protected right now, mirror by mirror."),
-    _tool("list_versions", "Earlier versions of files in a mirrored folder.", {"folder": _S, "name_contains": _S}, ["folder"]),
-    _tool("restore_version", "Bring back one earlier version (name and at exactly as listed) as a new copy.", {"folder": _S, "name": _S, "at": _S}, ["folder", "name", "at"]),
+    _tool("list_versions", "Earlier versions of files in a mirrored folder, newest first (only the last 30 days exist). Search by name before asking anything. "
+          "deleted_only: just files deleted since.", {"folder": _S, "name_contains": _S, "deleted_only": _B}, ["folder"]),
+    _tool("restore_version", "Bring back one file as it was (an earlier version or a deleted file) as a new copy next to the original, its name dated. name may be part of "
+          "a name only one file matches; at is empty (newest earlier version), an exact time from list_versions, or any time. Nothing is overwritten, so their request is "
+          "enough: no confirmation. If the answer says it doesn't fit and offers replacing, offer it, and only on their yes call again with mode='replace', preview=false.",
+          {"folder": _S, "name": _S, "at": _S, "mode": {"type": "string", "enum": ["copy", "replace"]}, "preview": _B}, ["folder", "name"]),
+    _tool("restore_as_of", "Bring back one or several folders as they were at a moment (a date such as 2026-10-10 means the end of that day) as new dated folders next to "
+          "the originals; nothing is overwritten. If they gave no time, ask only \"Back to when?\". Replace rules as restore_version.",
+          {"folders": {"type": "array", "items": _S}, "as_of": _S, "mode": {"type": "string", "enum": ["copy", "replace"]}, "preview": _B}, ["folders", "as_of"]),
+    _tool("show_restore_picker", "Put a file-and-version picker on the page, for when a name matches many files or they don't remember it (also lets them pick whole folders "
+          "and a time). Their click restores. Then say one short line and stop; don't list the files yourself.",
+          {"folder": _S, "name_contains": _S, "deleted_only": _B}, []),
     _tool("stop_mirroring", "Stop mirroring a folder (confirm first).", {"folder": _S}, ["folder"]),
     _tool("list_approvals", "Requests from other people waiting for the person's decision."),
     _tool("decide_approval", "Record the person's decision on one request from list_approvals.", {"approval_id": _S, "approve": _B}, ["approval_id", "approve"]),
@@ -108,9 +127,14 @@ def _call_tool(services, user_id: int, name: str, args: dict) -> str:
             out = services.mirror_folder(user_id, args["source_host"], args["path"], args.get("mirrors") or [], args.get("catcher", ""),
                                          bool(args.get("use_casper_catcher", False)), "", args.get("preview", True))
         elif name == "list_versions":
-            out = services.list_versions(user_id, args["folder"], args.get("name_contains", ""))
+            out = services.list_versions(user_id, args["folder"], args.get("name_contains", ""), bool(args.get("deleted_only", False)))
         elif name == "restore_version":
-            out = services.restore_version(user_id, args["folder"], args["name"], args["at"])
+            out = services.restore_version(user_id, args["folder"], args["name"], args.get("at", ""), args.get("mode", "copy"), args.get("preview"))
+        elif name == "restore_as_of":
+            out = services.restore_as_of(user_id, args["folders"], args["as_of"], args.get("mode", "copy"), args.get("preview"))
+        elif name == "show_restore_picker":
+            # The page draws the picker (the person's click is the choice); nothing to wait for here.
+            out = "The picker is on their screen now. Say one short line (e.g. \"Pick what to bring back.\") and stop."
         elif name == "stop_mirroring":
             out = services.stop_mirroring(user_id, args["folder"])
         elif name == "decide_approval":
@@ -309,6 +333,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
     proposed = False
     previewed: set[str] = set()  # tools previewed in this turn: acting on one needs the person's answer first
     acted = False  # something changed this turn (a confirmed action)
+    picker = None  # an inline restore picker to draw under the reply
     stage = None
     for _ in range(MAX_TOOL_ROUNDS):
         stage = stage_fn(messages) if stage_fn else None
@@ -339,6 +364,8 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 entry["_choices"] = choices
             if stage:
                 entry["_stage"] = stage.name
+            if picker is not None:
+                entry["_picker"] = picker
             return reply, messages
         for c in calls:
             try:
@@ -353,6 +380,8 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 result = "Not now: that's not this step. Stay on the step in NOW."
             else:
                 result = _call_tool(services, user_id, c.function.name, args)
+            if c.function.name == "show_restore_picker" and result.startswith("The picker"):
+                picker = {"folder": args.get("folder", ""), "q": args.get("name_contains", ""), "deleted_only": bool(args.get("deleted_only", False))}
             if result.startswith("PREVIEW"):
                 proposed = True
                 previewed.add(c.function.name)
@@ -386,11 +415,13 @@ def save_new(user_id: int, before: int, messages: list[dict]):
 
 def visible(messages: list[dict]) -> list[dict]:
     """What a person sees: their messages and the guide's replies."""
-    shown = [{"role": m["role"], "text": m["content"], **({"choices": m["_choices"]} if m.get("_choices") else {})}
+    shown = [{"role": m["role"], "text": m["content"], **({"choices": m["_choices"]} if m.get("_choices") else {}),
+              **({"picker": m["_picker"]} if m.get("_picker") else {})}
              for m in messages if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")
              and not m.get("_event")]
     for m in shown[:-1]:  # only the latest message's buttons still apply
         m.pop("choices", None)
+        m.pop("picker", None)
     return shown
 
 

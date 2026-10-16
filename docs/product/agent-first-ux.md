@@ -162,6 +162,24 @@ The field is converging on a short list:
    care as screens, and are tested the same way: a fresh agent follows them
    for real.
 
+10. **Minimize the app's own GUI** (decided 2026-10-16). Features are
+    driven by the person's own agent or by Casper's guide, with feature
+    parity between the two. The app keeps only what must be on the Mac: its
+    consent dialogs (the trusted path, [gates.md](gates.md)), pairing, and
+    widgets the agent asks it to show on demand (like `mirror_choose_folder`).
+    The guide may later become a paid service for people who keep it
+    instead of moving to their own agent, so nothing may work only in the
+    guide or only for outside agents.
+11. **As efficient as the best classic GUI** (decided 2026-10-16). An
+    agent-driven flow must take no more steps than the best GUI equivalent:
+    no twenty questions. Imagine that GUI and keep its efficiencies:
+    sensible defaults, search before browse, everything inferable already
+    filled in, one pass. Where a widget is the most efficient way to choose
+    (a file or version picker), present one as good as an app's: the guide
+    draws it inline on its page, and a person's own agent asks the Casper
+    app to show it on demand. It is never standing app UI. The first
+    application is [restore-design.md](restore-design.md).
+
 ## Interface layers (best first)
 
 1. **An approval card inside the person's own chat** (MCP Apps), where the

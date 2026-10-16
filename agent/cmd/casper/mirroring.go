@@ -49,6 +49,7 @@ func (d *daemonState) startMirroring() {
 			return dialog.Confirm(text, "Mirror", "Cancel", 10*time.Minute)
 		},
 		ChooseFolder: dialog.ChooseFolder,
+		PickFromList: dialog.ChooseFromList,
 		Logf:         d.logf,
 	}
 	d.mu.Lock()

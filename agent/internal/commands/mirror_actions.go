@@ -18,11 +18,61 @@ type MirrorOps interface {
 	ReadVersion(folderID, encryptedPath string, at time.Time, offset int64) (data []byte, total int64, err error)
 	DecryptTrailers(folderID string, items json.RawMessage) ([]map[string]any, error)
 	RestoreVersionChunk(folderID, encryptedPath string, offset int64, data []byte) error
-	RestoreVersionFinish(folderID, encryptedPath string, restoresRoot string) (string, error)
+	// RestoreVersionFinish decrypts the staged version and puts it in place
+	// (see mirror.FileTarget); home confines every destination.
+	RestoreVersionFinish(folderID, encryptedPath, home string, o RestoreOpts) (string, error)
+	// RestorePlan measures a restore before anything is written.
+	RestorePlan(folderID, home string, o RestoreOpts) (RestorePlan, error)
+	// RestoreLocal copies the files unchanged since o.AsOf into o.Dest.
+	RestoreLocal(folderID, home string, o RestoreOpts) (files int, bytes int64, err error)
+	// PickRestore shows the Mac's own list of earlier versions (in the
+	// background, like ChooseFolder) and reports the pick to casper_service.
+	PickRestore(requestID, prompt string, rows []string)
 	UnprotectedFiles(folderID string) ([]string, error)
 	// ChooseFolder opens the Mac's own folder panel (in the background --
 	// the person may take a while) and reports their pick to casper_service.
 	ChooseFolder(requestID, home string)
+}
+
+// RestoreOpts is a restore request's parameters, parsed.
+type RestoreOpts struct {
+	Mode  string
+	Scope string
+	Stamp time.Time
+	AsOf  time.Time
+	Names []string
+	Dest  string
+}
+
+// RestorePlan is what a restore needs and what the Mac has.
+type RestorePlan struct {
+	FreeBytes  int64  `json:"free_bytes"`
+	LocalBytes int64  `json:"local_bytes"`
+	Dest       string `json:"dest"`
+}
+
+func restoreOpts(req *Request) (RestoreOpts, error) {
+	o := RestoreOpts{Mode: req.Mode, Scope: req.Scope, Names: req.Names, Dest: req.Path}
+	if o.Mode == "" {
+		o.Mode = "copy"
+	}
+	if o.Mode != "copy" && o.Mode != "replace" {
+		return o, &ActionError{Detail: "'mode' must be copy or replace"}
+	}
+	for _, f := range []struct {
+		in  string
+		out *time.Time
+	}{{req.Stamp, &o.Stamp}, {req.AsOf, &o.AsOf}} {
+		if f.in == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, f.in)
+		if err != nil {
+			return o, &ActionError{Detail: "times must be RFC 3339"}
+		}
+		*f.out = t
+	}
+	return o, nil
 }
 
 func (h *Handler) SetMirrorOps(m MirrorOps) {
@@ -103,8 +153,33 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 		names, err := m.UnprotectedFiles(req.FolderID)
 		return map[string]any{"files": names}, err
 	case "mirror_restore_version_finish":
-		path, err := m.RestoreVersionFinish(req.FolderID, req.EncryptedPath, h.HomeRoot())
+		o, err := restoreOpts(req)
+		if err != nil {
+			return nil, err
+		}
+		path, err := m.RestoreVersionFinish(req.FolderID, req.EncryptedPath, h.HomeRoot(), o)
 		return map[string]any{"restored_to": path}, err
+	case "mirror_restore_plan":
+		o, err := restoreOpts(req)
+		if err != nil {
+			return nil, err
+		}
+		plan, err := m.RestorePlan(req.FolderID, h.HomeRoot(), o)
+		return map[string]any{"free_bytes": plan.FreeBytes, "local_bytes": plan.LocalBytes, "dest": plan.Dest}, err
+	case "mirror_restore_local":
+		o, err := restoreOpts(req)
+		if err != nil {
+			return nil, err
+		}
+		files, n, err := m.RestoreLocal(req.FolderID, h.HomeRoot(), o)
+		return map[string]any{"files": files, "bytes": n}, err
+	case "mirror_restore_pick":
+		var rows []string
+		if err := json.Unmarshal(req.Items, &rows); err != nil || len(rows) == 0 {
+			return nil, &ActionError{Detail: "'items' must be a list of rows"}
+		}
+		m.PickRestore(req.ApprovalID, req.Text, rows)
+		return map[string]any{"opened": true}, nil
 	default:
 		return nil, &ActionError{Detail: "Action not authorized."}
 	}

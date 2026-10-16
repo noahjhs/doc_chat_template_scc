@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
-_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide", "mailer", "devtools")
+_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide", "mailer", "devtools", "restore")
 
 
 @pytest.fixture()

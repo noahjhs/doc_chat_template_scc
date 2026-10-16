@@ -42,6 +42,8 @@ type Service struct {
 	Ask func(text string) (yes, answered bool)
 	// ChooseFolder shows the Mac's folder panel: the chosen path, or false if cancelled.
 	ChooseFolder func() (string, bool)
+	// PickFromList shows a native multi-select list: the rows chosen, or false if cancelled.
+	PickFromList func(prompt string, rows []string) ([]string, bool)
 	Logf         func(string, ...any)
 	Interval     time.Duration
 
@@ -450,8 +452,10 @@ func (o *ops) DecryptTrailers(folderID string, items json.RawMessage) ([]map[str
 		if err != nil {
 			continue
 		}
+		_, statErr := os.Lstat(filepath.Join(f.Path, filepath.FromSlash(info.Name)))
 		out = append(out, map[string]any{"encrypted_path": it.EncryptedPath, "at": it.At, "size": info.Size,
-			"name": info.Name, "modified": info.Modified.Format(time.RFC3339), "deleted": info.Deleted})
+			"name": info.Name, "modified": info.Modified.Format(time.RFC3339), "deleted": info.Deleted,
+			"exists_now": statErr == nil})
 	}
 	return out, nil
 }
@@ -481,19 +485,139 @@ func (o *ops) RestoreVersionChunk(folderID, encPath string, offset int64, data [
 	return err
 }
 
-func (o *ops) RestoreVersionFinish(folderID, encPath, homeRoot string) (string, error) {
+// restoreTmp is a scratch place on the same volume as the app's data, where
+// versions are decrypted before being moved into the person's folders.
+func (o *ops) restoreTmp(folderID string) (string, error) {
+	base := filepath.Join(o.s.Mgr.HeldPath("restore-tmp"), folderID)
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(base, "out-")
+}
+
+// confine refuses a destination outside the person's home folder.
+func confine(home, p string) error {
+	if p == "" || home == "" || !mirror.Within(home, filepath.Clean(p)) {
+		return errors.New("a restore can only go inside your home folder")
+	}
+	return nil
+}
+
+func (o *ops) RestoreVersionFinish(folderID, encPath, home string, ro commands.RestoreOpts) (string, error) {
 	f, err := o.owned(folderID)
 	if err != nil {
 		return "", err
 	}
 	p := o.stagingFile(folderID, encPath)
 	data, err := os.ReadFile(p)
+	os.Remove(p) // read once; keeps the disk need to one copy at a time
 	if err != nil {
 		return "", errors.New("nothing received for that version")
 	}
-	defer os.Remove(p)
-	dest := filepath.Join(homeRoot, "Casper Restores", fmt.Sprintf("%s (versions, %s)", f.Label, time.Now().Format("2006-01-02 15.04.05")))
-	return mirror.DecryptVersion(o.s.Bin, encPath, data, f.ID, f.Password, dest)
+	if ro.Dest != "" {
+		if err := confine(home, ro.Dest); err != nil {
+			return "", err
+		}
+	}
+	tmp, err := o.restoreTmp(folderID)
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	out, err := mirror.DecryptVersion(o.s.Bin, encPath, data, f.ID, f.Password, tmp)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(tmp, out)
+	if err != nil {
+		return "", err
+	}
+	stamp := ro.Stamp
+	if stamp.IsZero() {
+		stamp = time.Now()
+	}
+	target, err := mirror.FileTarget(f.Path, rel, ro.Mode, ro.Dest, stamp)
+	if err != nil {
+		return "", err
+	}
+	if err := confine(home, target); err != nil {
+		return "", err
+	}
+	if err := mirror.MoveInto(out, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func (o *ops) RestorePlan(folderID, home string, ro commands.RestoreOpts) (commands.RestorePlan, error) {
+	f, err := o.owned(folderID)
+	if err != nil {
+		return commands.RestorePlan{}, err
+	}
+	skip := map[string]bool{}
+	for _, n := range ro.Names {
+		skip[n] = true
+	}
+	plan := commands.RestorePlan{}
+	where := f.Path
+	if ro.Scope == "folder" && ro.Mode != mirror.ModeReplace {
+		asOf := ro.AsOf
+		if asOf.IsZero() {
+			asOf = time.Now()
+		}
+		plan.Dest = mirror.FolderCopyRoot(f.Path, home, asOf)
+		plan.LocalBytes = mirror.LocalBytesAsOf(f.Path, asOf, skip)
+		where = filepath.Dir(plan.Dest)
+	}
+	plan.FreeBytes = mirror.FreeBytes(where)
+	return plan, nil
+}
+
+func (o *ops) RestoreLocal(folderID, home string, ro commands.RestoreOpts) (int, int64, error) {
+	f, err := o.owned(folderID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := confine(home, ro.Dest); err != nil {
+		return 0, 0, err
+	}
+	skip := map[string]bool{}
+	for _, n := range ro.Names {
+		skip[n] = true
+	}
+	return mirror.CopyLocalAsOf(f.Path, ro.Dest, ro.AsOf, skip)
+}
+
+// PickRestore shows the person's earlier versions as a native list (several
+// may be chosen) and reports the rows picked. The rows' order is the
+// request's; the server maps them back.
+func (o *ops) PickRestore(requestID, prompt string, rows []string) {
+	if o.s.PickFromList == nil {
+		return
+	}
+	go func() {
+		shown := make([]string, len(rows)) // the list joins its answer with ", "
+		for i, r := range rows {
+			shown[i] = strings.ReplaceAll(r, ", ", "; ")
+		}
+		picked, ok := o.s.PickFromList(prompt, shown)
+		report := map[string]any{"request_id": requestID, "cancelled": !ok || len(picked) == 0}
+		if ok {
+			idx := []int{}
+			for _, r := range picked {
+				for i, row := range shown {
+					if row == r {
+						idx = append(idx, i)
+						break
+					}
+				}
+			}
+			report["picked"] = idx
+		}
+		if err := config.PostRestorePicked(o.s.AuthDomain, o.s.tokenFor(o.user), report); err != nil {
+			o.s.Logf("mirroring: reporting the restore pick: %s", err)
+		}
+	}()
 }
 
 // ChooseFolder shows the folder panel and reports the pick, relative to the

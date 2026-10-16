@@ -135,8 +135,17 @@ HOW
   Recovery Kit in Casper's menu. Keep the file and passphrase off this Mac.
 - Offer space: publish_offering on their Mac; kind="catcher" too if the Mac
   is always on.
-- Undo: list_versions, then restore_version: a new copy under "Casper
-  Restores"; nothing is overwritten.
+- Getting files back ("undo", a deleted file, "as it was last week"): the
+  person's request is enough; a copy overwrites nothing, so don't ask
+  "restore it?". Search first: list_versions(name_contains=...,
+  deleted_only=true for deleted files), then restore_version (a file: a
+  new copy next to the original, its name dated) or restore_as_of (one or
+  several folders as of a time: new dated folders next to them). One match
+  and one version: just do it. Several: show_restore_picker (Casper's list on
+  their Mac) rather than asking "which?" repeatedly. Time they didn't give:
+  "Back to when?". Only 30 days exist; say so plainly. If it doesn't fit on
+  their disk, offer replacing instead (mode='replace', their yes first);
+  never ask them to delete anything.
 - Stop or end something: stop_mirroring / revoke, only once they've asked
   for it or said yes to it.
 - A lost Mac: have them sign in on the new Mac and choose "Recover from a
@@ -178,6 +187,8 @@ class Services:
     protection_status: Callable[..., str] | None = None
     list_versions: Callable[..., str] | None = None
     restore_version: Callable[..., str] | None = None
+    restore_as_of: Callable[..., str] | None = None
+    show_restore_picker: Callable[..., str] | None = None
     restore_folder: Callable[..., str] | None = None
     stop_mirroring: Callable[..., str] | None = None
 
@@ -363,13 +374,35 @@ def build(svc: Services) -> MCPServer:
     def protection_status(ctx: Context) -> str:
         return svc.protection_status(_caller(svc, ctx))
 
-    @server.tool(description="List earlier versions of files in a mirrored folder (by its name, e.g. 'Documents'), optionally filtered by part of a file name. Versions live on the mirrors, encrypted; their names are decrypted on the person's own Mac.")
-    def list_versions(ctx: Context, folder: str, name_contains: str = "") -> str:
-        return svc.list_versions(_caller(svc, ctx), folder, name_contains)
+    @server.tool(description="List earlier versions of files in a mirrored folder (by its name, e.g. 'Documents'), newest first, optionally only those whose name contains some text, or only files deleted since (deleted_only). Only the last 30 days exist. Search by name before asking the person anything. Names are decrypted on the person's own Mac.")
+    def list_versions(ctx: Context, folder: str, name_contains: str = "", deleted_only: bool = False) -> str:
+        return svc.list_versions(_caller(svc, ctx), folder, name_contains, deleted_only)
 
-    @server.tool(description="Bring back one earlier version (name and at exactly as list_versions shows). It's restored as a new copy under 'Casper Restores' -- nothing is overwritten.")
-    def restore_version(ctx: Context, folder: str, name: str, at: str) -> str:
-        return svc.restore_version(_caller(svc, ctx), folder, name, at)
+    @server.tool(
+        description="Bring back one file as it was: an earlier version, or a deleted file. name can be part of the name if only one file matches; at is empty "
+        "for the newest earlier version, an exact time from list_versions, or any time (the version current then). It's a new copy next to the original, "
+        "dated in its name -- nothing is overwritten, so the person's request is enough, with no extra confirmation. If it doesn't fit on their disk the "
+        "answer offers mode='replace' (the old version put in place of the current file; the current one stays in history 30 days): offer that, and only "
+        "on their yes call again with mode='replace' and preview=false. Never ask them to delete anything first."
+    )
+    def restore_version(ctx: Context, folder: str, name: str, at: str = "", mode: str = "copy", preview: bool | None = None) -> str:
+        return svc.restore_version(_caller(svc, ctx), folder, name, at, mode, preview)
+
+    @server.tool(
+        description="Bring back one folder, or several in one call, as they were at a moment (as_of: a date like 2026-10-10, meaning the end of that day, or 2026-10-10T14:30). "
+        "A new folder next to each original, e.g. 'Documents (as of 2026-10-10)'; nothing is overwritten. Same rules as restore_version: no confirmation for a copy; "
+        "mode='replace' only on their yes after the answer offers it. Only the last 30 days exist. Ask only 'Back to when?' if they gave no time."
+    )
+    def restore_as_of(ctx: Context, folders: list[str], as_of: str, mode: str = "copy", preview: bool | None = None) -> str:
+        return svc.restore_as_of(_caller(svc, ctx), folders, as_of, mode, preview)
+
+    @server.tool(
+        description="When the person must choose among several files or versions (a name matches many, or they don't remember it): Casper's app shows them a list on their "
+        "Mac, and their pick restores a copy of each chosen version. This waits for their choice and returns what was restored. Use it instead of asking 'which one?' "
+        "turn after turn. If it says they haven't chosen yet, call again with the request it gives."
+    )
+    def show_restore_picker(ctx: Context, folder: str, name_contains: str = "", deleted_only: bool = False, request: str = "") -> str:
+        return svc.show_restore_picker(_caller(svc, ctx), folder, name_contains, deleted_only, request)
 
     @server.tool(description="Rebuild a whole mirrored folder onto another (e.g. a replacement) Mac of the person's, from the mirrors and catcher. That Mac needs the recovery kit imported first (`Casper setup restore`).")
     def restore_folder(ctx: Context, folder: str, dest_host: str, dest_path: str = "") -> str:

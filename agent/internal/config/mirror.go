@@ -65,6 +65,12 @@ func PostFolderChosen(authDomain, deviceToken string, report map[string]any) err
 	return deviceCall("POST", authDomain, deviceToken, "/hosts/folder-chosen", report, nil)
 }
 
+// PostRestorePicked reports the versions the person chose in Casper's restore
+// list (or that they cancelled).
+func PostRestorePicked(authDomain, deviceToken string, report map[string]any) error {
+	return deviceCall("POST", authDomain, deviceToken, "/hosts/restore-picked", report, nil)
+}
+
 func PostConsent(authDomain, deviceToken, approvalID string, approve bool) error {
 	return deviceCall("POST", authDomain, deviceToken, "/hosts/consent", map[string]any{"approval_id": approvalID, "approve": approve}, nil)
 }

@@ -77,3 +77,14 @@ footer a{text-decoration:none}
 @keyframes dot{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
 .note{color:var(--muted);font-size:15px;margin:0 0 18px 42px}
 .aside{font-size:13px;color:var(--muted);margin-left:10px}
+
+/* The guide's inline restore picker */
+.picker{margin:0 0 18px 42px;border:1px solid var(--ink);border-radius:14px;padding:16px;background:var(--paper)}
+.picker .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.picker input[type=search],.picker input[type=datetime-local],.picker select{font:inherit;padding:8px 12px;border:1px solid var(--ink);border-radius:999px;background:transparent;color:var(--ink)}
+.picker .tabs{display:flex;gap:8px;margin-bottom:12px}
+.picker .list{max-height:300px;overflow:auto;margin-bottom:12px}
+.picker .file{font-weight:600;margin:10px 0 4px}
+.picker label.row{display:flex;gap:10px;align-items:center;padding:4px 0;cursor:pointer}
+.picker .dim{opacity:.65;font-size:14px}
+.picker .btn[disabled]{opacity:.4;cursor:default}

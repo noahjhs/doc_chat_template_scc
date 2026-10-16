@@ -23,6 +23,7 @@ from pydantic import ValidationError
 import backups
 import conversations
 import mailer
+import restore as restore_logic
 import mcp_server
 import trust
 from models import (
@@ -3075,46 +3076,286 @@ def _version_listing(user_id: int, folder_name: str) -> tuple:
     raise mirroring.MirrorError("None of the computers mirroring this folder is online right now; versions live on them.")
 
 
-def _mcp_list_versions(user_id: int, folder: str, name_contains: str) -> str:
+def _mcp_list_versions(user_id: int, folder: str, name_contains: str = "", deleted_only: bool = False) -> str:
     try:
         f, _, _, versions = _version_listing(user_id, folder)
     except mirroring.MirrorError as e:
         return f"Can't: {e.message}"
-    versions = [v for v in versions if name_contains.lower() in v["name"].lower()]
+    versions = [v for v in versions if name_contains.lower() in v["name"].lower() and (not deleted_only or restore_logic.is_deleted(v))]
     if not versions:
+        if deleted_only:
+            return "No deleted files match." if name_contains else "No deleted files in the last 30 days."
         return "No earlier versions match." if name_contains else "No earlier versions yet (they appear when files change or are deleted)."
-    lines = [f"Earlier versions in {f['label']} (newest first; restore with restore_version(folder, name, at)):"]
-    for v in sorted(versions, key=lambda v: v["at"], reverse=True)[:100]:
-        lines.append(f"  - {v['name']}  at={v['at']}  ({backups.human(v['size'])}{', deleted afterwards' if v.get('deleted') else ''})")
+    ordered = sorted(versions, key=lambda v: v["at"], reverse=True)
+    lines = [f"Earlier versions in {f['label']} (newest first; only the last 30 days exist; restore with restore_version(folder, name, at)):"]
+    for v in ordered[:100]:
+        lines.append(f"  - {v['name']}  at={v['at']}  (written {restore_logic.short_time(v['modified'])}, {backups.human(v['size'])}"
+                     f"{', deleted afterwards' if restore_logic.is_deleted(v) else ''})")
+    if len(ordered) > 100:
+        lines.append(f"  ... and {len(ordered) - 100} older ones; narrow it with name_contains.")
     return "\n".join(lines)
 
 
-def _mcp_restore_version(user_id: int, folder: str, name: str, at: str) -> str:
-    try:
-        f, owner, peer, versions = _version_listing(user_id, folder)
-    except mirroring.MirrorError as e:
-        return f"Can't: {e.message}"
-    v = next((v for v in versions if v["name"] == name and (v["at"] == at or at in ("", "latest"))), None)
-    if v is None:
-        return f"No version of {name!r} at {at!r} (use list_versions)."
+def _move_version(f: dict, owner: dict, peer: dict, v: dict, **opts) -> str:
+    """Fetches one stored version from the mirror and has the owner's Mac
+    decrypt and place it. Returns where it went; raises MirrorError."""
     offset, total = 0, None
     while total is None or offset < total:
         r = backups.daemon_call(peer, "mirror_read_version", folder_id=f["id"], encrypted_path=v["encrypted_path"], at=v["at"], offset=offset)
         if not r.get("success"):
-            return f"Can't fetch that version: {r.get('stderr')}"
+            raise mirroring.MirrorError(f"Can't fetch that version: {r.get('stderr')}")
         data = json.loads(r["stdout"])
         total = int(data["total"])
         w = backups.daemon_call(owner, "mirror_restore_version_chunk", folder_id=f["id"], encrypted_path=v["encrypted_path"], offset=offset, content=data["content"])
         if not w.get("success"):
-            return f"Can't restore: {w.get('stderr')}"
+            raise mirroring.MirrorError(f"Can't restore: {w.get('stderr')}")
         chunk = len(base64.b64decode(data["content"]))
         if chunk == 0:
             break
         offset += chunk
-    done = backups.daemon_call(owner, "mirror_restore_version_finish", folder_id=f["id"], encrypted_path=v["encrypted_path"])
+    done = backups.daemon_call(owner, "mirror_restore_version_finish", folder_id=f["id"], encrypted_path=v["encrypted_path"], **opts)
     if not done.get("success"):
-        return f"Can't restore: {done.get('stderr')}"
-    return f"Restored {name} as it was at {v['at']} to {json.loads(done['stdout'])['restored_to']} -- a new copy; nothing was overwritten."
+        raise mirroring.MirrorError(f"Can't restore: {done.get('stderr')}")
+    return json.loads(done["stdout"])["restored_to"]
+
+
+def _restore_plan(owner: dict, f: dict, **opts) -> dict:
+    r = backups.daemon_call(owner, "mirror_restore_plan", folder_id=f["id"], **opts)
+    if not r.get("success"):
+        raise mirroring.MirrorError(f"Casper on your Mac needs an update to restore: {r.get('stderr')}")
+    return json.loads(r["stdout"])
+
+
+def _no_fit(what: str, need: int, free: int, replace_ok: bool) -> str:
+    base = f"{what} needs about {backups.human(need)} and your Mac has {backups.human(free)} free."
+    if replace_ok:
+        return (f"{base} It would fit if the old version replaced the current one instead (the current one stays in your history for 30 days). "
+                "Offer that; only on their yes, call again with mode='replace'.")
+    return f"{base} It doesn't fit even as a replacement; they'd need to free some space."
+
+
+def _mcp_restore_version(user_id: int, folder: str, name: str, at: str = "", mode: str = "copy", preview: bool | None = None) -> str:
+    """One file, as it was: `name` (or a part of it only one file matches),
+    `at` (nothing = the newest earlier version, an exact time from
+    list_versions, or any time = the version current then). A copy next to the
+    original; replace only after the person's yes."""
+    if mode not in ("copy", "replace"):
+        return "mode must be copy or replace."
+    try:
+        f, owner, peer, versions = _version_listing(user_id, folder)
+    except mirroring.MirrorError as e:
+        return f"Can't: {e.message}"
+    local = restore_logic.offset_of(versions)
+    names, v = restore_logic.pick_version(versions, name, at, local)
+    if v is None:
+        if len(names) > 1:
+            return (f"{len(names)} files match {name!r}: " + ", ".join(names[:12]) + ". Ask which, or use show_restore_picker.")
+        if len(names) == 1:
+            return f"No version of {names[0]!r} at {at!r} (use list_versions)."
+        return f"No earlier version of anything called {name!r} (use list_versions)."
+    name = v["name"]
+    try:
+        plan = _restore_plan(owner, f, scope="file", mode=mode)
+        free, size = int(plan["free_bytes"]), int(v["size"])
+        verdict = restore_logic.fit([size], 0, free)
+        if mode == "copy" and verdict != "copy":
+            return _no_fit(f"A copy of {name}", size * 2 + restore_logic.FIT_MARGIN, free, verdict == "replace")
+        if mode == "replace" and verdict == "none":
+            return _no_fit(f"Replacing {name}", size * 2 + restore_logic.FIT_MARGIN, free, False)
+        if mode == "replace" and preview is not False:
+            return (f"PREVIEW: put {name} as it was at {restore_logic.short_time(v['modified'])} in place of the current file "
+                    "(the current one stays in your history for 30 days). Only on the person's yes, call again with preview=false.")
+        where = _move_version(f, owner, peer, v, mode=mode, scope="file", stamp=v["modified"])
+    except mirroring.MirrorError as e:
+        return e.message if e.message.startswith("Can't") else f"Can't: {e.message}"
+    when = restore_logic.short_time(v["modified"])
+    if mode == "replace":
+        return f"Put {name} back as it was at {when}, in place of the current file ({where}). The one it replaced stays in your history for 30 days."
+    return f"Restored {name} as it was at {when} to {where} -- a new copy next to the original; nothing was overwritten."
+
+
+def _mcp_restore_as_of(user_id: int, folders: list[str], as_of: str, mode: str = "copy", preview: bool | None = None) -> str:
+    """One or several mirrored folders as they were at a moment (a bare date
+    = the end of that day; the last 30 days exist)."""
+    if mode not in ("copy", "replace"):
+        return "mode must be copy or replace."
+    if isinstance(folders, str):
+        folders = [folders]
+    if not folders:
+        return "Which folder?"
+    jobs = []
+    for folder in folders:
+        try:
+            f, owner, peer, versions = _version_listing(user_id, folder)
+        except mirroring.MirrorError as e:
+            return f"Can't: {e.message}"
+        try:
+            moment = restore_logic.when(as_of, restore_logic.offset_of(versions))
+        except ValueError:
+            return f"I can't read {as_of!r} as a time; use a date like 2026-10-10 or 2026-10-10T14:30."
+        if moment > datetime.now(timezone.utc):
+            return "That time hasn't happened yet."
+        if restore_logic.too_old(moment):
+            return f"Casper keeps 30 days of history; {as_of} is older than that. The oldest available is about {restore_logic.earliest().strftime('%Y-%m-%d')}."
+        chosen = restore_logic.as_of(versions, moment)
+        jobs.append((f, owner, peer, moment, chosen))
+    try:
+        plans, need, free = [], 0, None
+        for f, owner, peer, moment, chosen in jobs:
+            plan = _restore_plan(owner, f, scope="folder", mode=mode, as_of=moment.isoformat(), stamp=moment.isoformat(), names=sorted(chosen))
+            plans.append(plan)
+            sizes = [int(v["size"]) for v in chosen.values()]
+            verdict_free = int(plan["free_bytes"])
+            free = verdict_free if free is None else min(free, verdict_free)
+            need += sum(sizes) + int(plan["local_bytes"]) + max(sizes, default=0) + restore_logic.FIT_MARGIN
+        all_sizes = [int(v["size"]) for _, _, _, _, ch in jobs for v in ch.values()]
+        local_total = sum(int(p["local_bytes"]) for p in plans)
+        verdict = restore_logic.fit(all_sizes, local_total, free) if mode == "copy" else restore_logic.fit(all_sizes, 0, free)
+        label = ", ".join(j[0]["label"] for j in jobs)
+        if mode == "copy" and verdict != "copy":
+            return _no_fit(f"A copy of {label}", need, free, verdict == "replace")
+        if mode == "replace" and verdict == "none":
+            return _no_fit(f"Replacing in {label}", 2 * max(all_sizes, default=0) + restore_logic.FIT_MARGIN, free, False)
+        if mode == "replace" and preview is not False:
+            n = sum(len(j[4]) for j in jobs)
+            return (f"PREVIEW: put {n} files in {label} back as they were at {restore_logic.short_time(jobs[0][3].isoformat())}, over the current ones "
+                    "(files made after that are left alone; the current versions stay in your history for 30 days). "
+                    "Only on the person's yes, call again with preview=false.")
+        lines = []
+        for (f, owner, peer, moment, chosen), plan in zip(jobs, plans):
+            dest = plan.get("dest") or ""
+            first = ""
+            for v in chosen.values():
+                first = _move_version(f, owner, peer, v, mode=mode, scope="folder", stamp=moment.isoformat(), path=dest)
+            copied = 0
+            if mode == "copy":
+                r = backups.daemon_call(owner, "mirror_restore_local", folder_id=f["id"], mode=mode, scope="folder", path=dest,
+                                        as_of=moment.isoformat(), names=sorted(chosen))
+                if not r.get("success"):
+                    raise mirroring.MirrorError(f"Can't copy the unchanged files: {r.get('stderr')}")
+                copied = json.loads(r["stdout"])["files"]
+            when = restore_logic.short_time(moment.isoformat())
+            if mode == "copy":
+                lines.append(f"{f['label']} as of {when}: {len(chosen)} files from history and {copied} unchanged ones, in {dest} -- a new folder; nothing was overwritten.")
+            else:
+                lines.append(f"{f['label']} as of {when}: put {len(chosen)} files back over the current ones. They stay in your history for 30 days.")
+    except mirroring.MirrorError as e:
+        return e.message if e.message.startswith("Can't") else f"Can't: {e.message}"
+    return "\n".join(lines)
+
+
+_restore_picks: dict[str, dict] = {}  # request id -> {"user", "folder", "versions", "event", "result"}
+
+
+def _filtered_versions(user_id: int, folder: str, name_contains: str, deleted_only: bool, limit: int = 150) -> tuple:
+    f, owner, peer, versions = _version_listing(user_id, folder)
+    versions = [v for v in versions if name_contains.lower() in v["name"].lower() and (not deleted_only or restore_logic.is_deleted(v))]
+    return f, sorted(versions, key=lambda v: v["at"], reverse=True)[:limit]
+
+
+def _mcp_show_restore_picker(user_id: int, folder: str, name_contains: str = "", deleted_only: bool = False, request: str = "") -> str:
+    """The person's own agent asks Casper's app to show a list of earlier
+    versions on their Mac (on demand, like mirror_choose_folder). Their pick
+    restores a copy of each chosen version; this call returns what was
+    restored. A pick is the person's own choice, made where the agent can't
+    click."""
+    if not request:
+        try:
+            f, versions = _filtered_versions(user_id, folder, name_contains, deleted_only)
+            owner = _host_config(user_id, f["owner_host_id"])
+        except mirroring.MirrorError as e:
+            return f"Can't: {e.message}"
+        if not versions:
+            return "Nothing earlier matches" + (" among deleted files." if deleted_only else ".")
+        if owner is None:
+            return "Can't: your Mac isn't connected right now."
+        request = secrets.token_urlsafe(12)
+        entry = {"user": user_id, "folder": folder, "versions": versions, "event": threading.Event(), "result": ""}
+        _restore_picks[request] = entry
+        r = backups.daemon_call(owner, "mirror_restore_pick", approval_id=request, text="Choose what to bring back (a copy is made next to the original)",
+                                items=restore_logic.row_labels(versions))
+        if not r.get("success"):
+            _restore_picks.pop(request, None)
+            return "Can't: Casper on your Mac needs an update to show the list. Ask them for the file's name instead."
+    entry = _restore_picks.get(request)
+    if entry is None or entry["user"] != user_id:
+        return "That list is no longer open."
+    if not entry["event"].wait(timeout=100):
+        return f"They haven't chosen yet (the list is open on their Mac). Call show_restore_picker again with request={request!r} to keep waiting."
+    _restore_picks.pop(request, None)
+    return entry["result"]
+
+
+@app.post("/hosts/restore-picked")
+def restore_picked(body: dict, authorization: str = Header(default="")):
+    """The Mac reports what the person chose in the restore list. Restoring
+    runs in the background; the waiting tool call returns its outcome."""
+    with get_db() as db:
+        attached = _resolve_attached(db, authorization)
+    if attached is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    entry = _restore_picks.get(str(body.get("request_id", "")))
+    if entry is None or entry["user"] != attached["user_id"]:
+        raise HTTPException(status_code=404, detail="No such request.")
+
+    def work():
+        try:
+            if body.get("cancelled"):
+                entry["result"] = "They closed the list without choosing anything."
+            else:
+                lines = []
+                for i in body.get("picked") or []:
+                    if isinstance(i, int) and 0 <= i < len(entry["versions"]):
+                        v = entry["versions"][i]
+                        lines.append(_mcp_restore_version(entry["user"], entry["folder"], v["name"], v["at"]))
+                entry["result"] = "\n".join(lines) or "They didn't choose anything."
+        except Exception as e:  # the waiting call must always hear back
+            entry["result"] = f"Can't restore: {e}"
+        entry["event"].set()
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
+# --- Casper's guide: the inline picker (the same choice, drawn on the page) -----
+@app.get("/restore/picker")
+def restore_picker(folder: str = "", q: str = "", deleted_only: bool = False, authorization: str = Header(default="")):
+    """What the guide's inline picker shows: the person's mirrored folders and
+    their earlier versions (newest first, optionally filtered)."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+        folders = [r["label"] for r in db.execute(
+            "SELECT label FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at", (user_id,)).fetchall()]
+    if not folders:
+        return {"folders": [], "folder": "", "versions": [], "error": "Nothing is mirrored yet."}
+    folder = folder if folder in folders else folders[0]
+    try:
+        _, versions = _filtered_versions(user_id, folder, q, deleted_only, limit=200)
+    except mirroring.MirrorError as e:
+        return {"folders": folders, "folder": folder, "versions": [], "error": e.message}
+    return {"folders": folders, "folder": folder, "error": "",
+            "versions": [{"name": v["name"], "at": v["at"], "written": restore_logic.short_time(v["modified"]), "size": backups.human(v["size"]),
+                          "deleted": restore_logic.is_deleted(v)} for v in versions]}
+
+
+@app.post("/restore/pick")
+def restore_pick(body: dict, authorization: str = Header(default="")):
+    """The person's click in the guide's picker: the intent. {"folder", "picks":
+    [{"name", "at"}]} restores a copy of each version; {"folders": [...],
+    "as_of"} restores those folders as of a time. The result is added to the
+    conversation so the guide knows."""
+    with get_db() as db:
+        user_id = _require_user(db, authorization)
+    if body.get("as_of"):
+        text = _mcp_restore_as_of(user_id, [str(x) for x in body.get("folders") or []], str(body["as_of"]))
+    else:
+        picks = body.get("picks") or []
+        if not picks:
+            raise HTTPException(status_code=400, detail="Choose something to restore.")
+        text = "\n".join(_mcp_restore_version(user_id, str(body.get("folder", "")), str(p.get("name", "")), str(p.get("at", ""))) for p in picks[:20])
+    with _guide_lock(user_id):
+        guide.save_new(user_id, 0, [{"role": "assistant", "content": text}])
+    return {"message": text}
 
 
 def _start_restore(f, dest_host_id: int, abs_path: str, dest_label: str) -> str:
@@ -3234,6 +3475,8 @@ for _name, _fn in {
     "protection_status": _mcp_protection_status,
     "list_versions": _mcp_list_versions,
     "restore_version": _mcp_restore_version,
+    "restore_as_of": _mcp_restore_as_of,
+    "show_restore_picker": _mcp_show_restore_picker,
     "restore_folder": _mcp_restore_folder,
     "stop_mirroring": _mcp_stop_mirroring,
 }.items():
@@ -3529,6 +3772,9 @@ def guide_history(authorization: str = Header(default="")):
 
 def _telegram_guide_send(chat_id: str, reply: str, messages: list[dict]):
     reply = guide.plain(reply)
+    if messages and messages[-1].get("_picker"):  # Telegram has no widget: the picker is on the web guide
+        app_url = os.environ.get("PUBLIC_APP_URL", "").rstrip("/")
+        reply += f"\nChoose it here: {app_url}/guide" if app_url else "\nOr tell me the file's name."
     choices = (messages[-1].get("_choices") or []) if messages else []
     if not choices:
         _telegram_send_text(chat_id, reply[:4000])
