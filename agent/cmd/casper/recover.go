@@ -12,6 +12,7 @@ import (
 
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
+	"casper-agent/internal/setup"
 )
 
 // restorableFolders is how many of this account's folders live on another
@@ -53,7 +54,7 @@ func watchRecoverable(state *daemonState, mRecover *systray.MenuItem, logf func(
 			continue
 		}
 		_ = os.WriteFile(offered, nil, 0o600)
-		if yes, answered := dialog.Confirm("Casper keeps "+strings.Join(labels, ", ")+" safe for you from another Mac. Is that Mac lost? Bring it back on this Mac with your recovery kit.",
+		if yes, answered := dialog.Confirm("Casper keeps "+setup.JoinNames(labels)+" safe for you from another Mac. Is that Mac lost? Bring it back on this Mac with your recovery kit.",
 			"Recover", "Not Now", 5*time.Minute); answered && yes {
 			recoverFromLostMac(logf)
 		}

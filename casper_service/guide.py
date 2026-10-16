@@ -172,6 +172,8 @@ class Facts:
     restoring: bool = False  # a restore is under way on it
     recovered: bool = False  # every folder has its new Mac again
     recover_folders: list = field(default_factory=list)  # every mirrored folder on record (labels), whatever its state
+    safe_folders: list = field(default_factory=list)  # of those, the ones whose own last report shows a finished copy on a mirror
+    restore_places: dict = field(default_factory=dict)  # label -> short path ("~/Casper Restores/Documents") for folders not coming back in their old place
     restoring_folders: list = field(default_factory=list)  # still coming back
     empty_folders: list = field(default_factory=list)  # restoring, but its mirrors hold nothing for it
 
@@ -202,8 +204,8 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         # The recovery's closing line, once; after it they're simply set up.
         if "recovered" in spoken:
             return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
-        return Stage("recovered", "Say only: \"Your folders are back on this Mac, and Casper keeps them mirrored.\"",
-                     say="Your folders are back on this Mac, and Casper keeps them mirrored.")
+        say = "Your folders are back on this Mac, and Casper keeps them mirrored." + _landing(facts)
+        return Stage("recovered", f"Say only: \"{say}\"", say=say)
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
                      "preview=true) and give only the one-line terms, ending \"Accept?\": accepting is theirs to say. On their yes, accept it.", ("redeem_invite",))
@@ -250,12 +252,17 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
     """Getting folders back on a new Mac, instead of setting up (recovery v2
     P1: the kit is the key). The key and the Restore yes are given in
     Casper's own window on the Mac, never here."""
-    names = _names(facts.recover_folders)
-    safe = f"Your {names} {'is' if len(facts.recover_folders) == 1 else 'are'} safe on your friends' computers. " if names else ""
+    # "Safe" is said only of folders whose own last report shows a finished copy; the others are named as not copied.
+    safe = ""
+    if facts.safe_folders:
+        safe = f"Your {_names(facts.safe_folders)} {'is' if len(facts.safe_folders) == 1 else 'are'} safe on your friends' computers. "
+    unsafe = [x for x in facts.recover_folders if x not in facts.safe_folders]
+    if unsafe:
+        safe += f"{_names(unsafe)} never finished copying, so {'it' if len(unsafe) == 1 else 'they'} can't come back. "
     if not facts.recover_mac:
         say = f"{safe}Download Casper and open it on the new Mac: {download_url}\n(Ignore browser warnings. The app is safe.)"
         return Stage("recover_install", f"They lost their Mac and are signed in on a new one. Say exactly \"{say}\" and nothing more. "
-                     "Opening it connects the new Mac.", say=say)
+                     "Opening it connects the new Mac.", (), ("I have no recovery kit",), say=say)
     if facts.restoring:
         # Not a gate: each folder is its own restore. Requests about a folder that is back are acted on.
         waiting = _names(facts.restoring_folders)
@@ -268,12 +275,23 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
         if empty:
             now += (f"{empty}: nothing reached your friends' computers before the Mac was lost, so there is nothing to restore. "
                     "Say so plainly if asked; never say it is still coming. ")
+        where = _landing(facts)
+        if where:
+            now += f"If they ask where they are:{where} Always write paths short like that, never /Users/<name>/. "
         return Stage("recover_copy", now, ("*",), say="Restoring now. You can leave this page open.")
     if not facts.unlocked:
         say = "In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your recovery kit file and its passphrase ready."
         return Stage("recover_unlock", f"Say only: \"{say}\" If they have no kit: it can't be rebuilt without it yet; say so plainly.", say=say)
     say = f"{safe}Casper's dialog on your Mac offers to bring {'it' if len(facts.recover_folders) == 1 else 'them'} back. Choose Restore there."
     return Stage("recover_choose", f"Say only: \"{say}\" Restoring is theirs to say, in that dialog; you can't do it for them.", say=say)
+
+
+def _landing(facts: Facts) -> str:
+    """Where restored folders landed, in plain words (never /Users/<name>/...)."""
+    if not facts.restore_places:
+        return ""
+    names = _names(list(facts.restore_places))
+    return f" {names} {'is' if len(facts.restore_places) == 1 else 'are'} in the Casper Restores folder in your home folder (~/Casper Restores)."
 
 
 def _names(labels: list) -> str:

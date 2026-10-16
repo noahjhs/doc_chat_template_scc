@@ -886,12 +886,22 @@ def test_guide_setup_gates_go_one_step_at_a_time(app_env):
                             restoring_folders=["Documents"], empty_folders=["Pictures"]), [], url)
     assert mid.tools == ("*",) and "Still coming back: Documents" in mid.now and "Pictures: nothing reached" in mid.now
     pick = guide.stage_for(F(**r, recover_mac=True, unlocked=True, recover_folders=["Documents", "Pictures"]), [], url)
-    assert "Documents and Pictures are safe" in pick.say and "window" not in pick.say
+    # "Safe" only for a folder whose own report shows a finished copy; the other is named as not copied.
+    assert "Documents and Pictures are safe" not in pick.say and "safe on your friends" not in pick.say
+    assert "Documents and Pictures never finished copying" in pick.say
+    pick = guide.stage_for(F(**r, recover_mac=True, unlocked=True, recover_folders=["Documents", "Pictures"], safe_folders=["Documents"]), [], url)
+    assert "Your Documents is safe on your friends' computers." in pick.say and "Pictures never finished copying, so it can't come back." in pick.say
+    assert "window" not in pick.say
+    both = guide.stage_for(F(**r, recover_mac=True, unlocked=True, recover_folders=["Documents", "Pictures"], safe_folders=["Documents", "Pictures"]), [], url)
+    assert "Your Documents and Pictures are safe" in both.say and "never finished" not in both.say
+    assert guide.stage_for(F(**r), [], url).choices  # the first recovery message carries buttons
     import main
     assert main._restore_empty({"restoring": True, "empty_for_s": 90}) and not main._restore_empty({"restoring": True, "empty_for_s": 5})
     # Once folders are back: one closing line, then simply set up.
     back = dict(mac_connected=True, recovered=True, folder="active")
     assert step(F(**back)) == "recovered"
+    landed = guide.stage_for(F(**back, restore_places={"Documents": "~/Casper Restores/Documents"}), [], url).say
+    assert "Documents is in the Casper Restores folder in your home folder" in landed and "/Users" not in landed
     assert step(F(**back), [{"role": "assistant", "content": "Your folders are back", "_stage": "recovered"}]) == "open"
     # "Protected" is said once: a later dip in the copy doesn't take it back to "Copying now".
     said_kit = [{"role": "assistant", "content": "Protected.", "_stage": "recovery_kit"}]
@@ -1216,7 +1226,10 @@ def test_restore_without_an_agent_then_promotion(app_env):
         assert main._guide_stage(rid, []).name != "recover_install"  # no "I lost my Mac" yet: setup as usual
 
         # They say so on the sign-in page: the guide recovers instead of setting up.
+        import guide
+        guide.save_new(rid, 0, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Old chat.", "_stage": "open"}])
         assert client.post("/profile/lost-mac", headers=riley).status_code == 200
+        assert guide.load_history(rid) == []  # recovery opens a fresh thread, not the old chat
         assert main._guide_stage(rid, []).name == "recover_unlock"
         assert list_(new, unlocked=True).status_code == 200  # the kit was opened on the new Mac
         assert main._guide_stage(rid, []).name == "recover_choose"

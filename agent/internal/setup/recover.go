@@ -189,10 +189,10 @@ func Recover(a RecoverArgs) (started map[string]string, err error) {
 	var lines []string
 	for _, f := range folders {
 		if p, ok := where[f.ID]; ok {
-			lines = append(lines, fmt.Sprintf("%s  →  %s", f.Label, p))
+			lines = append(lines, fmt.Sprintf("%s  →  %s", f.Label, shortPath(p, a.Home)))
 		}
 	}
-	summary := "Bring back " + strings.Join(labels, ", ") + " on this Mac?\n\n" + strings.Join(lines, "\n") +
+	summary := "Bring back " + JoinNames(labels) + " on this Mac?\n\n" + strings.Join(lines, "\n") +
 		"\n\nThey come back from your friends' computers, and this Mac keeps them mirrored afterwards."
 	if len(uncovered) > 0 {
 		summary += "\n\n(The kit doesn't cover " + fmt.Sprint(len(uncovered)) + " other folder(s).)"
@@ -253,4 +253,24 @@ func (c *cli) recover(kitPath string) error {
 	c.emit(fmt.Sprintf("Restoring %d folder(s) onto this Mac from your friends' computers. Casper keeps them mirrored once they're back.", len(where)),
 		map[string]any{"ok": true, "folders": where})
 	return nil
+}
+
+// shortPath shows a path inside home as ~/..., the way a person reads it.
+func shortPath(p, home string) string {
+	home = strings.TrimRight(home, "/")
+	if home != "" && (p == home || strings.HasPrefix(p, home+"/")) {
+		return "~" + strings.TrimPrefix(p, home)
+	}
+	return p
+}
+
+// JoinNames reads "Documents", "Documents and Pictures", "A, B and C".
+func JoinNames(l []string) string {
+	switch len(l) {
+	case 0:
+		return ""
+	case 1:
+		return l[0]
+	}
+	return strings.Join(l[:len(l)-1], ", ") + " and " + l[len(l)-1]
 }

@@ -336,6 +336,37 @@ func (m *Manager) do(method, path string, body any, out any) error {
 	return nil
 }
 
+// devicesToRekey are the devices that, in the wanted folders, get an
+// encryption password they don't have yet in the folders Syncthing has.
+func devicesToRekey(want map[string]stFolder, have []stFolder) map[string]bool {
+	known := map[string]map[string]string{} // folder -> device -> password already configured
+	for _, f := range have {
+		known[f.ID] = map[string]string{}
+		for _, d := range f.Devices {
+			known[f.ID][d.DeviceID] = d.EncryptionPassword
+		}
+	}
+	out := map[string]bool{}
+	for id, f := range want {
+		for _, d := range f.Devices {
+			if d.EncryptionPassword != "" && known[id][d.DeviceID] != d.EncryptionPassword {
+				out[d.DeviceID] = true
+			}
+		}
+	}
+	return out
+}
+
+// reconnect drops and re-makes a device's connections (pause, resume), so they
+// pick up the folder passwords configured since they were made.
+func (m *Manager) reconnect(deviceID string) error {
+	path := "/rest/config/devices/" + q(deviceID)
+	if err := m.do("PATCH", path, map[string]any{"paused": true}, nil); err != nil {
+		return err
+	}
+	return m.do("PATCH", path, map[string]any{"paused": false}, nil)
+}
+
 func (m *Manager) get(path string, out any) error    { return m.do("GET", path, nil, out) }
 func (m *Manager) put(path string, body any) error   { return m.do("PUT", path, body, nil) }
 func (m *Manager) patch(path string, body any) error { return m.do("PATCH", path, body, nil) }
@@ -552,9 +583,19 @@ func (m *Manager) Apply(d Desired) error {
 			return err
 		}
 	}
+	// A connection made before a folder's encryption password was configured
+	// keeps keys that lack it: the mirror receives the folder's index but every
+	// block request is refused ("no such file") and the copy never finishes. So
+	// a device that gets a folder with a password it didn't have is reconnected.
+	rekey := devicesToRekey(wantFolders, haveFolders)
 	for id, f := range wantFolders {
 		if err := m.put("/rest/config/folders/"+q(id), f); err != nil {
 			return err
+		}
+	}
+	for id := range rekey {
+		if err := m.reconnect(id); err != nil {
+			m.logf("mirror: reconnecting %s for a new encrypted folder: %s", id, err)
 		}
 	}
 	for _, f := range d.Owned { // new and existing folders alike

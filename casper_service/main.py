@@ -2965,6 +2965,17 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         return (f"PREVIEW (nothing changed yet): Mirror {label} ({backups.human(size)}) to {where}{short_catch}. "
                 "Encrypted, 30 days of history." + (f" Tell them, once: {PHOTOS_NOTE}" if photos else ""))
     with get_db() as db:
+        # Asking twice for the same folder must not make a second folder (and a second, stacked dialog):
+        # an active one is already on its way, a waiting one just gets its dialog again.
+        same = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND owner_host_id = ? AND path = ? AND restore_host_id IS NULL "
+                          "AND status IN ('active', 'awaiting_consent') ORDER BY created_at DESC LIMIT 1",
+                          (user_id, config["host_id"], abs_path)).fetchone()
+        if same and same["status"] == "active":
+            return f"{same['label']} is already being mirrored. Check protection_status for how it's going; no dialog is open."
+        if same and same["approval_id"]:
+            backups.daemon_call(config, "ask_consent", approval_id=same["approval_id"], text=f"Start mirroring {same['label']}?")
+            return (f"NOT protected yet. The dialog for {same['label']} was shown again on {source_host}; the person clicks Mirror there "
+                    "(or answers in Telegram). You can't confirm it for them. Once they say they have, check protection_status.")
         folder_id = mirroring.create_folder(db, user_id, config["host_id"], abs_path, label, mirror_grants, catcher_grant, use_casper_catcher)
     description = f"Start mirroring {label} ({backups.human(size)}) to {where}?"
     approval_id = create_approval(user_id, user_id, "mirror_consent", description, {"folder_id": folder_id})
@@ -2978,6 +2989,11 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         "protection_status before telling them they're protected."
         + (f" Tell them, once, unless you already have: {PHOTOS_NOTE}" if photos else "")
     )
+
+
+def _short_path(p: str) -> str:
+    """/Users/<name>/Casper Restores/Documents -> ~/Casper Restores/Documents: what a person reads."""
+    return re.sub(r"^/Users/[^/]+(?=/|$)", "~", str(p or ""))
 
 
 def _first_copy_done(db, f) -> bool:
@@ -3130,7 +3146,7 @@ def _move_version(f: dict, owner: dict, peer: dict, v: dict, **opts) -> str:
     done = backups.daemon_call(owner, "mirror_restore_version_finish", folder_id=f["id"], encrypted_path=v["encrypted_path"], **opts)
     if not done.get("success"):
         raise mirroring.MirrorError(f"Can't restore: {done.get('stderr')}")
-    return json.loads(done["stdout"])["restored_to"]
+    return _short_path(json.loads(done["stdout"])["restored_to"])
 
 
 def _restore_plan(owner: dict, f: dict, **opts) -> dict:
@@ -3626,6 +3642,9 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             # Every folder Casper has on record, whatever state it's in, and per folder how its restore is going.
             rows = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at", (user_id,)).fetchall()
             facts.recover_folders = [r["label"] for r in rows]
+            facts.restore_places = {r["label"]: _short_path(r["restore_path"] or r["path"]) for r in rows
+                                    if "/Casper Restores/" in str(r["restore_path"] or r["path"] or "")}
+            facts.safe_folders = [r["label"] for r in rows if not r["restore_host_id"] and _first_copy_done(db, r)]
             for r in rows:
                 if r["restore_host_id"] in connected:
                     if _restore_empty(mirroring.latest_status(db, r["id"]) or {}):
@@ -3663,8 +3682,13 @@ def lost_mac(authorization: str = Header(default="")):
     a new Mac (see _guide_facts)."""
     with get_db() as db:
         user_id = _require_user(db, authorization)
+    fresh = not any(str(m.get("_stage", "")).startswith("recover") for m in guide.load_history(user_id))
+    with get_db() as db:
         _get_or_create_profile(db, user_id)
         db.execute("UPDATE user_profile SET lost_mac_at = ?, recovery_unlocked_at = NULL WHERE user_id = ?", (trust.now_iso(), user_id))
+        # Recovery opens a fresh thread: the guide's first words are about the lost Mac, not the old chat.
+        if fresh:
+            db.execute("DELETE FROM guide_messages WHERE user_id = ?", (user_id,))
     return {"ok": True}
 
 
