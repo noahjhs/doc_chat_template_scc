@@ -15,7 +15,9 @@ set -euo pipefail
 # All in a function, called on the last line: bash then reads the whole
 # script before running any of it, so editing this file mid-run is safe.
 main() {
-  cd "$(dirname "$0")/.."
+  # Always the main checkout, even when started from an agent's worktree
+  # (which may be removed while this run waits its turn).
+  cd "$(dirname "$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)")"
   REPO=$(pwd)
   local SCENARIO=${1:-invite-headless}
   REV=$(git rev-parse "${2:-HEAD}")
