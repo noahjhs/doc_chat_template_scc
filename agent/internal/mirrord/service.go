@@ -636,7 +636,7 @@ func (o *ops) ChooseFolder(requestID, home string) {
 				report["outside_home"] = true
 			} else {
 				report["path"] = rel
-				report["bytes"] = dirSize(chosen)
+				report["bytes"], report["photos_library"] = dirSize(chosen)
 			}
 		}
 		if err := config.PostFolderChosen(o.s.AuthDomain, o.s.tokenFor(o.user), report); err != nil {
@@ -645,15 +645,25 @@ func (o *ops) ChooseFolder(requestID, home string) {
 	}()
 }
 
-func dirSize(root string) int64 {
+// dirSize is what mirroring a folder would copy: the Photos library, which
+// Casper leaves out, isn't counted (and is reported).
+func dirSize(root string) (int64, bool) {
 	var total int64
-	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && info.Mode().IsRegular() {
+	photos := false
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && p != root && mirror.IsPhotosLibrary(info.Name()) {
+			photos = true
+			return filepath.SkipDir
+		}
+		if info.Mode().IsRegular() {
 			total += info.Size()
 		}
 		return nil
 	})
-	return total
+	return total, photos
 }
 
 func (o *ops) UnprotectedFiles(folderID string) ([]string, error) {

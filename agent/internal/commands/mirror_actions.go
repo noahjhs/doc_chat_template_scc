@@ -123,7 +123,8 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": dir, "bytes": dirBytes(dir)}, nil
+		size, photos := dirBytes(dir)
+		return map[string]any{"path": dir, "bytes": size, "photos_library": photos}, nil
 	case "ask_consent":
 		m.AskConsent(req.ApprovalID, req.Text)
 		return map[string]any{"asked": true}, nil
@@ -185,8 +186,8 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 	}
 }
 
-func dirBytes(root string) int64 {
+func dirBytes(root string) (int64, bool) {
 	var total int64
-	_ = walkRegular(root, func(size int64) { total += size })
-	return total
+	photos, _ := walkRegular(root, func(size int64) { total += size })
+	return total, photos
 }

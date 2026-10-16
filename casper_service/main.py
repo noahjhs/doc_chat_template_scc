@@ -2917,7 +2917,12 @@ def _decide_mirror_consent(row, decision: str) -> str:
 _APPROVAL_HANDLERS["mirror_consent"] = _decide_mirror_consent
 
 
-def _folder_size(user_id: int, host_label: str, path: str) -> tuple[dict, int, str]:
+# Said once, when a folder holding a Photos library is chosen. PLACEHOLDER wording
+# until the Principal settles it (proposal is on the board, under "Needs you").
+PHOTOS_NOTE = "Casper leaves your Photos library out of mirroring for now. Everything else in the folder is mirrored."
+
+
+def _folder_size(user_id: int, host_label: str, path: str) -> tuple[dict, int, str, bool]:
     configs = _own_configs(user_id)
     if host_label not in configs:
         raise mirroring.MirrorError(f"{host_label} isn't one of your connected machines.")
@@ -2926,12 +2931,12 @@ def _folder_size(user_id: int, host_label: str, path: str) -> tuple[dict, int, s
     if not r.get("success"):
         raise mirroring.MirrorError(r.get("stderr") or "couldn't read that folder")
     data = json.loads(r["stdout"])
-    return config, int(data["bytes"]), data["path"]
+    return config, int(data["bytes"]), data["path"], bool(data.get("photos_library"))
 
 
 def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list, catcher: str, use_casper_catcher: bool, label: str, preview: bool) -> str:
     try:
-        config, size, abs_path = _folder_size(user_id, source_host, path)
+        config, size, abs_path, photos = _folder_size(user_id, source_host, path)
         with get_db() as db:
             mirror_grants = mirroring.resolve_peer_grants(db, user_id, mirrors or [], "mirror_peer")
             catcher_grant = mirroring.resolve_peer_grants(db, user_id, [catcher], "catcher_peer")[0] if catcher else None
@@ -2958,7 +2963,7 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         short_catch = (f", catcher {catcher_grant['owner']}/{catcher_grant['host']}" if catcher_grant
                        else ", Casper's catcher" if use_casper_catcher else ", no catcher")
         return (f"PREVIEW (nothing changed yet): Mirror {label} ({backups.human(size)}) to {where}{short_catch}. "
-                "Encrypted, 30 days of history.")
+                "Encrypted, 30 days of history." + (f" Tell them, once: {PHOTOS_NOTE}" if photos else ""))
     with get_db() as db:
         folder_id = mirroring.create_folder(db, user_id, config["host_id"], abs_path, label, mirror_grants, catcher_grant, use_casper_catcher)
     description = f"Start mirroring {label} ({backups.human(size)}) to {where}?"
@@ -2971,6 +2976,7 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         f"NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
         "click Mirror (or answer in Telegram). You can't confirm it for them. Once they say they have, check "
         "protection_status before telling them they're protected."
+        + (f" Tell them, once, unless you already have: {PHOTOS_NOTE}" if photos else "")
     )
 
 
@@ -2978,7 +2984,7 @@ def _first_copy_done(db, f) -> bool:
     """A mirror really holds everything (its own completion report), not
     merely "connected and nothing flagged"."""
     st = mirroring.latest_status(db, f["id"]) or {}
-    return any(p.get("role") == "mirror" and p.get("completion", 0) >= 100 for p in st.get("peers", []))
+    return not st.get("unreadable_items") and any(p.get("role") == "mirror" and p.get("completion", 0) >= 100 for p in st.get("peers", []))
 
 
 def _status_text(db, f) -> str:
@@ -3000,6 +3006,7 @@ def _status_text(db, f) -> str:
         return f"{f['label']}: starting up (no report from {trust.host_label(db, f['owner_user_id'], f['owner_host_id'])} yet)."
     lines = []
     unprotected = st.get("unprotected_files", 0)
+    unreadable = st.get("unreadable_items", 0)
     peers = st.get("peers", [])
     # Until a mirror has connected at least once, nothing can be "missing"
     # from it yet -- so "no unprotected files" would falsely read as
@@ -3018,9 +3025,14 @@ def _status_text(db, f) -> str:
             more = f" (and {unprotected - min(len(files), 10)} more)" if unprotected > min(len(files), 10) else ""
             lines.append("  not yet protected: " + ", ".join(files[:10]) + more)
     elif st.get("at_risk_files"):
-        lines.append(f"{f['label']}: protected. {st['at_risk_files']} recent change(s) are held by the catcher until a mirror wakes up.")
-    else:
+        lines.append(f"{f['label']}: " + (f"{st['at_risk_files']} readable change(s)" if unreadable else f"protected. {st['at_risk_files']} recent change(s)")
+                     + " are held by the catcher until a mirror wakes up.")
+    elif not unreadable:
         lines.append(f"{f['label']}: protected. Every change is on at least one mirror.")
+    if unreadable:  # never "protected" while something in it can't be read
+        n = unreadable
+        lines.insert(0, f"{f['label']}: {n} item{'s' if n != 1 else ''} can't be read, so {'they aren' if n != 1 else 'it isn'}'t copied. "
+                        "NOT fully protected." + (" Everything else is on a mirror." if not unprotected and not st.get("at_risk_files") else ""))
     for p in st.get("peers", []):
         who = names.get(p["device_id"], p["device_id"][:7])
         state = "up to date" if p.get("completion") == 100 and p.get("connected") else ("connected, catching up" if p.get("connected") else f"offline (last seen {(p.get('last_seen') or '?')[:16]})")
@@ -3545,6 +3557,7 @@ _STEP_NEWS = {
     "install": "Their invite is accepted.",
     "choose_folder": "Their Mac is connected now.",
     "syncing": "They clicked Mirror; the first copy is under way.",
+    "unreadable": "Casper can't read some items in their folder.",
     "recover_install": "They lost their Mac and signed in on a new one.",
     "recover_unlock": "Their new Mac is connected.",
     "recover_choose": "They opened their recovery kit on the new Mac.",
@@ -3556,6 +3569,18 @@ _STEP_NEWS = {
 
 
 _CODE = re.compile(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", re.I)
+
+
+def _unreadable_line(db, user_id: int) -> str:
+    """"Pictures: 3 items can't be read" for each active folder with any, from
+    the owner's own reports; "" when nothing is unreadable."""
+    out = []
+    for f in db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' AND restore_host_id IS NULL ORDER BY created_at",
+                        (user_id,)).fetchall():
+        n = (mirroring.latest_status(db, f["id"]) or {}).get("unreadable_items") or 0
+        if n:
+            out.append(f"{f['label']}: {n} item{'s' if n != 1 else ''} can't be read")
+    return "; ".join(out)
 
 
 def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
@@ -3587,6 +3612,7 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             folder=f["status"] if f else "none",
             protected=bool(f) and f["status"] == "active" and ": protected." in _status_text(db, f) and _first_copy_done(db, f),
             recovery_kit=bool(kit and kit["recovery_kit_at"]),
+            unreadable=_unreadable_line(db, user_id),
             offers_space=bool(trust.list_offerings(db, user_id)["mine"]),
         )
         profile = db.execute("SELECT lost_mac_at, recovery_unlocked_at FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
@@ -3753,6 +3779,8 @@ def folder_chosen(body: dict, authorization: str = Header(default="")):
         news = "They picked a folder outside their home folder; Casper only keeps folders inside it. Ask them to choose another."
     else:
         news = f"They chose the folder {body.get('path')} ({backups.human(int(body.get('bytes') or 0))}). Preview mirroring it."
+        if body.get("photos_library"):
+            news += f" Tell them, once, in these words: {PHOTOS_NOTE}"
 
     def work():
         reply, messages = _guide_reply(user_id, news, event=True)

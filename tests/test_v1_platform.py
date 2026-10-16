@@ -1023,6 +1023,52 @@ def test_not_protected_until_a_mirror_has_ever_connected(app_env, monkeypatch):
             assert (": protected." in main._status_text(db, folder)) is protected
 
 
+def test_never_protected_while_items_cant_be_read(app_env, monkeypatch):
+    """2026-10-16 rule: Syncthing's unreadable items show in protection_status /
+    my_casper / the guide, and the folder is never called protected meanwhile."""
+    main, _ = app_env
+    base = {"local_files": 5, "unprotected_files": 0, "at_risk_files": 0, "unreadable_items": 0,
+            "peers": [{"device_id": "X", "role": "mirror", "completion": 100, "connected": True, "last_seen": "2026-10-12T01:00:00Z"}]}
+    folder = {"id": "f1", "label": "Pictures", "status": "active", "restore_host_id": None, "owner_user_id": 1, "owner_host_id": 1}
+    monkeypatch.setattr(main.mirroring, "peers_of", lambda db, fid: [])
+    monkeypatch.setattr(main.mirroring, "catcher_device", lambda: None)
+    for n, word in ((0, "protected."), (1, "1 item can't be read"), (3, "3 items can't be read")):
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st={**base, "unreadable_items": n}: st)
+        with main.get_db() as db:
+            text, done = main._status_text(db, folder), main._first_copy_done(db, folder)
+        assert word in text
+        assert (": protected." in text) is (n == 0) and done is (n == 0)
+        if n:
+            assert text.startswith("Pictures: ") and "NOT fully protected" in text and "protected. " not in text.replace("fully protected.", "")
+    # The guide says it once, in Casper's own words, and never says "Protected." for it.
+    F, url = main.guide.Facts, "https://x/dl"
+    facts = F(mac_connected=True, invite={"code": "C", "inviter": "riley", "state": "accepted"}, mirror_hosts=["riley/Mac"],
+              folder="active", unreadable="Pictures: 3 items can't be read")
+    stage = main.guide.stage_for(facts, [], url)
+    assert stage.name == "unreadable" and stage.say.startswith("Pictures: 3 items can't be read")
+    said = [{"role": "assistant", "content": stage.say, "_stage": "unreadable"}]
+    kit = main.guide.stage_for(facts, said, url)
+    assert kit.name == "recovery_kit" and "Protected" not in kit.say
+
+
+def test_photos_library_is_carved_out_and_said_once(app_env):
+    main, client = app_env
+
+    def riley_daemon(body):
+        if body["action"] == "mirror_folder_size":
+            return _ok(path="/Users/riley/Pictures", bytes=1000, photos_library=True)
+        return _ok()
+
+    with client, FakeDaemon(respond_with=lambda b: _ok()) as sd, FakeDaemon(respond_with=riley_daemon) as rd:
+        sam, riley, sam_agent, riley_agent = _onboard_two(client, sd.url)
+        _pair(client, riley, "rk-laptop", "riley-laptop", rd.url)
+        oid = re.search(r"offering (\d+)", _mcp(client, sam_agent, "publish_offering", host="sam-mini", max_gb=5, kind="mirror", preview=False)).group(1)
+        code = re.search(r"CASPER-[A-Z2-9-]{14}", _mcp(client, sam_agent, "create_invite", quota_gb=1, offering_id=int(oid), preview=False)).group(0)
+        assert "Done" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
+        out = _mcp(client, riley_agent, "mirror_folder", source_host="riley-laptop", path="Pictures", mirrors=["sam/sam-mini"], preview=True)
+        assert out.startswith("PREVIEW") and main.PHOTOS_NOTE in out
+
+
 def test_pairing_by_code_needs_the_apps_secret_and_works_once(app_env):
     main, client = app_env
     _, sam = _signup(client, "sam")

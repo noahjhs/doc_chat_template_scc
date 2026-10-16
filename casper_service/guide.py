@@ -163,6 +163,7 @@ class Facts:
     folder: str = "none"  # their newest mirror: "none" | "awaiting_consent" | "active"
     protected: bool = False
     recovery_kit: bool = False
+    unreadable: str = ""  # e.g. "Pictures: 3 items can't be read" -- never "protected" while this is set
     offers_space: bool = False
     # Recovering after a lost Mac (they said so, and folders still need a Mac):
     recovering: bool = False
@@ -223,15 +224,18 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
                      "Casper dialog on their Mac: Mirror starts it.", silent=True)
     # "Protected" is said once, after a real finished first copy; a later dip in the
     # copy doesn't take it back.
-    protected = facts.protected or "recovery_kit" in spoken
+    if facts.folder == "active" and facts.unreadable and "unreadable" not in spoken:
+        say = f"{facts.unreadable}. Casper can't copy those; everything else is being kept safe."
+        return Stage("unreadable", f"Say only: \"{say}\" Never call that folder protected.", say=say)
+    protected = facts.protected or "recovery_kit" in spoken or (bool(facts.unreadable) and "unreadable" in spoken)
     if facts.folder == "active" and not protected:
         return Stage("syncing", "The first copy is under way; the page shows its progress. Say only: \"Copying now. You can leave "
                      "this page open.\" If they ask how it's going, check protection_status.",
                      say="Copying now. You can leave this page open.")
     if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in answered:
-        return Stage("recovery_kit", "Say only: \"Protected. Last step: your recovery kit. In Casper's menu (the ghost in the "
-                     "menu bar), choose Make Recovery Kit.\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Later",),
-                     say="Protected. Last step: your recovery kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery Kit.")
+        lead = "" if facts.unreadable else "Protected. "
+        say = f"{lead}Last step: your recovery kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery Kit."
+        return Stage("recovery_kit", f"Say only: \"{say}\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Later",), say=say)
     if inv and not facts.offers_space and "give_back" not in answered:
         return Stage("give_back", f"Ask only: \"Want to offer {inv['inviter']} space on your Mac too?\" It's a gift, never owed. If yes, invite {inv['inviter']} "
                      "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"),

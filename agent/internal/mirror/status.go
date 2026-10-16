@@ -34,10 +34,32 @@ type FolderStatus struct {
 	UnprotectedOldest int64       `json:"unprotected_oldest_unix"`
 	Peers             []PeerState `json:"peers"`
 	Error             string      `json:"error,omitempty"`
+	// UnreadableItems counts what Syncthing couldn't read (permission,
+	// locked, vanished mid-scan): those aren't copied, so the folder is
+	// never reported protected while any exist. Names stay on this Mac.
+	UnreadableItems int `json:"unreadable_items"`
 	// UnprotectedNames lists (up to 50) unprotected files by name. Never
 	// reported to casper_service: it's only sent, live, to the person's own
 	// agent when they ask (mirror_unprotected_files).
 	UnprotectedNames []string `json:"-"`
+	UnreadableNames  []string `json:"-"`
+}
+
+// unreadable lists the items Syncthing failed to read or send in folder.
+func (m *Manager) unreadable(folder string) []string {
+	var resp struct {
+		Errors []struct {
+			Path string `json:"path"`
+		} `json:"errors"`
+	}
+	if err := m.get("/rest/folder/errors?folder="+url.QueryEscape(folder)+"&perpage=500", &resp); err != nil {
+		return nil
+	}
+	out := []string{}
+	for _, e := range resp.Errors {
+		out = append(out, e.Path)
+	}
+	return out
 }
 
 // needed returns the files (not deletions) device still needs in folder.
@@ -123,6 +145,8 @@ func (m *Manager) OwnedStatus(f OwnedFolder) (FolderStatus, []string) {
 			}
 		}
 	}
+	st.UnreadableNames = m.unreadable(f.ID)
+	st.UnreadableItems = len(st.UnreadableNames)
 	files := listFiles(f.Path)
 	st.LocalFiles = len(files)
 	for _, rel := range files {
@@ -181,7 +205,7 @@ func listFiles(root string) []string {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() && (d.Name() == ".stfolder" || d.Name() == ".stversions") {
+		if d.IsDir() && (d.Name() == ".stfolder" || d.Name() == ".stversions" || IsPhotosLibrary(d.Name())) {
 			return filepath.SkipDir
 		}
 		if d.Type().IsRegular() {

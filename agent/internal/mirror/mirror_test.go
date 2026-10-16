@@ -328,3 +328,45 @@ func TestPresetOptionsBeforeStart(t *testing.T) {
 		t.Errorf("default listen address left in:\n%s", got)
 	}
 }
+
+func TestPhotosLibraryIsCarvedOutAndUnreadableItemsShow(t *testing.T) {
+	bin := syncthingBin(t)
+	owner, mirror := startNode(t, bin), startNode(t, bin)
+	const fid = "casper-test-pictures"
+	src := t.TempDir()
+	lib := filepath.Join(src, "Photos Library.photoslibrary", "originals")
+	os.MkdirAll(lib, 0o755)
+	os.WriteFile(filepath.Join(lib, "p.jpg"), []byte("photo"), 0o644)
+	os.WriteFile(filepath.Join(src, "holiday.txt"), []byte("beach"), 0o644)
+	os.WriteFile(filepath.Join(src, "locked.txt"), []byte("no"), 0o000)
+	// A line the person already had stays.
+	os.WriteFile(filepath.Join(src, ".stignore"), []byte("*.tmp\n"), 0o644)
+
+	f := OwnedFolder{ID: fid, Label: "Pictures", Path: src, Mirrors: []string{mirror.m.DeviceID()}, Password: "a long folder password for tests"}
+	d := Desired{Peers: []Peer{mirror.peer("mirror")}, Owned: []OwnedFolder{f}}
+	mustApply(t, owner, d)
+	mustApply(t, mirror, Desired{Peers: []Peer{owner.peer("owner")}, Held: []HeldFolder{{ID: fid, Label: "riley", Owners: []string{owner.m.DeviceID()}, Kind: "mirror"}}})
+	mustApply(t, owner, d) // again: nothing doubles
+
+	waitFor(t, "holiday.txt copied, the locked file reported", 60*time.Second, func() bool {
+		st, _ := owner.m.OwnedStatus(f)
+		return st.Error == "" && st.UnreadableItems == 1 && len(st.Peers) == 1 && st.Peers[0].Completion == 100
+	})
+	st, _ := owner.m.OwnedStatus(f)
+	if st.LocalFiles != 2 || len(st.UnreadableNames) != 1 || st.UnreadableNames[0] != "locked.txt" {
+		t.Fatalf("status = %+v", st)
+	}
+	var gs struct {
+		GlobalFiles int `json:"globalFiles"`
+	}
+	if err := owner.m.get("/rest/db/status?folder="+fid, &gs); err != nil || gs.GlobalFiles != 1 {
+		t.Fatalf("the Photos library was indexed: %+v %v", gs, err)
+	}
+	data, _ := os.ReadFile(filepath.Join(src, ".stignore"))
+	if strings.Count(string(data), "*.photoslibrary") != 1 || !strings.Contains(string(data), "*.tmp") {
+		t.Fatalf(".stignore = %q", data)
+	}
+	if !IsPhotosLibrary("Photos Library.photoslibrary") || IsPhotosLibrary("photoslibrary-notes") {
+		t.Fatal("IsPhotosLibrary")
+	}
+}

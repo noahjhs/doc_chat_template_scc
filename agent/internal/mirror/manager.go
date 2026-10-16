@@ -557,6 +557,13 @@ func (m *Manager) Apply(d Desired) error {
 			return err
 		}
 	}
+	for _, f := range d.Owned { // new and existing folders alike
+		if _, ok := wantFolders[f.ID]; ok {
+			if err := m.carveOut(f.ID); err != nil {
+				m.logf("mirror: leaving the Photos library out of %s: %s", f.ID, err)
+			}
+		}
+	}
 	for _, f := range haveFolders {
 		if strings.HasPrefix(f.ID, FolderPrefix) {
 			if _, ok := wantFolders[f.ID]; !ok {
