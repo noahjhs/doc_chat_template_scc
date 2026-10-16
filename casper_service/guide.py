@@ -171,6 +171,9 @@ class Facts:
     unlocked: bool = False  # it has the key (the kit was opened there)
     restoring: bool = False  # a restore is under way on it
     recovered: bool = False  # every folder has its new Mac again
+    recover_folders: list = field(default_factory=list)  # every mirrored folder on record (labels), whatever its state
+    restoring_folders: list = field(default_factory=list)  # still coming back
+    empty_folders: list = field(default_factory=list)  # restoring, but its mirrors hold nothing for it
 
 
 @dataclass
@@ -247,21 +250,35 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
     """Getting folders back on a new Mac, instead of setting up (recovery v2
     P1: the kit is the key). The key and the Restore yes are given in
     Casper's own window on the Mac, never here."""
+    names = _names(facts.recover_folders)
+    safe = f"Your {names} {'is' if len(facts.recover_folders) == 1 else 'are'} safe on your friends' computers. " if names else ""
     if not facts.recover_mac:
-        say = f"Download Casper and open it on the new Mac: {download_url}\n(Ignore browser warnings. The app is safe.)"
+        say = f"{safe}Download Casper and open it on the new Mac: {download_url}\n(Ignore browser warnings. The app is safe.)"
         return Stage("recover_install", f"They lost their Mac and are signed in on a new one. Say exactly \"{say}\" and nothing more. "
                      "Opening it connects the new Mac.", say=say)
     if facts.restoring:
-        return Stage("recover_copy", "Their folders are coming back; the page shows its progress. Say only: \"Restoring now. You can leave "
-                     "this page open.\" If they ask how it's going, check protection_status.",
-                     say="Restoring now. You can leave this page open.")
+        # Not a gate: each folder is its own restore. Requests about a folder that is back are acted on.
+        waiting = _names(facts.restoring_folders)
+        empty = _names(facts.empty_folders)
+        now = ("Their folders are coming back; the page shows each one's progress. Say only: \"Restoring now. You can leave this page open.\" "
+               "If they ask how it's going, check protection_status. ")
+        now += (f"Still coming back: {waiting}; only those. For any other folder, and for deleted files or earlier versions, act on their request "
+                "(restore_version, restore_as_of, show_restore_picker) as usual. " if waiting else
+                "No folder is still being fetched; act on restore requests as usual. ")
+        if empty:
+            now += (f"{empty}: nothing reached your friends' computers before the Mac was lost, so there is nothing to restore. "
+                    "Say so plainly if asked; never say it is still coming. ")
+        return Stage("recover_copy", now, ("*",), say="Restoring now. You can leave this page open.")
     if not facts.unlocked:
-        return Stage("recover_unlock", "Say only: \"In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your "
-                     "recovery kit file and its passphrase ready.\" If they have no kit: it can't be rebuilt without it yet; say so plainly.",
-                     say="In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your recovery kit file and its passphrase ready.")
-    return Stage("recover_choose", "Say only: \"Casper's window on your Mac lists your folders. Choose Restore there.\" Restoring is theirs to "
-                 "say, in that window; you can't do it for them.",
-                 say="Casper's window on your Mac lists your folders. Choose Restore there.")
+        say = "In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your recovery kit file and its passphrase ready."
+        return Stage("recover_unlock", f"Say only: \"{say}\" If they have no kit: it can't be rebuilt without it yet; say so plainly.", say=say)
+    say = f"{safe}Casper's dialog on your Mac offers to bring {'it' if len(facts.recover_folders) == 1 else 'them'} back. Choose Restore there."
+    return Stage("recover_choose", f"Say only: \"{say}\" Restoring is theirs to say, in that dialog; you can't do it for them.", say=say)
+
+
+def _names(labels: list) -> str:
+    """"Documents and Pictures" / "Documents, Pictures and Music"."""
+    return labels[0] if len(labels) == 1 else (", ".join(labels[:-1]) + " and " + labels[-1]) if labels else ""
 
 
 def _answered(history: list[dict]) -> set[str]:

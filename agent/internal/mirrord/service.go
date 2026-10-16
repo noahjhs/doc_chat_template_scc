@@ -184,7 +184,8 @@ func (s *Service) Step() {
 				local := len(filesUnder(f.Path))
 				statuses = append(statuses, map[string]any{"folder_id": f.ID, "restoring": true, "need_files": need, "state": state,
 					"local_files": local, "overlaid_from_catcher": overlaid, "error": errString(err),
-					"settled_for_s": s.settledFor(f, err == nil && need == 0 && state == "idle" && local > 0)})
+					"settled_for_s": s.settledFor(f, err == nil && need == 0 && state == "idle" && local > 0),
+					"empty_for_s": s.emptyFor(f.ID, err == nil && need == 0 && state == "idle" && local == 0 && overlaid == 0)})
 				continue
 			}
 			st, risk := s.Mgr.OwnedStatus(f)
@@ -295,6 +296,27 @@ func (s *Service) settledFor(f mirror.OwnedFolder, looksDone bool) int {
 	if !ok {
 		since = time.Now()
 		s.settled[f.ID] = since
+	}
+	return int(time.Since(since).Seconds())
+}
+
+// emptyFor is how long (seconds) a restoring folder has been idle with
+// nothing in it and nothing left to fetch: its mirrors hold nothing for it.
+func (s *Service) emptyFor(id string, empty bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled == nil {
+		s.settled = map[string]time.Time{}
+	}
+	key := id + "/empty"
+	if !empty {
+		delete(s.settled, key)
+		return 0
+	}
+	since, ok := s.settled[key]
+	if !ok {
+		since = time.Now()
+		s.settled[key] = since
 	}
 	return int(time.Since(since).Seconds())
 }

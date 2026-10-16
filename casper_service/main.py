@@ -3000,6 +3000,8 @@ def _status_text(db, f) -> str:
     if f["status"] == "awaiting_consent":
         return f"{f['label']}: NOT protected yet, waiting for the person to click Mirror in the Casper dialog (or Telegram)."
     if f["restore_host_id"] and st.get("restoring"):
+        if _restore_empty(st):
+            return f"{f['label']}: nothing to restore: its mirrors hold nothing for it (the first copy never finished before the Mac was lost)."
         state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
         return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
     if not st:
@@ -3621,6 +3623,15 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             folders = db.execute("SELECT owner_host_id, restore_host_id FROM mirror_folders WHERE owner_user_id = ? AND status = 'active'",
                                  (user_id,)).fetchall()
             facts.restoring = any(r["restore_host_id"] in connected for r in folders)
+            # Every folder Casper has on record, whatever state it's in, and per folder how its restore is going.
+            rows = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at", (user_id,)).fetchall()
+            facts.recover_folders = [r["label"] for r in rows]
+            for r in rows:
+                if r["restore_host_id"] in connected:
+                    if _restore_empty(mirroring.latest_status(db, r["id"]) or {}):
+                        facts.empty_folders.append(r["label"])
+                    else:
+                        facts.restoring_folders.append(r["label"])
             lost = any(r["restore_host_id"] is None and r["owner_host_id"] not in connected for r in folders)
             facts.recovering = facts.restoring or lost
             facts.recover_mac = bool(connected)
@@ -3673,6 +3684,15 @@ def _copy_progress(user_id: int) -> str:
     return f"Copying {f['label']}: {pct:.0f}%"
 
 
+EMPTY_RESTORE_AFTER_SECONDS = 60  # idle with nothing in it this long: the mirrors hold nothing for it
+
+
+def _restore_empty(st: dict) -> bool:
+    """A restoring folder whose mirrors have nothing for it (it never finished
+    copying before the Mac was lost)."""
+    return bool(st.get("restoring")) and st.get("empty_for_s", 0) >= EMPTY_RESTORE_AFTER_SECONDS
+
+
 def _restore_progress(user_id: int) -> str:
     """How a restore is going, in a few words (from the new Mac's own report)."""
     with get_db() as db:
@@ -3681,7 +3701,10 @@ def _restore_progress(user_id: int) -> str:
         lines = []
         for f in rows:
             st = mirroring.latest_status(db, f["id"]) or {}
-            lines.append(f"Restoring {f['label']}: {st.get('local_files', 0)} files so far…")
+            if _restore_empty(st):
+                lines.append(f"{f['label']}: nothing to bring back; it never finished copying to your friends' computers.")
+            else:
+                lines.append(f"Restoring {f['label']}: {st.get('local_files', 0)} files so far…")
     return "\n".join(lines)
 
 

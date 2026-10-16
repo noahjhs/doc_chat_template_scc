@@ -881,6 +881,14 @@ def test_guide_setup_gates_go_one_step_at_a_time(app_env):
     assert "Download Casper" in guide.stage_for(F(**r), [], url).say
     assert [step(F(**r, recover_mac=True, **s)) for s in ({}, {"unlocked": True}, {"unlocked": True, "restoring": True}, {"restoring": True})] == [
         "recover_unlock", "recover_choose", "recover_copy", "recover_copy"]
+    # One stuck folder never gates the rest: restores stay open, every folder is listed, an empty one is named.
+    mid = guide.stage_for(F(**r, recover_mac=True, unlocked=True, restoring=True, recover_folders=["Documents", "Pictures"],
+                            restoring_folders=["Documents"], empty_folders=["Pictures"]), [], url)
+    assert mid.tools == ("*",) and "Still coming back: Documents" in mid.now and "Pictures: nothing reached" in mid.now
+    pick = guide.stage_for(F(**r, recover_mac=True, unlocked=True, recover_folders=["Documents", "Pictures"]), [], url)
+    assert "Documents and Pictures are safe" in pick.say and "window" not in pick.say
+    import main
+    assert main._restore_empty({"restoring": True, "empty_for_s": 90}) and not main._restore_empty({"restoring": True, "empty_for_s": 5})
     # Once folders are back: one closing line, then simply set up.
     back = dict(mac_connected=True, recovered=True, folder="active")
     assert step(F(**back)) == "recovered"
