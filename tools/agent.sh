@@ -51,7 +51,7 @@ Follow CLAUDE.md › Background agents. You are in your own worktree on branch $
     [ "$(stat -f %B "$r")" -ge "$((started - 7200))" ] && [ -f "$r/notes.md" ] && [ "$(stat -f %m "$r/notes.md")" -ge "$started" ] && runs+=("$r")
   done
   cat "$log"
-  for r in "${runs[@]}"; do echo; echo "e2e: $r"; sed -n '1,8p' "$r/notes.md"; done
+  for r in ${runs[@]+"${runs[@]}"}; do echo; echo "e2e: $r"; sed -n '1,8p' "$r/notes.md"; done
 
   if [ -z "$(git log --oneline "origin/dev..$branch" 2>/dev/null)" ] && git -C "$wt" diff --quiet && git -C "$wt" diff --cached --quiet; then
     git worktree remove --force "$wt" && git branch -q -D "$branch"
