@@ -39,6 +39,7 @@ build/pyinstaller_work/
 build/pyinstaller_dist/
 build/*.spec
 build/go_macos_dist/
+build/go_windows_dist/
 build/Casper.icns
 build/Casper.iconset/
 

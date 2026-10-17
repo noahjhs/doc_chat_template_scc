@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +69,7 @@ func TestResolvePath_AllowsNonExistentTargetInsideRoot(t *testing.T) {
 
 func TestResolvePath_AbsolutePathOutsideRootRejected(t *testing.T) {
 	h, _ := newTestHandler(t)
-	_, err := h.resolvePath("/etc/passwd", false, false)
+	_, err := h.resolvePath(filepath.Join(t.TempDir(), "passwd"), false, false)
 	if err == nil {
 		t.Fatal("expected an absolute path outside root to be rejected")
 	}
@@ -170,5 +172,26 @@ func TestHomeRootIsFixedAtConstruction(t *testing.T) {
 	// boundary is real, not just a reported string.
 	if _, err := h.resolvePath(t.TempDir(), true, true); err == nil {
 		t.Fatal("expected resolving an unrelated directory to be rejected")
+	}
+}
+
+func TestExpandUserWindowsBackslash(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if got := expandUser("~/Documents"); got != filepath.Join(home, "Documents") {
+		t.Fatalf("~/ : %q", got)
+	}
+	if runtime.GOOS == "windows" {
+		if got := expandUser(`~\Documents`); got != filepath.Join(home, "Documents") {
+			t.Fatalf(`~\ : %q`, got)
+		}
+	}
+}
+
+func TestConfinementIsCaseInsensitiveOnWindowsOnly(t *testing.T) {
+	root := t.TempDir()
+	h := New(root)
+	other := strings.ToUpper(root)
+	if got := h.isConfined(filepath.Join(other, "x")); got != (runtime.GOOS == "windows" || other == root) {
+		t.Fatalf("isConfined(%q) = %v on %s", other, got, runtime.GOOS)
 	}
 }

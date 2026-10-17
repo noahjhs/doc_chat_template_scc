@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -207,11 +208,14 @@ func (h *Handler) isConfined(resolved string) bool {
 	if root == "" {
 		return false
 	}
+	if runtime.GOOS == "windows" { // file names are case-insensitive
+		resolved, root = strings.ToLower(resolved), strings.ToLower(root)
+	}
 	return resolved == root || strings.HasPrefix(resolved, root+string(os.PathSeparator))
 }
 
 func expandUser(path string) string {
-	if path == "~" || strings.HasPrefix(path, "~/") {
+	if path == "~" || strings.HasPrefix(path, "~/") || (runtime.GOOS == "windows" && strings.HasPrefix(path, `~\`)) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return path

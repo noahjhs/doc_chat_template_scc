@@ -261,3 +261,13 @@ def test_the_guide_draws_the_picker_and_both_surfaces_have_every_restore_tool(ap
     shown = guide.visible(messages)
     assert shown[-1]["picker"]["deleted_only"] is True
     assert "picker" not in guide.visible(messages + [{"role": "assistant", "content": "later"}])[-2]  # only the latest one is live
+
+
+def test_short_path_hides_the_username_on_mac_and_windows(app_env):
+    main, _ = app_env
+
+    assert main._short_path("/Users/sam/Casper Restores/Documents") == "~/Casper Restores/Documents"
+    assert main._short_path(r"C:\Users\Sam\Casper Restores\Documents") == "~/Casper Restores/Documents"
+    assert main._short_path(r"C:\Users\Sam\OneDrive\Documents (as of 2026-10-10)") == "~/OneDrive/Documents (as of 2026-10-10)"
+    assert main._short_path("D:/Users/Sam") == "~"
+    assert main._short_path("") == ""

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs Go package tests on the Windows VM (which has no Go): cross-compiles each
 # package's test binary for windows/arm64 here, copies it over SSH and runs it
-# there. The VM must be up (tools/scenario.py start windows) and so holds the
+# there (with the bundled syncthing.exe, if put at C:\\casper-test, for the mirror tests). The VM must be up (tools/scenario.py start windows) and so holds the
 # e2e lock.
 #
 #   tools/win_gotest.sh ./internal/secretstore ./internal/platform ...
@@ -22,7 +22,7 @@ for p in "${pkgs[@]}"; do
   scp "${SSH[@]}" -P 2222 -q "$out/$name.test.exe" "noah@127.0.0.1:C:/casper-test/$name.test.exe"
   echo "== $p"
   # run from the package's own directory name so testdata-free tests behave; -test.v for visibility
-  ssh "${SSH[@]}" -p 2222 noah@127.0.0.1 "cd C:\\casper-test; .\\$name.test.exe '-test.count=1' '-test.v'" || fail=1
+  ssh "${SSH[@]}" -p 2222 noah@127.0.0.1 "cd C:\\casper-test; if (Test-Path C:\\casper-test\\syncthing.exe) { \$env:CASPER_TEST_SYNCTHING='C:\\casper-test\\syncthing.exe' }; .\\$name.test.exe '-test.count=1' '-test.v'" || fail=1
 done
 rm -rf "$out"
 exit $fail

@@ -26,3 +26,9 @@ func freeBytes(p string) (int64, bool) {
 }
 
 const fileManagerName = "Finder"
+
+func killOnExit(*exec.Cmd) error { return nil }
+
+func isCloudOnly(string) bool { return false }
+
+const listensInboundByDefault = true

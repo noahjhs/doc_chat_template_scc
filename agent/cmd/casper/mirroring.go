@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"casper-agent/internal/backup"
@@ -25,6 +26,9 @@ func (d *daemonState) startMirroring() {
 	bin := os.Getenv("CASPER_SYNCTHING")
 	if bin == "" {
 		bin = filepath.Join(filepath.Dir(exe), "syncthing")
+		if runtime.GOOS == "windows" {
+			bin += ".exe"
+		}
 	}
 	if _, err := os.Stat(bin); err != nil {
 		d.logf("mirroring: off (no bundled syncthing at %s)", bin)

@@ -48,7 +48,7 @@ func TestFileTarget(t *testing.T) {
 	if got, _ := FileTarget(root, "taxes/return.pdf", ModeReplace, "", at); got != filepath.Join(root, "taxes", "return.pdf") {
 		t.Fatalf("replace: %q", got)
 	}
-	if got, _ := FileTarget(root, "taxes/return.pdf", ModeCopy, "/dest", at); got != "/dest/taxes/return.pdf" {
+	if got, _ := FileTarget(root, "taxes/return.pdf", ModeCopy, "/dest", at); got != filepath.Join("/dest", "taxes", "return.pdf") {
 		t.Fatalf("folder copy: %q", got)
 	}
 	if got, err := FileTarget(root, "../../escape", ModeReplace, "", at); err != nil || got != filepath.Join(root, "escape") {

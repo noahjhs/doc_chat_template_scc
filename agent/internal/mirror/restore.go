@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -36,6 +37,9 @@ func safeRel(rel string) (string, error) {
 
 // Within reports whether path is root or inside it.
 func Within(root, path string) bool {
+	if runtime.GOOS == "windows" { // case-insensitive file names
+		root, path = strings.ToLower(root), strings.ToLower(path)
+	}
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
@@ -107,7 +111,7 @@ func MoveInto(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(src, dst); err == nil {
+	if err := renameRetry(src, dst); err == nil {
 		return nil
 	}
 	tmp := dst + ".casper-restoring"
@@ -115,12 +119,30 @@ func MoveInto(src, dst string) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := renameRetry(tmp, dst); err != nil {
 		os.Remove(tmp)
 		return err
 	}
 	os.Remove(src)
 	return nil
+}
+
+// renameRetry is os.Rename, tried a few times more on Windows, where a file
+// that Word, Explorer or a virus scanner has open can't be renamed over for a
+// moment (a sharing violation). Elsewhere it's one try.
+func renameRetry(src, dst string) error {
+	err := os.Rename(src, dst)
+	if runtime.GOOS != "windows" {
+		return err
+	}
+	for _, wait := range []time.Duration{50, 150, 400, 1000} {
+		if err == nil || !sharingViolation(err) {
+			return err
+		}
+		time.Sleep(wait * time.Millisecond)
+		err = os.Rename(src, dst)
+	}
+	return err
 }
 
 func copyKeepTimes(src, dst string) error {
@@ -162,7 +184,7 @@ func skipLocal(rel string, d fs.DirEntry) bool {
 	if restoredName.MatchString(base) {
 		return true
 	}
-	return strings.HasPrefix(base, ".syncthing.") || base == ".DS_Store" || strings.HasSuffix(base, ".casper-restoring")
+	return strings.HasPrefix(base, ".syncthing.") || isSystemNoise(base) || strings.HasSuffix(base, ".casper-restoring")
 }
 
 // localAsOf calls fn for each current file that already existed at asOf and

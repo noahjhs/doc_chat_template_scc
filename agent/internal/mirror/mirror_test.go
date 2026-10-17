@@ -120,7 +120,9 @@ func TestMirrorLifecycle(t *testing.T) {
 
 	waitFor(t, "initial mirror", 60*time.Second, func() bool {
 		st, _ := owner.m.OwnedStatus(ownerFolder)
-		return st.Error == "" && st.AtRiskFiles == 0 && len(st.Peers) == 1 && st.Peers[0].Completion == 100 && st.Peers[0].Connected
+		// (an unscanned folder reads as 100% complete: wait for the bytes too)
+		return st.Error == "" && st.AtRiskFiles == 0 && len(st.Peers) == 1 && st.Peers[0].Completion == 100 && st.Peers[0].Connected &&
+			DirSize(mirror.m.HeldPath(fid)) >= 2<<20
 	})
 	held := mirror.m.HeldPath(fid)
 	if f := grepTree(held, "secret-plans", "taxes", "return.pdf", "blue folder"); f != "" {
@@ -296,6 +298,7 @@ func TestRelaysSetListenAddresses(t *testing.T) {
 // local discovery or router port mapping make macOS ask "find devices on
 // local networks?" at launch.
 func TestPresetOptionsBeforeStart(t *testing.T) {
+	t.Setenv("CASPER_LISTEN_INBOUND", "1")
 	home := t.TempDir()
 	cfg := `<configuration version="37">
     <options>
@@ -338,7 +341,7 @@ func TestPhotosLibraryIsCarvedOutAndUnreadableItemsShow(t *testing.T) {
 	os.MkdirAll(lib, 0o755)
 	os.WriteFile(filepath.Join(lib, "p.jpg"), []byte("photo"), 0o644)
 	os.WriteFile(filepath.Join(src, "holiday.txt"), []byte("beach"), 0o644)
-	os.WriteFile(filepath.Join(src, "locked.txt"), []byte("no"), 0o000)
+	makeUnreadable(t, filepath.Join(src, "locked.txt"))
 	// A line the person already had stays.
 	os.WriteFile(filepath.Join(src, ".stignore"), []byte("*.tmp\n"), 0o644)
 
@@ -350,7 +353,8 @@ func TestPhotosLibraryIsCarvedOutAndUnreadableItemsShow(t *testing.T) {
 
 	waitFor(t, "holiday.txt copied, the locked file reported", 60*time.Second, func() bool {
 		st, _ := owner.m.OwnedStatus(f)
-		return st.Error == "" && st.UnreadableItems == 1 && len(st.Peers) == 1 && st.Peers[0].Completion == 100
+		return st.Error == "" && st.UnreadableItems == 1 && len(st.Peers) == 1 && st.Peers[0].Completion == 100 &&
+			DirSize(mirror.m.HeldPath(fid)) > 0
 	})
 	st, _ := owner.m.OwnedStatus(f)
 	if st.LocalFiles != 2 || len(st.UnreadableNames) != 1 || st.UnreadableNames[0] != "locked.txt" {
@@ -368,5 +372,17 @@ func TestPhotosLibraryIsCarvedOutAndUnreadableItemsShow(t *testing.T) {
 	}
 	if !IsPhotosLibrary("Photos Library.photoslibrary") || IsPhotosLibrary("photoslibrary-notes") {
 		t.Fatal("IsPhotosLibrary")
+	}
+}
+
+func TestWithoutInboundOnlyLoopbackListens(t *testing.T) {
+	t.Setenv("CASPER_LISTEN_INBOUND", "0")
+	m := New("syncthing", t.TempDir(), t.TempDir(), "", nil)
+	got := m.listenAddresses()
+	if len(got) != 1 || got[0] != "tcp://127.0.0.1:22000" {
+		t.Fatalf("listen = %v", got)
+	}
+	if !isLoopbackAddr("tcp://127.0.0.1:22000") || isLoopbackAddr("tcp://192.168.1.4:22000") || isLoopbackAddr("relay://r.example:22067/?id=X") {
+		t.Fatal("isLoopbackAddr")
 	}
 }

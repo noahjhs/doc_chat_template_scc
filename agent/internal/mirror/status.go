@@ -145,7 +145,7 @@ func (m *Manager) OwnedStatus(f OwnedFolder) (FolderStatus, []string) {
 			}
 		}
 	}
-	st.UnreadableNames = m.unreadable(f.ID)
+	st.UnreadableNames = append(m.unreadable(f.ID), m.cloudOnlyFiles(f.ID, f.Path)...)
 	st.UnreadableItems = len(st.UnreadableNames)
 	files := listFiles(f.Path)
 	st.LocalFiles = len(files)

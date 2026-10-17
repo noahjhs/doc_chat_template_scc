@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 // OpenURL opens a link (or a file) with the default handler.
@@ -50,3 +51,29 @@ func FreeBytes(path string) int64 {
 		p = parent
 	}
 }
+
+// KillOnExit ties a started child process to this one: when Casper goes away
+// by any route (crash, End task, logoff), Windows ends the child too. A no-op
+// on a Mac, where the daemon stops Syncthing itself and launchd cleans up.
+func KillOnExit(cmd *exec.Cmd) error { return killOnExit(cmd) }
+
+// IsCloudOnly reports a file that exists only in the cloud (a OneDrive
+// "files on demand" placeholder): reading it would download it. Always false
+// off Windows.
+func IsCloudOnly(path string) bool { return isCloudOnly(path) }
+
+// ListensInbound says whether Casper's Syncthing may accept direct
+// connections. On Windows it doesn't by default: a program that listens on
+// the network makes Windows Firewall ask the person to allow it, and the
+// pilot has no installer step to add a rule. Peers then reach it through
+// Casper's relay (or it dials them). CASPER_LISTEN_INBOUND=1 overrides.
+func ListensInbound() bool {
+	if v := os.Getenv("CASPER_LISTEN_INBOUND"); v != "" {
+		return v == "1"
+	}
+	return listensInboundByDefault
+}
+
+// HasCloudPlaceholders: this OS has files that exist only in the cloud, so
+// folders are worth scanning for them.
+func HasCloudPlaceholders() bool { return runtime.GOOS == "windows" }

@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -109,13 +110,20 @@ type Manager struct {
 	// appliedListen is the listen set last pushed to Syncthing (base +
 	// relays), so Apply only patches options when it changes.
 	appliedListen string
+	// cloud caches the OneDrive placeholder scan per folder (cloudonly.go).
+	cloud      map[string]cloudScan
+	cloudCheck func(path string) bool // nil where nothing is cloud-only (a Mac)
 }
 
 func New(bin, home, dataDir, listen string, logf func(string, ...any)) *Manager {
 	if listen == "" {
 		listen = "default"
 	}
-	return &Manager{bin: bin, home: home, dataDir: dataDir, listen: listen, logf: logf, client: &http.Client{Timeout: 30 * time.Second}}
+	m := &Manager{bin: bin, home: home, dataDir: dataDir, listen: listen, logf: logf, client: &http.Client{Timeout: 30 * time.Second}}
+	if platform.HasCloudPlaceholders() {
+		m.cloudCheck = platform.IsCloudOnly
+	}
+	return m
 }
 
 func randomKey() string {
@@ -170,7 +178,13 @@ func (m *Manager) Start() error {
 	}
 	m.cmd = cmd
 	m.mu.Unlock()
-	go func() { _ = cmd.Wait() }()
+	if err := platform.KillOnExit(cmd); err != nil {
+		m.logf("mirror: couldn't tie syncthing to Casper's lifetime: %s", err)
+	}
+	go func() {
+		_ = cmd.Wait()
+		logFile.Close() // Windows can't delete or move a file that's still open
+	}()
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -256,6 +270,11 @@ func (m *Manager) baseOptions() map[string]any {
 // Syncthing's "default", which also joins the public relay pool.
 func (m *Manager) baseListen() []string {
 	if m.listen == "" || m.listen == "default" {
+		if !platform.ListensInbound() {
+			// Loopback only: nothing for Windows Firewall to ask about.
+			// Peers reach this PC through Casper's relay (see ListensInbound).
+			return []string{"tcp://127.0.0.1:22000"}
+		}
 		return []string{"tcp://0.0.0.0:22000", "quic://0.0.0.0:22000"}
 	}
 	return []string{m.listen}
@@ -286,7 +305,13 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Signal(os.Interrupt)
+		if runtime.GOOS == "windows" {
+			// Windows can't send a process an interrupt; ask Syncthing to
+			// shut itself down over its own API, then fall through to Kill.
+			m.shutdownLocked()
+		} else {
+			_ = m.cmd.Process.Signal(os.Interrupt)
+		}
 		done := make(chan struct{})
 		go func() { _, _ = m.cmd.Process.Wait(); close(done) }()
 		select {
@@ -296,6 +321,22 @@ func (m *Manager) Stop() {
 		}
 	}
 	m.cmd = nil
+}
+
+// shutdownLocked posts Syncthing's shutdown request (m.mu held).
+func (m *Manager) shutdownLocked() {
+	if m.guiAddr == "" {
+		return
+	}
+	req, err := http.NewRequest("POST", "http://"+m.guiAddr+"/rest/system/shutdown", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("X-API-Key", m.apiKey)
+	c := &http.Client{Timeout: 5 * time.Second}
+	if resp, err := c.Do(req); err == nil {
+		resp.Body.Close()
+	}
 }
 
 func (m *Manager) DeviceID() string {
@@ -372,6 +413,15 @@ func (m *Manager) reconnect(deviceID string) error {
 	return m.do("PATCH", path, map[string]any{"paused": false}, nil)
 }
 
+func isLoopbackAddr(a string) bool {
+	u, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
+}
+
 func (m *Manager) get(path string, out any) error    { return m.do("GET", path, nil, out) }
 func (m *Manager) put(path string, body any) error   { return m.do("PUT", path, body, nil) }
 func (m *Manager) patch(path string, body any) error { return m.do("PATCH", path, body, nil) }
@@ -395,7 +445,7 @@ func (m *Manager) Addresses() []string {
 	if err := m.get("/rest/system/status", &st); err == nil {
 		for _, svc := range st.ConnectionServiceStatus {
 			for _, a := range append(svc.LANAddresses, svc.WANAddresses...) {
-				if a != "" && !strings.Contains(a, "0.0.0.0") && !strings.Contains(a, "[::]") {
+				if a != "" && !strings.Contains(a, "0.0.0.0") && !strings.Contains(a, "[::]") && !isLoopbackAddr(a) {
 					set[a] = true
 				}
 			}
@@ -410,6 +460,15 @@ func (m *Manager) Addresses() []string {
 			if !strings.Contains(a, "0.0.0.0") {
 				out = append(out, a)
 			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	if (m.listen == "" || m.listen == "default") && !platform.ListensInbound() {
+		// Not listening for direct connections: only relay addresses are real.
+		out := make([]string, 0, len(set))
+		for a := range set {
+			out = append(out, a)
 		}
 		sort.Strings(out)
 		return out
@@ -605,8 +664,8 @@ func (m *Manager) Apply(d Desired) error {
 	}
 	for _, f := range d.Owned { // new and existing folders alike
 		if _, ok := wantFolders[f.ID]; ok {
-			if err := m.carveOut(f.ID); err != nil {
-				m.logf("mirror: leaving the Photos library out of %s: %s", f.ID, err)
+			if err := m.carveOut(f.ID, f.Path); err != nil {
+				m.logf("mirror: leaving out what can't be mirrored from %s: %s", f.ID, err)
 			}
 		}
 	}

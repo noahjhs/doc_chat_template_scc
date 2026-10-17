@@ -3059,8 +3059,14 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
 
 
 def _short_path(p: str) -> str:
-    """/Users/<name>/Casper Restores/Documents -> ~/Casper Restores/Documents: what a person reads."""
-    return re.sub(r"^/Users/[^/]+(?=/|$)", "~", str(p or ""))
+    """/Users/<name>/Casper Restores/Documents -> ~/Casper Restores/Documents: what a person reads.
+    A Windows path (C:\\Users\\<name>\\OneDrive\\Documents) becomes ~/OneDrive/Documents: the same
+    shape, forward slashes, no username."""
+    p = str(p or "")
+    m = re.match(r"^[A-Za-z]:[\\/]+Users[\\/]+[^\\/]+(?=[\\/]|$)", p)
+    if m:
+        return ("~" + p[m.end():]).replace("\\", "/")
+    return re.sub(r"^/Users/[^/]+(?=/|$)", "~", p)
 
 
 def _first_copy_done(db, f) -> bool:
