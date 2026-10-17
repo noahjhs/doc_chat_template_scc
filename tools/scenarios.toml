@@ -16,12 +16,14 @@
 
 [deployments.dev]
 auth_url = "https://dev-auth.casperagent.dev"
+win_product = "Casper Dev"  # the Windows app's name, so its install folder
 download_url = "https://dev-auth.casperagent.dev/download/casper/macos"
 auth_domain = "dev-auth.casperagent.dev"
 relay_domain = "dev-relay.casperagent.dev"
 
 [deployments.test]  # the end-to-end test stack (tools/test_stack.sh); --env test
 auth_url = "https://test-auth.casperagent.dev"
+win_product = "Casper Test"  # the Windows app's name, so its install folder
 download_url = "https://test-auth.casperagent.dev/download/casper/macos"
 auth_domain = "test-auth.casperagent.dev"
 relay_domain = "test-relay.casperagent.dev"
@@ -104,6 +106,13 @@ next = """
 Riley: tools/scenario.py ask riley-headless "Invite my friend Noah to Mutual Aid."
 Then follow the invitation in noah-mac."""
 
+[scenarios.invite-windows]
+about = "Like invite-headless, but Noah is on the Windows 11 PC (for automated runs: tools/e2e.sh invite-windows)."
+checkpoints = ["riley-headless-before-invite", "noah-windows-fresh"]
+next = """
+Riley: tools/scenario.py ask riley-headless "Invite my friend Noah to Mutual Aid." --env test
+Then follow the invitation in the Windows VM (tools/vmgui.py shot windows)."""
+
 [scenarios.lost-mac]
 about = "Noah sets up with the guide, mirrors Documents to headless Riley and makes a recovery kit; his Mac is then lost, and a fresh Mac recovers from the kit (for automated runs: tools/e2e.sh lost-mac). Same start as invite-headless."
 checkpoints = ["riley-headless-before-invite", "noah-fresh"]
@@ -111,8 +120,18 @@ next = """
 Run it as the e2e-run skill's "lost-mac" section says: the invite-headless run
 first, then `tools/scenario.py newmac noah --vnc --env test` for the new Mac."""
 
+[checkpoints.noah-windows-installed]
+extends = "noah-windows-fresh"
+about = "Noah: Casper installed on the Windows PC, running; no account yet."
+steps = ["install_casper"]
+
+[checkpoints.noah-windows-paired]
+extends = "noah-windows-installed"
+about = "Noah: Casper installed on the Windows PC, with an account, paired."
+steps = ["create_account", "pair"]
+
 [scenarios.windows]
-about = "A Windows 11 PC to try things on by hand or by script (no Casper app for Windows yet)."
+about = "A Windows 11 PC to try things on by hand or by script (--env to pick the deployment)."
 checkpoints = ["noah-windows-fresh"]
 next = """
 Screen: tools/vmgui.py shot windows (or `open windows` to watch in Screen Sharing); commands:

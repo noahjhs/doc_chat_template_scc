@@ -12,7 +12,7 @@ quietly, finish on your own, and leave a report.
 ## Inputs (in the prompt that started you)
 
 - `RUN`: the run directory. Everything you write goes there.
-- `SCENARIO`: default `invite-headless`. `lost-mac` also has its own section at the end: do the run above first (steps 1 to 6), then that section.
+- `SCENARIO`: default `invite-headless`. `lost-mac` also has its own section at the end: do the run above first (steps 1 to 6), then that section. `invite-windows` is the same run with Noah on a Windows 11 PC: see the section `Scenario invite-windows`, which says what differs; read it first.
 - `COMMIT`: the commit under test (the test stack already runs it).
 
 ## Ground rules
@@ -216,3 +216,65 @@ asks for a second sign-in or the old Mac's name; and any leftover or
 duplicate Mac in Riley's or Noah's views (the lost Mac still listed).
 Passphrases and kit contents are secret: not in the report, not in
 screenshots left on screen longer than needed.
+
+## Scenario `invite-windows`: Noah is on a Windows 11 PC
+
+The invite-headless run (steps 1 to 7 above) with Noah's computer being the
+Windows 11 ARM VM (persona `noah-windows`, VM name `windows`). Same ground
+rules, same report, same 75 minutes; the run's own findings matter most where
+the experience **differs from the Mac's**: tag those **Windows** in the report
+(in addition to BUG, Friction, ...) and say what the Mac does.
+
+Differences in the tools:
+
+- Reset: `tools/scenario.py reset invite-windows --vnc --env test` (`--vnc` is
+  harmless: the Windows VM is always on VNC and never opens a window; the
+  e2e lock is already held by tools/e2e.sh). Restores the clean `windows-base`
+  snapshot, builds headless Riley.
+- Screen: `tools/vmgui.py shot windows "$RUN/screens/NN-what.jpg"` (1280x960),
+  then `click`/`dclick`/`type`/`key windows ...`. Keys are vncdo's names: `super`
+  is the Windows key, `alt-tab`, `alt-f4`, `ctrl-l` (address bar), `enter`. Never
+  `ctrl-alt-del`. Scroll with `scroll windows down`, or the scrollbar.
+- Commands: `tools/scenario.py exec noah-windows "<powershell>"` runs in a
+  session of its own (not the desktop): fine to read files, logs and the registry
+  and to open a link in the person's browser through the interactive-session
+  launcher: `.venv/bin/python tools/winvm.py gui 'start msedge "<link>"'`
+  (or `start chrome` if Chrome is installed; check which browser the VM has, and use
+  Edge, the default, if both). Never use exec to do what a person clicks.
+- Email: `tools/scenario.py mail noah@casper-test.invalid --env test`, as before.
+
+The run:
+
+1. Reset, Riley invites Noah (step 2), read the email (step 3) and open its
+   link in Edge through the launcher. Screenshot what the browser shows first.
+2. Noah, by clicking only: the invite page → "Start with the guide" → create an
+   account (username starting `noah`) → Accept → the guide's Download button (it
+   must hand out the **Windows** installer, not the Mac zip) → get past the
+   browser's own warning (Edge: the download panel's "Keep", maybe twice, and
+   "Keep anyway") → open the installer → **SmartScreen** ("Windows protected your
+   PC": More info → Run anyway; note the exact words and the number of clicks, and
+   whether the guide told Noah about it beforehand) → the installer's own dialogs → the
+   app starts → the guide carries on (the pairing hand-off through the browser's
+   "Open Casper?" question for `casper-test://`; note it) → choose a folder
+   (Documents; note Windows' folder picker wording) → Start → **firewall prompt**
+   (the design avoids one, so any "Windows Defender Firewall has blocked / allow
+   access" window is a BUG: screenshot it) → Casper's **Mirror dialog** → copying →
+   Protected → the recovery kit (from the **tray** ghost icon, perhaps behind the "^"
+   overflow arrow: note how findable it is; any passphrase, twice; the Save panel's
+   default folder and drive list) → the give-back question → done.
+3. Both sides agree (step 5): ask Riley's agent "What am I holding for Noah?" (`-c`).
+4. Look specifically for, on Windows: wording that says "Mac", "macOS",
+   "Finder", "Keychain", "menu bar", "Applications" or "ghost menu" (should be
+   "computer", "File Explorer", the tray, ...); a console window flashing; a second
+   Casper window or tray icon; the folder shown as `~/...` where Windows would say
+   `C:\Users\noah\...`; OneDrive-redirected Documents; any dialog partly off screen
+   at 1280x960; Defender ("virus") warnings; the time each wait took against the Mac's
+   (about 8 minutes in all).
+5. Logs for the report, over exec: `%LOCALAPPDATA%\Casper-test\command_log.txt`,
+   `%LOCALAPPDATA%\Casper-test\syncthing\syncthing.log` (tail only; no secrets), and
+   the Application event log for crashes (`Get-WinEvent -FilterHashtable @{LogName='Application';Level=2} -MaxEvents 5`).
+6. `tools/scenario.py stop invite-windows --env test` (shuts Windows down, wipes Riley).
+
+State plainly in the summary whether Noah reached "done" **with nothing a
+person couldn't do by clicking and no BUG on Windows**: that decides whether
+Casper stops saying "macOS only", so be exact and don't round up.

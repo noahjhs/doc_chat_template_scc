@@ -23,7 +23,8 @@
 
 The Windows persona (noah-windows) is a headless QEMU VM (tools/winvm.py): reset restores
 its clean `windows-base` snapshot and boots it; its screen is always served over VNC (tools/vmgui.py
-windows ...), and it holds the e2e lock while it runs. It has no Casper account steps yet.
+windows ...), and it holds the e2e lock while it runs. Its Casper steps (install_casper, create_account, pair)
+run the installer and `Casper.exe setup` over SSH; `winvm.run_gui` starts programs on its desktop.
 
 How it works: each persona's VM is cloned fresh from a local snapshot
 (copy-on-write, instant), their dev accounts are deleted, and the checkpoint's
@@ -363,7 +364,25 @@ def step_quiet_apps(p, ctx, *names):
     return "quit " + ", ".join(names)
 
 
+def win_casper(p) -> str:
+    """The installed Casper.exe in the Windows VM (per deployment: Casper, Casper Dev, Casper Test)."""
+    return f"\"$env:LOCALAPPDATA\\Programs\\{DEPLOY['win_product']}\\Casper.exe\""
+
+
 def step_install_casper(p, ctx):
+    if p.get("windows"):
+        url = DEPLOY["auth_url"] + "/download/casper/windows?arch=arm64"
+        exe = win_casper(p)
+        winvm.run(f"""Get-Process Casper,syncthing -EA 0 | Stop-Process -Force
+            Invoke-WebRequest -UseBasicParsing '{url}' -OutFile C:\\casper-setup.exe
+            $r = Start-Process C:\\casper-setup.exe -ArgumentList '/VERYSILENT','/NOLAUNCH' -Wait -PassThru
+            if ($r.ExitCode -ne 0) {{ throw "installer exited $($r.ExitCode)" }}""", timeout=300)
+        winvm.run_gui(f'set CASPER_SCRIPTED_SETUP=1 && "%LOCALAPPDATA%\\Programs\\{DEPLOY["win_product"]}\\Casper.exe"')
+        for _ in range(30):
+            if "Casper app: running" in winvm.run(f"& {exe} setup status 2>&1; exit 0").stdout:
+                return "installed and running"
+            time.sleep(2)
+        raise RuntimeError("Casper didn't start on Windows")
     url = DEPLOY["download_url"]
     vm_exec(p["vm"], f"""
         pkill -x Casper; sleep 1
@@ -383,6 +402,9 @@ def step_create_account(p, ctx):
         token = api("POST", "/signup", {"username": p["username"], "password": password})["token"]
         save_headless_state(p, {"password": password, "session": token})
         return f"account {p['username']}"
+    if p.get("windows"):
+        winvm.run(f"& {win_casper(p)} setup account create --username '{p['username']}'", timeout=120)
+        return f"account {p['username']}"
     vm_exec(p["vm"], f"'{CASPER}' setup account create --username '{p['username']}'")
     return f"account {p['username']}"
 
@@ -398,6 +420,8 @@ def step_pair(p, ctx):
         save_headless_state(p, st)
         headless_start(p, st)
         return f"Paired: {name}, running headless on the mini"
+    if p.get("windows"):
+        return winvm.run(f"& {win_casper(p)} setup pair", timeout=120).stdout.strip().splitlines()[-1]
     return vm_exec(p["vm"], f"'{CASPER}' setup pair", timeout=120).splitlines()[-1]
 
 
