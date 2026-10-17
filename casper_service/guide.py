@@ -170,6 +170,7 @@ class Facts:
     recover_mac: bool = False  # the new Mac is connected
     unlocked: bool = False  # it has the key (the kit was opened there)
     restoring: bool = False  # a restore is under way on it
+    old_mac_retired: bool = False  # the lost Mac is no longer paired
     recovered: bool = False  # every folder has its new Mac again
     recover_folders: list = field(default_factory=list)  # every mirrored folder on record (labels), whatever its state
     safe_folders: list = field(default_factory=list)  # of those, the ones whose own last report shows a finished copy on a mirror
@@ -214,7 +215,8 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         # The recovery's closing line, once; after it they're simply set up.
         if "recovered" in spoken:
             return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
-        say = "Your folders are back on this Mac, and Casper keeps them mirrored." + _landing(facts)
+        say = ("Your folders are back on this Mac, and Casper keeps them mirrored." + _landing(facts)
+               + (" Your old Mac is no longer paired with your account; its copies and history are kept." if facts.old_mac_retired else ""))
         return Stage("recovered", f"Say only: \"{say}\"", (), ({"label": "Show me in Finder", "action": "show_restores", "box": True},) if facts.restore_places else (), say=say)
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "

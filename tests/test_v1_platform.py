@@ -430,7 +430,9 @@ def test_an_accepted_invite_stays_usable_until_the_first_mirror_runs(app_env):
             main.trust.complete_invites(db, _user_id(main, "riley2"))
         assert client.get("/invites/info", params={"code": code}).json()["valid"] is False
         assert "already been used" in _mcp(client, riley_agent, "redeem_invite", code=code, preview=False)
-        assert "Open invites" not in _mcp(client, sam_agent, "my_casper")
+        ledger = _mcp(client, sam_agent, "my_casper")
+        assert "Open invites" not in ledger
+        assert "never say they haven't accepted" in ledger and "riley2 (invited as Riley): accepted" in ledger  # a finished invite stays true
 
 
 def test_invite_with_no_offering_sets_one_up_in_the_same_yes(app_env):
@@ -1230,6 +1232,9 @@ def test_restore_without_an_agent_then_promotion(app_env):
         guide.save_new(rid, 0, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Old chat.", "_stage": "recovery_kit"}])
         assert client.post("/profile/lost-mac", headers=riley).status_code == 200
         assert guide.load_history(rid) == []  # recovery opens a fresh thread, not the old chat
+        with main.get_db() as db:  # the new Mac signs in after they said so
+            db.execute("UPDATE host_pairings SET paired_at = datetime('now', '+1 minute') WHERE routing_key = 'rk-new'")
+            db.execute("UPDATE host_pairings SET paired_at = datetime('now', '-1 day') WHERE routing_key = 'rk-old'")
         assert main._guide_stage(rid, []).name == "recover_unlock"
         assert list_(new, unlocked=True).status_code == 200  # the kit was opened on the new Mac
         assert main._guide_stage(rid, []).name == "recover_choose"
@@ -1253,12 +1258,15 @@ def test_restore_without_an_agent_then_promotion(app_env):
         report(new, 10)
         owned = client.get("/hosts/mirror-config", headers=new).json()["owned"]
         assert [(o["folder_id"], o["path"], o["restore"]) for o in owned] == [("casper-f1", "/Users/x/Casper Restores/Documents", False)]
-        assert client.get("/hosts/mirror-config", headers=old).json()["owned"] == []  # the lost Mac, if it turns up, has nothing to send
+        assert client.get("/hosts/mirror-config", headers=old).status_code == 401  # the lost Mac is retired: its token is dead
         with main.get_db() as db:
             row = db.execute("SELECT owner_host_id, restore_host_id, restore_path, path FROM mirror_folders WHERE id = 'casper-f1'").fetchone()
         assert (row["owner_host_id"], row["restore_host_id"], row["restore_path"], row["path"]) == (new_id, None, None, "/Users/x/Casper Restores/Documents")
         assert main._guide_stage(rid, []).name not in ("recover_install", "recover_unlock", "recover_choose", "recover_copy")
         assert list_(new).json()["folders"] == []  # nothing left to recover here
+        # The lost Mac is retired: no longer paired or listed, and its token no longer works.
+        assert [h["host"] for h in main._mcp_list_hosts(rid) if h["role"] == "owner"] == ["new-mac"]
+        assert client.get("/hosts/mirror-config", headers=old).status_code == 401
 
 
 def test_legacy_bundle_is_ciphertext_written_once_and_key_scheme_is_served(app_env):

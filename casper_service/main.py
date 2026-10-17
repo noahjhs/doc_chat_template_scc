@@ -2334,6 +2334,12 @@ def _mcp_my_casper(user_id: int) -> str:
                 who = trust.username(db, i["used_by_user_id"]) if i["used_by_user_id"] else None
             state = f"accepted by {who}, still setting up" if who else f"expires {i['expires_at'][:10]}"
             lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}{' to join ' + gname if gname else ''}, {state} [invite {i['id']}]")
+    with get_db() as db:
+        done = [(i, trust.username(db, i["used_by_user_id"])) for i in trust.accepted_invites(db, user_id)]
+    if done:
+        lines.append("Invites already accepted and set up (these friends are in; never say they haven't accepted):")
+        for i, who in done:
+            lines.append(f"  - {who}{' (invited as ' + i['note'] + ')' if i['note'] else ''}: accepted {i['used_at'][:10]}, first mirror running [invite {i['id']}]")
     kinds = {"backup_peer": "backup", "mirror_peer": "mirror", "catcher_peer": "catcher"}
     if given:
         lines.append("Space you give friends (everything arrives encrypted; you can't read it):")
@@ -2850,12 +2856,16 @@ def report_mirror_status(body: dict, authorization: str = Header(default="")):
         attached = _attached_or_401(db, authorization)
         nudges, promoted = mirroring.store_status(db, attached["user_id"], body.get("folders") or [], attached["host_id"])
         new_home = trust.host_label(db, attached["user_id"], attached["host_id"])
+    retired: list[str] = []
     for f in promoted:  # the old row still names the lost Mac; the peers must learn the new one
         with get_db() as db:
             now = mirroring.folder_row(db, f["id"])
+        retired = retired or _retire_lost_macs(attached["user_id"], attached["host_id"])
         _refresh_folder_parties(now)
         _mirror_refresh(f["owner_user_id"], f["owner_host_id"])  # the lost Mac, if it turns up: it has nothing to send now
         notify(attached["user_id"], f"{f['label']} is back on {new_home}, and this Mac keeps it mirrored now.")
+    if promoted and retired:
+        notify(attached["user_id"], f"{_names_of(retired)} is no longer paired with your account. Its copies and history are kept.")
     for n in nudges:
         st = n["status"]
         notify(
@@ -2865,6 +2875,48 @@ def report_mirror_status(body: dict, authorization: str = Header(default="")):
             "otherwise, ask your agent about adding a mirror or a catcher.",
         )
     return {"ok": True}
+
+
+def _names_of(labels: list[str]) -> str:
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def _retire_lost_macs(user_id: int, new_host_id: int) -> list[str]:
+    """Once the new Mac has taken over every folder, the Mac they said they
+    lost is retired: its device token and command key go (the pairing row),
+    it stops being a peer for anyone's mirrors, and it drops out of their
+    hosts. Folder history on friends' computers is untouched. Returns the
+    retired Macs' names."""
+    with get_db() as db:
+        profile = db.execute("SELECT lost_mac_at FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
+        if not profile or not profile["lost_mac_at"]:
+            return []
+        if db.execute("SELECT 1 FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' "
+                      "AND (restore_host_id IS NOT NULL OR owner_host_id != ?)", (user_id, new_host_id)).fetchone():
+            return []  # something still lives on, or is coming back to, another Mac
+        old = db.execute(
+            "SELECT h.id, h.routing_key, uh.label FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key "
+            "JOIN user_hosts uh ON uh.host_id = h.id AND uh.user_id = hp.user_id "
+            "WHERE hp.user_id = ? AND h.id != ? AND datetime(hp.paired_at) < datetime(?)",
+            (user_id, new_host_id, profile["lost_mac_at"])).fetchall()
+        for r in old:
+            db.execute("DELETE FROM host_pairings WHERE routing_key = ? AND user_id = ?", (r["routing_key"], user_id))
+            db.execute("DELETE FROM environment_hosts WHERE host_id = ? AND environment_id IN (SELECT id FROM environments WHERE user_id = ?)",
+                       (r["id"], user_id))
+            db.execute("DELETE FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, r["id"]))
+            db.execute("UPDATE mirror_targets SET removed_at = ? WHERE peer_host_id = ? AND peer_owner_user_id = ? AND removed_at IS NULL",
+                       (trust.now_iso(), r["id"], user_id))
+        labels = [r["label"] for r in old]
+    for r in old:
+        for f in _mirror_folders_with_peer(r["id"]):
+            _refresh_folder_parties(f)
+    return labels
+
+
+def _mirror_folders_with_peer(host_id: int) -> list:
+    with get_db() as db:
+        return db.execute("SELECT DISTINCT mf.* FROM mirror_folders mf JOIN mirror_targets mt ON mt.folder_id = mf.id "
+                          "WHERE mt.peer_host_id = ? AND mf.status = 'active'", (host_id,)).fetchall()
 
 
 @app.post("/hosts/consent")
@@ -3657,7 +3709,12 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
         )
         profile = db.execute("SELECT lost_mac_at, recovery_unlocked_at FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
         if profile and profile["lost_mac_at"]:
-            connected = {c["host_id"] for c in _own_configs(user_id).values()}
+            # The new Mac is one paired since they said they lost the old one: the old Mac may still be
+            # paired (even running) and must never count as the new one.
+            fresh_hosts = {r["id"] for r in db.execute(
+                "SELECT h.id FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key "
+                "WHERE hp.user_id = ? AND datetime(hp.paired_at) >= datetime(?)", (user_id, profile["lost_mac_at"])).fetchall()}
+            connected = {c["host_id"] for c in _own_configs(user_id).values()} & fresh_hosts
             folders = db.execute("SELECT owner_host_id, restore_host_id FROM mirror_folders WHERE owner_user_id = ? AND status = 'active'",
                                  (user_id,)).fetchall()
             facts.restoring = any(r["restore_host_id"] in connected for r in folders)
@@ -3678,6 +3735,9 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             facts.recover_mac = bool(connected)
             facts.unlocked = bool(profile["recovery_unlocked_at"])
             facts.recovered = bool(profile["recovery_unlocked_at"]) and bool(folders) and not facts.recovering
+            facts.old_mac_retired = facts.recovered and not any(
+                r["id"] not in fresh_hosts for r in db.execute(
+                    "SELECT h.id FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key WHERE hp.user_id = ?", (user_id,)).fetchall())
     # "Has a Mac" (paired), not "connected this second": the service forgets who's connected
     # when it restarts, and that must never send someone back to the download step.
     facts.mac_connected = any(h["role"] == "owner" for h in _mcp_list_hosts(user_id))

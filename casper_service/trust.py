@@ -579,3 +579,15 @@ def open_invites(db, owner_id: int) -> list[dict]:
         (owner_id, now_iso()),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def accepted_invites(db, owner_id: int) -> list[dict]:
+    """Invites a friend accepted and finished setting up (their first mirror
+    ran): no longer open, but still true -- the inviter's agent must never
+    report them as unaccepted."""
+    rows = db.execute(
+        "SELECT * FROM invites WHERE owner_user_id = ? AND completed_at IS NOT NULL AND used_by_user_id IS NOT NULL "
+        "AND cancelled_at IS NULL ORDER BY id",
+        (owner_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
