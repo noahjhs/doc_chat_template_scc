@@ -4,7 +4,7 @@ import "testing"
 
 func TestLoadOrCreateRoutingKey_PersistsAndReuses(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	isolateHome(t, dir)
 
 	first, err := LoadOrCreateRoutingKey()
 	if err != nil {
@@ -26,13 +26,13 @@ func TestLoadOrCreateRoutingKey_PersistsAndReuses(t *testing.T) {
 func TestLoadOrCreateRoutingKey_DistinctPerConfigDir(t *testing.T) {
 	dirA, dirB := t.TempDir(), t.TempDir()
 
-	t.Setenv("HOME", dirA)
+	isolateHome(t, dirA)
 	keyA, err := LoadOrCreateRoutingKey()
 	if err != nil {
 		t.Fatalf("LoadOrCreateRoutingKey (A): %v", err)
 	}
 
-	t.Setenv("HOME", dirB)
+	isolateHome(t, dirB)
 	keyB, err := LoadOrCreateRoutingKey()
 	if err != nil {
 		t.Fatalf("LoadOrCreateRoutingKey (B): %v", err)

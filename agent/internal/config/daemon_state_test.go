@@ -4,7 +4,7 @@ import "testing"
 
 func TestLoadEnabled_DefaultsTrue(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	isolateHome(t, dir)
 
 	if !LoadEnabled() {
 		t.Fatal("expected LoadEnabled to default to true when never explicitly set")
@@ -13,7 +13,7 @@ func TestLoadEnabled_DefaultsTrue(t *testing.T) {
 
 func TestSaveEnabled_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	isolateHome(t, dir)
 
 	SaveEnabled(false)
 	if LoadEnabled() {
@@ -28,7 +28,7 @@ func TestSaveEnabled_RoundTrip(t *testing.T) {
 
 func TestClearEnabled_ResetsToDefault(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	isolateHome(t, dir)
 
 	SaveEnabled(false)
 	if LoadEnabled() {

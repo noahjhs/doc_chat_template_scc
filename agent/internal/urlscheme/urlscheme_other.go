@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
 // No-op stub: casper:// URL-scheme pairing is macOS-only for now (see the
 // darwin implementation's doc comment). Keeps cmd/casper buildable on other

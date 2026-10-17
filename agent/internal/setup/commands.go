@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"casper-agent/internal/config"
 	"casper-agent/internal/mirrord"
 	"casper-agent/internal/recovery"
+	"casper-agent/internal/urlscheme"
 )
 
 // --- status ---------------------------------------------------------------------
@@ -72,7 +74,7 @@ func (c *cli) status() error {
 	}
 	if !st["app_running"].(bool) {
 		lines = append(lines, "Casper app: not running")
-		set("Open Casper: `open " + appBundle(exe) + "`")
+		set("Open Casper: `" + openAppCommand(exe) + "`")
 	} else {
 		lines = append(lines, "Casper app: running")
 	}
@@ -166,6 +168,14 @@ func (c *cli) status() error {
 	return nil
 }
 
+// openAppCommand is how to start the app from a shell.
+func openAppCommand(exe string) string {
+	if runtime.GOOS == "windows" {
+		return `Start-Process "` + exe + `"`
+	}
+	return "open " + appBundle(exe)
+}
+
 func appBundle(exe string) string {
 	if i := strings.Index(exe, ".app/"); i >= 0 {
 		return exe[:i+4]
@@ -246,6 +256,7 @@ func (c *cli) pair() error {
 			return nil
 		}
 		started := time.Now()
+		_ = urlscheme.Ensure() // Windows: the link must find the app before it has ever run
 		if err := openURL(pairURL(token, acct.Username)); err != nil {
 			return fmt.Errorf("couldn't hand the pairing to Casper.app (is it installed?): %w", err)
 		}

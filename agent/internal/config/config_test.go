@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -51,7 +52,7 @@ func TestAppConfigSubdir(t *testing.T) {
 
 func TestSessionsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir) // os.UserConfigDir on darwin is $HOME/Library/Application Support
+	isolateHome(t, dir) // os.UserConfigDir on darwin is $HOME/Library/Application Support
 
 	if s, err := LoadSessions(); err != nil || len(s) != 0 {
 		t.Fatalf("expected no sessions initially, got s=%v err=%v", s, err)
@@ -80,7 +81,7 @@ func TestSessionsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 { // Windows has no mode bits
 		t.Errorf("expected session.json to be 0600, got %o", info.Mode().Perm())
 	}
 
@@ -108,7 +109,7 @@ func TestSessionsRoundTrip(t *testing.T) {
 // corrupt.
 func TestLoadSessions_TolerantOfOldSingleObjectShape(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	isolateHome(t, dir)
 
 	path, err := sessionFilePath() // creates AppConfigDir as a side effect
 	if err != nil {
@@ -129,7 +130,7 @@ func TestLoadSessions_TolerantOfOldSingleObjectShape(t *testing.T) {
 
 func TestLoadSessions_TreatsCorruptFileAsEmpty(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	isolateHome(t, dir)
 
 	path, err := sessionFilePath() // creates AppConfigDir as a side effect
 	if err != nil {
@@ -149,4 +150,13 @@ func TestLoadSessions_TreatsCorruptFileAsEmpty(t *testing.T) {
 func TestMain(m *testing.M) {
 	sessionBackend = fileSessionStore{}
 	os.Exit(m.Run())
+}
+
+// isolateHome points the per-user directories at dir, so a test never touches
+// the real config (HOME on a Mac, LOCALAPPDATA on Windows).
+func isolateHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("LOCALAPPDATA", dir)
 }

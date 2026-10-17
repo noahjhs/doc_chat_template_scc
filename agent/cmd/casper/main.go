@@ -56,11 +56,21 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
+// lenientWriter swallows write errors (a GUI-subsystem Windows process has no
+// stdout), so io.MultiWriter keeps writing to the log file.
+type lenientWriter struct{ w io.Writer }
+
+func (l lenientWriter) Write(p []byte) (int, error) {
+	_, _ = l.w.Write(p)
+	return len(p), nil
+}
+
 func main() {
 	// `Casper setup <command>` is the onboarding CLI (internal/setup) -- a
 	// one-shot command an agent runs on the person's behalf, never the
 	// daemon: it returns before any URL handler, menu bar or server starts.
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		attachConsole()
 		os.Exit(setup.Main(os.Args[2:]))
 	}
 	flag.Parse()
@@ -76,12 +86,18 @@ func main() {
 	// that arrive before setup below finishes just queue here rather than
 	// being dropped.
 	pendingPairURLs := make(chan string, 4)
-	if err := urlscheme.Register(func(rawURL string) {
+	deliverPairURL := func(rawURL string) {
 		select {
 		case pendingPairURLs <- rawURL:
 		default: // buffer full -- extremely unlikely; drop rather than block the dispatch thread
 		}
-	}); err != nil {
+	}
+	// On Windows each link starts a new process: a second Casper hands its
+	// link to the first and exits here (a no-op on a Mac).
+	if !claimInstance(deliverPairURL) {
+		return
+	}
+	if err := urlscheme.Register(deliverPairURL); err != nil {
 		fmt.Fprintf(os.Stderr, "Couldn't register the casper:// URL handler: %s\n", err)
 	}
 
@@ -101,7 +117,9 @@ func main() {
 		fatal("Couldn't open log file %s: %s", logPath, err)
 	}
 	defer logFile.Close()
-	logger := log.New(io.MultiWriter(os.Stdout, logFile), "", log.LstdFlags)
+	// The Windows build has no console, so stdout can be unusable: the file goes
+	// first and a failing stdout must not stop the log.
+	logger := log.New(io.MultiWriter(logFile, lenientWriter{os.Stdout}), "", log.LstdFlags)
 	logf := func(format string, args ...any) { logger.Printf(format, args...) }
 
 	// A freshly downloaded app runs from a temporary copy until it's moved:
@@ -311,6 +329,9 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 	// CASPER_SCRIPTED_SETUP: launched by tools/scenario.py, which signs in
 	// and pairs by itself -- no sign-in page, no login item.
 	scripted := os.Getenv("CASPER_SCRIPTED_SETUP") != ""
+	if !scripted && os.Getenv("CONTROL_TOOL_KEY") == "" {
+		go showTrayHint(false) // Windows only: where the ghost is
+	}
 	if os.Getenv("CONTROL_TOOL_KEY") == "" {
 		go func() {
 			if sessions, _ := config.LoadSessions(); len(sessions) == 0 {
@@ -410,6 +431,7 @@ func restartApp(state *daemonState, srv *server.Server, logf func(format string,
 	}
 	logf("Restart requested from the status bar")
 	shutdownDaemon(state, srv)
+	releaseInstance() // the new process must be able to claim it
 	if err := exec.Command(exePath).Start(); err != nil {
 		logf("Restart: couldn't relaunch %s: %s", exePath, err)
 		dialog.ShowError("Couldn't restart Casper -- try quitting and reopening it manually.")
