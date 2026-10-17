@@ -9,11 +9,14 @@ dialogs, the folder panel, the menu bar).
     tools/vmgui.py dclick <vm> X Y         double-click
     tools/vmgui.py type <vm> "text"        type text
     tools/vmgui.py key <vm> enter|tab|esc|bsp|ctrl-a|shift-tab|...   press a key or combo
+    tools/vmgui.py rclick <vm> X Y         right-click
     tools/vmgui.py scroll <vm> down|up [N] scroll N notches (default 5)
     tools/vmgui.py open <vm>               open the VM's screen in Screen Sharing, to watch or take over
 
 The VM must have been started with VNC: tools/scenario.py start <name> --vnc
-(that records each VM's address in ~/.config/casper-vm/vnc/<vm>.json). A VM
+(that records each VM's address in ~/.config/casper-vm/vnc/<vm>.json). The Windows
+VM (`windows`, tools/winvm.py) is always served that way; its keys are named as
+vncdo names them (e.g. `super` for the Windows key, `ctrl-alt-del`). A VM
 served over VNC has no window of its own; `open` shows it."""
 
 import json
@@ -99,7 +102,7 @@ def shot(vm: str, out: str | None = None) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 3 or argv[1] not in {"shot", "click", "dclick", "type", "key", "scroll", "open"}:
+    if len(argv) < 3 or argv[1] not in {"shot", "click", "dclick", "rclick", "type", "key", "scroll", "open"}:
         print(__doc__)
         return 2
     cmd, vm, rest = argv[1], argv[2], argv[3:]
@@ -109,8 +112,12 @@ def main(argv: list[str]) -> int:
         f = scale(vm)
         x, y = round(float(rest[0]) * f), round(float(rest[1]) * f)
         vnc(vm, "move", str(x), str(y), "pause", "0.2", "click", "1", *(["click", "1"] if cmd == "dclick" else []))
+    elif cmd == "rclick":
+        f = scale(vm)
+        vnc(vm, "move", str(round(float(rest[0]) * f)), str(round(float(rest[1]) * f)), "pause", "0.2", "click", "3")
     elif cmd == "type":
-        vnc(vm, *keystrokes(rest[0]))
+        # QEMU's VNC adds Shift itself for a capital or symbol keysym (and drops a Shift sent by hand), so text goes as it is.
+        vnc(vm, "type", rest[0]) if record(vm).get("server") == "qemu" else vnc(vm, *keystrokes(rest[0]))
     elif cmd == "key":
         vnc(vm, "key", rest[0])
     elif cmd == "scroll":

@@ -50,6 +50,12 @@ username = "noah"
 accounts = ["noah", "noah_*", "noah-*"]
 newmac_steps = ["name_mac Noah's New MacBook Air", "quiet_apps Telegram Safari System_Settings"]  # tools/scenario.py newmac noah
 
+[personas.noah-windows]  # Noah on a Windows 11 ARM PC (headless QEMU, tools/winvm.py); starts from its windows-base snapshot
+vm = "windows"
+windows = true
+username = "noah"
+accounts = ["noah", "noah_*", "noah-*"]
+
 [checkpoints.riley-before-publish]
 persona = "riley"
 about = "Riley: Casper installed and connected, Claude connected to Casper; nothing offered yet."
@@ -64,6 +70,11 @@ steps = ["publish_offering 20"]
 persona = "noah"
 about = "Noah: a Mac that's never seen Casper, and no Casper account."
 steps = ["name_mac Noah's MacBook Air", "quiet_apps Telegram Safari System_Settings"]
+
+[checkpoints.noah-windows-fresh]
+persona = "noah-windows"
+about = "Noah: a Windows 11 PC that's never seen Casper (clean install, SSH on), and no Casper account."
+steps = []
 
 [checkpoints.riley-headless-before-invite]
 persona = "riley-headless"
@@ -99,3 +110,10 @@ checkpoints = ["riley-headless-before-invite", "noah-fresh"]
 next = """
 Run it as the e2e-run skill's "lost-mac" section says: the invite-headless run
 first, then `tools/scenario.py newmac noah --vnc --env test` for the new Mac."""
+
+[scenarios.windows]
+about = "A Windows 11 PC to try things on by hand or by script (no Casper app for Windows yet)."
+checkpoints = ["noah-windows-fresh"]
+next = """
+Screen: tools/vmgui.py shot windows (or `open windows` to watch in Screen Sharing); commands:
+tools/scenario.py exec noah-windows "<powershell>". Stop it with: tools/scenario.py stop windows"""

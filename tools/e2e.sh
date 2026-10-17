@@ -30,6 +30,7 @@ main() {
   }
   trap cleanup EXIT
   lock_take e2e
+  export CASPER_E2E_LOCK_HELD=1   # tools/winvm.py (the Windows VM) sees the run already holds the lock
   RUN="$HOME/Documents/Casper e2e runs/$(date +%Y-%m-%d_%H%M)"
   mkdir -p "$RUN/screens"
   echo "$RUN"

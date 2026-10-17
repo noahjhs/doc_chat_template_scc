@@ -535,8 +535,8 @@ for Windows (they compile; they run only in the guest).
    the relay), or ship an installer step with an elevated firewall rule.
    Recommend no inbound first; measure how many pairs then fall back to the
    relay.
-3. **VM**: UTM/QEMU is being built; a Windows 11 ARM licence/ISO is needed,
-   and about 80 GB of disk for base plus checkpoints.
+3. **VM**: built (2026-10-16), see "Test VM" below. The Windows install runs unlicensed
+   (generic key, no activation: a watermark, nothing that affects testing).
 4. **Signing route**: Trusted Signing vs an OV cloud-HSM certificate. Start
    the identity validation now; it can take weeks and is the long pole.
 5. **Installer format**: Inno Setup `.exe` (recommended) vs MSIX.
@@ -545,3 +545,52 @@ for Windows (they compile; they run only in the guest).
    and report, or hydrate on demand.
 8. **`run_shell_command` on Windows**: unavailable (recommended) or POSIX
    tooling assumed (Git Bash).
+
+## 9. Test VM (built 2026-10-16)
+
+A Windows 11 ARM (26100, Pro) VM on this Mac, run two ways from the same disk:
+
+- **By the rig** (`tools/winvm.py`, driven by `tools/scenario.py` as the persona
+  `noah-windows`, scenario `windows`): headless QEMU with Apple's hypervisor
+  (boots in ~20 s), screen on VNC (`tools/vmgui.py shot|click|type|key windows`,
+  the same tool as for the Tart VMs), commands over OpenSSH (`tools/scenario.py exec
+  noah-windows "<powershell>"`, `tools/winvm.py exec`). `tools/winvm.py gui <program>`
+  starts a program on the logged-in desktop (a command run over SSH has a session of
+  its own and shows nothing). `scenario.py reset|start windows` restores the disk
+  snapshot `windows-base` and boots; `stop` shuts Windows down. Always VNC, never a window.
+  While it runs it holds the e2e lock (`~/.cache/casper-e2e.lock`, QEMU's pid as holder;
+  `tools/e2e.sh` exports `CASPER_E2E_LOCK_HELD=1` so a run's own VM start doesn't wait on
+  itself), so it never runs next to an e2e run.
+- **By hand in UTM**: `tools/winvm.py utm` writes a separate copy (APFS clone at
+  `windows-base`) as `~/Documents/Casper Windows 11.utm`; double-click to import it into
+  UTM. Not driven by anything automatic.
+
+Account `noah` (local administrator, auto-login), password in
+`~/.config/casper-vm/windows-password`; SSH key `~/.config/casper-vm/windows_ed25519`;
+SSH on `127.0.0.1:2222`, VNC `127.0.0.1:5941` (address and password in
+`~/.config/casper-vm/vnc/windows.json`). No sleep, lock screen or screen-off.
+
+How it was made (all repeatable: `tools/winvm.py install`, ~15 min, unattended):
+
+1. The ISO comes from UUP dump (Microsoft's own update servers; Microsoft's download page
+   refuses scripted requests): `api.uupdump.net` build `941d6de0-...` (Windows 11 25H2, arm64,
+   en-us, Pro), converted by uupdump's `uup_download_macos.sh` (needs aria2, cabextract, wimlib,
+   chntpw, cdrtools). Kept at `~/vmimg/windows11-arm64.iso`, with `virtio-win.iso`.
+2. `tools/windows/autounattend.xml` (on a small config ISO with `casper-setup.ps1` and the SSH
+   public key) wipes the disk, skips the TPM/Secure Boot/RAM/CPU checks (`LabConfig`), makes the
+   local account, skips OOBE and the Microsoft-account/network screens; its first-logon command runs
+   `casper-setup.ps1`: virtio drivers (network), OpenSSH Server and the key, firewall, no sleep.
+3. `winvm.py` then shuts down and saves `windows-base` (a qcow2 internal snapshot plus the UEFI
+   variables).
+
+Things learnt, so nobody repeats them: `usb-storage` for the install ISO hangs Windows' boot
+loader with `virtio-gpu-pci`; `ramfb` for the display works (screen is 1280x960). The UEFI has
+no AHCI, so an AHCI CD is invisible. QEMU's user networking passes no ping (test TCP), and the
+guest's network starts "Public", which blocks the SSH rule the capability adds (the setup script
+sets it Private and the rule to any profile). QEMU's VNC adds Shift itself, so `vmgui.py type`
+sends text as it is for this VM (`"server": "qemu"` in its VNC record). The Windows key is
+`super`. Windows Setup needs the e2e lock like any VM: install and `reset` take it too.
+
+What it does not do yet: the Casper app itself (no Windows build), so the persona has no Casper
+steps (`win_run <powershell>` is the only Windows step); captures (`scenario.py capture`) are
+refused for it (the clean state is `windows-base`; `winvm.py save` makes the current disk the new one).

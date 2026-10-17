@@ -8,6 +8,7 @@
     tools/scenario.py newmac <persona>     a lost Mac's replacement: discard the VM, clone a fresh one; the account stays
     tools/scenario.py mail [address]       the newest email the test stack kept instead of sending
     tools/scenario.py ask <persona> [-c] "text"   talk to a headless persona's own agent (-c: carry on the conversation)
+    tools/scenario.py exec <persona> "command"    run a command in a persona's VM (zsh in a Mac VM, PowerShell over SSH in the Windows one)
     ... --env test                         use the end-to-end test deployment (tools/test_stack.sh) instead of dev
     ... start|reset|edit <name> --vnc      serve each VM's screen over VNC instead of opening its window,
                                            so tools/vmgui.py can look at it and click (see that file)
@@ -19,6 +20,10 @@
     tools/scenario.py show <name>          detail on a scenario, checkpoint, persona or snapshot
     tools/scenario.py capture <name>       save a checkpoint (or every one in a scenario) as it is right now -- VM and server together
     tools/scenario.py uncapture <checkpoint>  forget a capture: back to replaying its steps
+
+The Windows persona (noah-windows) is a headless QEMU VM (tools/winvm.py): reset restores
+its clean `windows-base` snapshot and boots it; its screen is always served over VNC (tools/vmgui.py
+windows ...), and it holds the e2e lock while it runs. It has no Casper account steps yet.
 
 How it works: each persona's VM is cloned fresh from a local snapshot
 (copy-on-write, instant), their dev accounts are deleted, and the checkpoint's
@@ -45,6 +50,8 @@ import tomllib
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+import winvm
 
 HERE = Path(__file__).resolve().parent
 CONF = tomllib.loads((HERE / "scenarios.toml").read_text())
@@ -323,6 +330,11 @@ def step_name_mac(p, ctx, *name):
     return f"{pretty} ({local})"
 
 
+def step_win_run(p, ctx, *command):
+    """Runs a PowerShell command in the Windows VM, e.g. win_run Get-ComputerInfo."""
+    return winvm.run(" ".join(command)).stdout.strip()[-200:] or "ok"
+
+
 def step_claude_token(p, ctx):
     """Keeps Claude Code signed in however old the snapshot is. A sign-in
     saved in a snapshot goes stale (the first clone to refresh it invalidates
@@ -417,6 +429,7 @@ STEPS = {
     "connect_claude": step_connect_claude,
     "chat_folder": step_chat_folder,
     "publish_offering": step_publish_offering,
+    "win_run": step_win_run,
 }
 
 
@@ -470,6 +483,12 @@ def reset_checkpoint(name: str):
         say(who, f"dev accounts deleted: {', '.join(gone)}" if gone else "no dev accounts yet")
         say(who, headless_stop(persona))
         steps = [s for _, steps in chain for s in steps]
+    elif persona.get("windows"):
+        gone = delete_accounts(persona)
+        say(who, f"dev accounts deleted: {', '.join(gone)}" if gone else "no dev accounts yet")
+        say(who, f"{persona['vm']}: from {winvm.SNAPSHOT}, starting…")
+        winvm.reset()
+        steps = [s for _, steps in chain for s in steps]
     elif at is not None:
         cp = chain[at][0]
         cap = capture_of(cp)
@@ -511,6 +530,8 @@ def prepare_host(keep: set[str], stop_others: bool = True):
     if allowed."""
     for vm in (running_vms() - keep) if stop_others else ():
         say("mac", f"{vm}: {shutdown_vm(vm)}")  # may be a snapshot being edited: shut it down properly
+    if stop_others and winvm.vm_pid() and winvm.VM not in keep:
+        winvm.stop()
     quit_list = CONFIG_DIR / "quit-apps"
     if quit_list.exists():
         for app in (a.strip() for a in quit_list.read_text().splitlines()):
@@ -519,7 +540,7 @@ def prepare_host(keep: set[str], stop_others: bool = True):
                 say("mac", f"quit {app}")
     if subprocess.run(["sudo", "-n", "/usr/sbin/purge"], capture_output=True).returncode == 0:
         say("mac", "purged disk caches")
-    need = len(keep) * VM_MEMORY_MB / 1024 + 1
+    need = (len(keep) - (winvm.VM in keep)) * VM_MEMORY_MB / 1024 + (winvm.MEMORY_MB / 1024 if winvm.VM in keep else 0) + 1
     have = available_gb()
     swap = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True).stdout.split("used = ")[1].split()[0]
     say("mac", f"{have:.1f} GB memory available, {swap} in swap; the VMs need about {need:.0f} GB")
@@ -570,7 +591,8 @@ def describe(name: str) -> str:
         out = [f"{indent}{cp}: {CONF['checkpoints'][cp]['about']}",
                f"{indent}  persona  {persona['username']} (" + ("headless, on the mini" if persona.get("headless") else f"VM {persona['vm']}")
                + f", dev account {persona['username']})",
-               f"{indent}  starts   " + ("a wiped headless Mac" if persona.get("headless") else snapshot_line(persona["snapshot"])),
+               f"{indent}  starts   " + ("a wiped headless Mac" if persona.get("headless") else
+                                           f"the clean {winvm.SNAPSHOT} snapshot of the Windows VM" if persona.get("windows") else snapshot_line(persona["snapshot"])),
                f"{indent}  then     delete their dev accounts ({', '.join(persona.get('accounts', [persona['username']]))}), and:"]
         chain = checkpoint_chain(cp)
         at = max((i for i, (c, _) in enumerate(chain) if capture_of(c)), default=None)
@@ -602,7 +624,8 @@ def describe(name: str) -> str:
     elif name in personas:
         p = personas[name]
         lines += [f"persona {name}: " + ("headless, on the mini" if p.get("headless") else f"VM {p['vm']}") + f", dev account {p['username']}",
-                  "starts " + ("a wiped headless Mac" if p.get("headless") else snapshot_line(p["snapshot"])),
+                  "starts " + ("a wiped headless Mac" if p.get("headless") else
+                               f"the clean {winvm.SNAPSHOT} snapshot of the Windows VM" if p.get("windows") else snapshot_line(p["snapshot"])),
                   "checkpoints: " + ", ".join(c for c in CONF["checkpoints"] if checkpoint_plan(c)[0] is p)]
     elif name in snapshots or name in vms:
         users = [n for n, p in personas.items() if p.get("snapshot") == name]
@@ -685,6 +708,9 @@ def capture(name: str) -> int:
         return 2
     existing = tart("list", "-q").stdout.split()
     personas = [(cp, checkpoint_plan(cp)[0]) for cp in checkpoints]
+    if any(p.get("windows") for _, p in personas):
+        print("The Windows VM can't be captured; its clean state is windows-base (tools/winvm.py save).")
+        return 2
     if any(p.get("headless") for _, p in personas):
         print("Headless personas can't be captured (their Mac is rebuilt in seconds anyway).")
         return 2
@@ -742,7 +768,8 @@ def main(argv: list[str]) -> int:
             print(f"  {name:<22} {c['about']}" + (f"  [captured {cap['captured_at'][:16]}]" if cap else ""))
         print("Personas:")
         for name, p in CONF["personas"].items():
-            print(f"  {name:<22} " + ("headless, on the mini" if p.get("headless") else f"VM {p['vm']}, from snapshot {p['snapshot']}"))
+            print(f"  {name:<22} " + ("headless, on the mini" if p.get("headless") else f"VM {p['vm']}, from snapshot {p['snapshot']}" if not p.get("windows")
+                                       else f"Windows VM, from {winvm.SNAPSHOT}"))
         print("Snapshots:")
         for name, about in CONF["snapshots"].items():
             print(f"  {name:<22} {about}")
@@ -830,6 +857,9 @@ def main(argv: list[str]) -> int:
             if p.get("headless"):
                 if headless_state(p):
                     say(p["username"], headless_stop(p))
+            elif p.get("windows"):
+                if winvm.vm_pid():
+                    winvm.stop()
             elif p["vm"] in running_vms():
                 say("mac", f"{p['vm']}: {shutdown_vm(p['vm'])}")
         return 0
@@ -838,8 +868,8 @@ def main(argv: list[str]) -> int:
         # discarded and a fresh one cloned from the same snapshot. Unlike
         # reset, the persona's Casper account (and the server's rows) stay.
         persona = CONF["personas"].get(argv[2])
-        if not persona or persona.get("headless"):
-            print(f"{argv[2]!r} isn't a persona with a VM: {', '.join(n for n, p in CONF['personas'].items() if not p.get('headless'))}")
+        if not persona or persona.get("headless") or persona.get("windows"):
+            print(f"{argv[2]!r} isn't a persona with a Mac VM: {', '.join(n for n, p in CONF['personas'].items() if not p.get('headless') and not p.get('windows'))}")
             return 2
         prepare_host(keep={persona["vm"]}, stop_others=False)
         say(persona["username"], f"{persona['vm']}: the old Mac is gone; a new one from {persona['snapshot']}, starting…")
@@ -858,6 +888,17 @@ def main(argv: list[str]) -> int:
             return 1
         m = msgs[0]
         print(f"To: {m['to']}\nFrom: {m['from']}\nSubject: {m['subject']}\n\n{m['text']}")
+        return 0
+    if cmd == "exec" and len(argv) > 3:
+        persona = CONF["personas"].get(argv[2])
+        if not persona or persona.get("headless"):
+            print(f"{argv[2]!r} isn't a persona with a VM: {', '.join(n for n, p in CONF['personas'].items() if not p.get('headless'))}")
+            return 2
+        try:
+            print(winvm.run(argv[3]).stdout.rstrip() if persona.get("windows") else vm_exec(persona["vm"], argv[3]))
+        except RuntimeError as e:
+            print(e)
+            return 1
         return 0
     if cmd == "ask" and len(argv) > 3:
         cont = "-c" in argv
