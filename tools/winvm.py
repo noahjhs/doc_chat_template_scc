@@ -244,8 +244,13 @@ def run_gui(command: str):
     command run over SSH lives in its own session and shows nothing; a
     one-shot scheduled task run as the user, interactively, does."""
     tn = "casper-gui"
+    # The command goes through a small .cmd file, so it may hold quotes and spaces.
+    import base64
+    b64 = base64.b64encode((command + "\r\n").encode()).decode()
+    cmdfile = r"C:\casper-gui.cmd"
     # The start time must be well-formed; /run starts it now regardless.
-    run(f'schtasks /create /tn {tn} /sc once /st 00:00 /ru {USER} /it /rl highest /f /tr "{command}" | Out-Null; '
+    run(f"[IO.File]::WriteAllText('{cmdfile}', [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}'))); "
+        f'schtasks /create /tn {tn} /sc once /st 00:00 /ru {USER} /it /rl highest /f /tr {cmdfile} | Out-Null; '
         f'schtasks /run /tn {tn} | Out-Null; Start-Sleep 2; schtasks /delete /tn {tn} /f | Out-Null')
 
 

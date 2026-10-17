@@ -1,0 +1,20 @@
+Casper recovery kit -- riley (made on Noahs-MacBook-Pro.local, 16 Oct 2026)
+
+This file holds what's needed to get your data back if this Mac is lost:
+the key to your mirrored folders (including ones you add later) and your
+backup keys, all locked with the passphrase you chose. With this file and that passphrase,
+a new Mac can rebuild your mirrored folders from your friends' computers:
+choose "Recover from a Lost Mac" in Casper's menu on the new Mac. Keep a copy
+of this file, and the passphrase, somewhere other than this Mac (a password
+manager is ideal).
+
+-----BEGIN AGE ENCRYPTED FILE-----
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBxWnF1LzZVcUZFdVRlRlc1
+cSszNkZ3IDE4ClIwUzNGYzk3a1VuYVFEYiswcE5ZbXprcGtKSG9FdFVBRzNOV1Zn
+VytBU3MKLS0tIGZFUlhNSzZDVFhpdncrU3J4dVJQaXVDMGwzTUJpUGR1ckphN2ZL
+Kzlxd1kKiOXtP4/Xta0iOc/uUaMrwJUg03wmIVCCmZklrzDOGfPfM2M7s3BqQY45
+e45RGvXvZhfyA54CgjbTRH48pRmCbrVc4b8pKYk5ux09ZNcXFM3RcI41v+KinYL7
+wwadhLdbs/x28vijAmVAnbxgcZG/2q8CXEAi6h3XxbRKMGN2gK3KJlQE0x98UfSp
+HmWbnypHlhacMdeXZV2bQe1pJdY/uAbYUSZBx6e8cI+A+1d7V1L9GClPAHGc6DgV
+VA8wGhBnAdw7vivSiF6CM67v
+-----END AGE ENCRYPTED FILE-----

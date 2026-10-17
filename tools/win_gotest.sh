@@ -21,8 +21,15 @@ for p in "${pkgs[@]}"; do
   [ -f "$out/$name.test.exe" ] || continue
   scp "${SSH[@]}" -P 2222 -q "$out/$name.test.exe" "noah@127.0.0.1:C:/casper-test/$name.test.exe"
   echo "== $p"
+  # a package's testdata/ goes next to its test binary, and the test runs from there
+  wd='C:\casper-test'
+  if [ -d "$p/testdata" ]; then
+    ssh "${SSH[@]}" -p 2222 noah@127.0.0.1 "New-Item -ItemType Directory -Force C:\\casper-test\\$name | Out-Null; Remove-Item -Recurse -Force C:\\casper-test\\$name\\testdata -ErrorAction SilentlyContinue; exit 0" >/dev/null
+    scp "${SSH[@]}" -P 2222 -q -r "$p/testdata" "noah@127.0.0.1:C:/casper-test/$name/testdata"
+    wd="C:\\casper-test\\$name"
+  fi
   # run from the package's own directory name so testdata-free tests behave; -test.v for visibility
-  ssh "${SSH[@]}" -p 2222 noah@127.0.0.1 "cd C:\\casper-test; if (Test-Path C:\\casper-test\\syncthing.exe) { \$env:CASPER_TEST_SYNCTHING='C:\\casper-test\\syncthing.exe' }; .\\$name.test.exe '-test.count=1' '-test.v'" || fail=1
+  ssh "${SSH[@]}" -p 2222 noah@127.0.0.1 "cd $wd; if (Test-Path C:\\casper-test\\syncthing.exe) { \$env:CASPER_TEST_SYNCTHING='C:\\casper-test\\syncthing.exe' }; C:\\casper-test\\$name.test.exe '-test.count=1' '-test.v'" || fail=1
 done
 rm -rf "$out"
 exit $fail

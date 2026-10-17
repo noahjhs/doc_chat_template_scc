@@ -12,6 +12,7 @@ import (
 	"casper-agent/internal/backup"
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
+	"casper-agent/internal/mirror"
 	"casper-agent/internal/mirrord"
 	"casper-agent/internal/platform"
 	"casper-agent/internal/recovery"
@@ -95,7 +96,7 @@ func ReadKitFile(path, passphrase string) (Kit, error) {
 // restorePath is where a folder comes back: its original place if that is
 // empty or missing here (and inside home), else ~/Casper Restores/<label>.
 func restorePath(f config.RestorableFolder, home string) string {
-	if f.Path != "" && filepath.IsAbs(f.Path) && (f.Path == home || strings.HasPrefix(f.Path, strings.TrimRight(home, "/")+"/")) && f.Path != home {
+	if f.Path != "" && filepath.IsAbs(f.Path) && mirror.Within(home, f.Path) && !mirror.Within(f.Path, home) {
 		entries, err := os.ReadDir(f.Path)
 		if os.IsNotExist(err) || (err == nil && len(entries) == 0) {
 			return f.Path
@@ -267,9 +268,14 @@ func (c *cli) recover(kitPath string) error {
 
 // shortPath shows a path inside home as ~/..., the way a person reads it.
 func shortPath(p, home string) string {
-	home = strings.TrimRight(home, "/")
-	if home != "" && (p == home || strings.HasPrefix(p, home+"/")) {
-		return "~" + strings.TrimPrefix(p, home)
+	if home != "" && mirror.Within(home, p) {
+		rel, err := filepath.Rel(home, p)
+		if err == nil {
+			if rel == "." {
+				return "~"
+			}
+			return "~/" + filepath.ToSlash(rel)
+		}
 	}
 	return p
 }

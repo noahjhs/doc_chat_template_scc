@@ -48,7 +48,7 @@ func insideAny(path string, roots []string) (string, bool) {
 	fp := foldPath(path)
 	for _, r := range roots {
 		fr := foldPath(r)
-		if fp == fr || strings.HasPrefix(fp, strings.TrimRight(fr, "/")+"/") {
+		if fp == fr || strings.HasPrefix(fp, strings.TrimRight(fr, `/\`)+string(filepath.Separator)) {
 			return r, true
 		}
 	}
@@ -80,22 +80,11 @@ func (c *cli) mirroredRoots(username string) ([]string, error) {
 	return roots, nil
 }
 
-// kitDefaultDir is where the save panel starts: a connected external drive if
-// there is one, else the Desktop.
-func kitDefaultDir(volumes string) string {
-	if entries, err := os.ReadDir(volumes); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), ".") {
-				continue
-			}
-			p := filepath.Join(volumes, e.Name())
-			if r, err := filepath.EvalSymlinks(p); err == nil && r == "/" {
-				continue // the startup disk
-			}
-			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-				return p
-			}
-		}
+// kitDefaultDir is where the save panel starts: the first connected external
+// drive (see externalDrives), else the Desktop.
+func kitDefaultDir(drives []string) string {
+	if len(drives) > 0 {
+		return drives[0]
 	}
 	return platform.KnownFolder("Desktop")
 }
@@ -127,7 +116,7 @@ func (c *cli) chooseKitPath(username, explicit string) (string, error) {
 	}
 	for i := 0; i < 5; i++ {
 		path, ok := dialog.SaveFile("Save your recovery kit, ideally on a USB drive.",
-			kitDefaultDir("/Volumes"), kitFileName(username))
+			kitDefaultDir(externalDrives()), kitFileName(username))
 		if !ok {
 			return "", errors.New("no place was chosen for the kit -- run `setup recovery-kit` again when the person is ready")
 		}

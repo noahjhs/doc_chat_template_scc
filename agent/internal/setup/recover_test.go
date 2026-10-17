@@ -192,3 +192,40 @@ func TestKitV3CoversNewAndLegacyFolders(t *testing.T) {
 		t.Fatalf("the kit's own legacy password: %q", p)
 	}
 }
+
+// A kit written on a Mac or on Windows opens on any OS (the file is text; git must not
+// change its line endings, see .gitattributes), and its master key is intact.
+func TestKitMadeOnMacOpensHere(t *testing.T) {
+	v3, err := ReadKitFile(filepath.Join("testdata", "kit-v3-made-on-mac.txt"), "a long enough passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v3.Version != 3 || v3.Account != "riley" || len(v3.MasterKey) != 32 || v3.MasterKey[31] != 31 || v3.LegacyBundle["casper-old"] != "legacy-pw" {
+		t.Fatalf("v3 kit read wrong: %+v", v3)
+	}
+	w3, err := ReadKitFile(filepath.Join("testdata", "kit-v3-made-on-windows.txt"), "a long enough passphrase")
+	if err != nil || w3.Version != 3 || len(w3.MasterKey) != 32 || w3.MasterKey[31] != 31 || w3.LegacyBundle["casper-old"] != "legacy-pw" {
+		t.Fatalf("kit made on Windows: %+v, %v", w3, err)
+	}
+	v2, err := ReadKitFile(filepath.Join("testdata", "kit-v2-made-on-mac.txt"), "a long enough passphrase")
+	if err != nil || v2.MirrorPasswords["casper-1"] != "pw1" {
+		t.Fatalf("v2 kit: %+v, %v", v2, err)
+	}
+}
+
+// Folders whose paths were recorded on the other kind of computer come back
+// under Casper Restores, never at a path that means nothing here.
+func TestRestorePlanForeignPaths(t *testing.T) {
+	home := t.TempDir()
+	kit := NewKit("d", "riley", nil, map[string]string{"a": "p", "b": "p"})
+	folders := []config.RestorableFolder{
+		{ID: "a", Label: "Documents", Path: "/Users/riley/Documents"},
+		{ID: "b", Label: "Photos", Path: `C:\Users\riley\Pictures`},
+	}
+	where, _, _ := PlanRestore(folders, kit, home)
+	for id, label := range map[string]string{"a": "Documents", "b": "Photos"} {
+		if want := filepath.Join(home, "Casper Restores", label); where[id] != want {
+			t.Errorf("%s: got %q want %q", id, where[id], want)
+		}
+	}
+}

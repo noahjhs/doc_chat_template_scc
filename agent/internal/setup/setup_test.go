@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"casper-agent/internal/platform"
 )
 
 func TestPairURLEscapesTokenAndUsername(t *testing.T) {
@@ -82,17 +84,19 @@ func TestKitPathRefusedInsideMirroredFolders(t *testing.T) {
 }
 
 func TestKitDefaultDir(t *testing.T) {
-	vols := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if got := kitDefaultDir(vols); got != filepath.Join(home, "Desktop") {
-		t.Fatalf("no drives: got %s", got)
+	if got, want := kitDefaultDir(nil), platform.KnownFolder("Desktop"); got != want {
+		t.Fatalf("no drives: got %s, want %s", got, want)
 	}
-	if err := os.Mkdir(filepath.Join(vols, "BACKUP"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got := kitDefaultDir(vols); got != filepath.Join(vols, "BACKUP") {
+	if got := kitDefaultDir([]string{"X:\\", "Y:\\"}); got != "X:\\" {
 		t.Fatalf("with a drive: got %s", got)
+	}
+}
+
+func TestExternalDrivesSkipTheStartupDisk(t *testing.T) {
+	for _, d := range externalDrives() {
+		if d == "/" || strings.EqualFold(strings.TrimRight(d, `\`), os.Getenv("SystemDrive")) {
+			t.Fatalf("the startup disk listed as external: %s", d)
+		}
 	}
 }
 
