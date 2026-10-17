@@ -24,7 +24,8 @@ CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
 CREATE TABLE IF NOT EXISTS hosts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     routing_key TEXT NOT NULL UNIQUE,
-    hostname TEXT
+    hostname TEXT,
+    platform TEXT
 );
 
 -- A user's permanent, remembered relationship to a host -- independent of
@@ -586,6 +587,16 @@ def init_db():
         _add_backup_key_columns_to_host_pairings(db)
         _add_group_columns_to_invites(db)
         _add_key_scheme_to_mirror_folders(db)
+        _add_platform_to_hosts(db)
+
+
+def _add_platform_to_hosts(db):
+    """One-time ALTER TABLE ADD COLUMN for hosts.platform ('macos' |
+    'windows' | 'linux'), nullable: sent by the daemon when pairing and with
+    presence; older daemons never set it."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(hosts)").fetchall()}
+    if "platform" not in columns:
+        db.execute("ALTER TABLE hosts ADD COLUMN platform TEXT")
 
 
 def _add_key_scheme_to_mirror_folders(db):

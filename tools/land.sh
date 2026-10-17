@@ -48,6 +48,8 @@ run_tests() {
   "${PYTEST[@]}" > "$LOG/pytest.log" 2>&1 || { tail -30 "$LOG/pytest.log" >&2; die "tests failed (full log: $LOG/pytest.log)"; }
   tail -1 "$LOG/pytest.log"
   if changed agent; then
+    say "windows build check (agent/ changed)"
+    (cd agent && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./... && GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build ./... ) > "$LOG/windows.log" 2>&1 || { tail -30 "$LOG/windows.log" >&2; die "the Windows build broke (full log: $LOG/windows.log)"; }
     say "go test ./... (agent/ changed)"
     (cd agent && go test ./... > "$LOG/gotest.log" 2>&1) || { grep -v '^ok' "$LOG/gotest.log" | tail -40 >&2; die "go tests failed (full log: $LOG/gotest.log)"; }
   fi

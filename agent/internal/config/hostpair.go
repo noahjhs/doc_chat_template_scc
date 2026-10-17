@@ -25,6 +25,7 @@ func ExchangePairingToken(authDomain, bootstrapToken, routingKey string) (device
 	body, err := json.Marshal(map[string]string{
 		"routing_key": routingKey,
 		"hostname":    hostname,
+		"platform":    Platform(),
 	})
 	if err != nil {
 		return "", "", "", err

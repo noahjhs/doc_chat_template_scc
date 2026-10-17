@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -34,13 +35,24 @@ func appConfigSubdir() string {
 	return "Casper"
 }
 
+// configBase is where the per-user app directories live: the per-OS config
+// directory, except on Windows, where os.UserConfigDir is %APPDATA% (Roaming)
+// and the Syncthing index database and logs must not roam, so it is
+// %LOCALAPPDATA% (os.UserCacheDir).
+func configBase() (string, error) {
+	if runtime.GOOS == "windows" {
+		return os.UserCacheDir()
+	}
+	return os.UserConfigDir()
+}
+
 // AppConfigDir is the stable per-user config directory -- holds session.json,
 // the routing key, and the login-item prompt dismissal flag, independent of
 // wherever the executable/app itself is installed or launched from (unlike
 // casper_tool.py's old _app_dir-keyed scheme). os.UserConfigDir() gives the
 // per-OS Application Support/AppData path directly. Created if missing.
 func AppConfigDir() (string, error) {
-	base, err := os.UserConfigDir()
+	base, err := configBase()
 	if err != nil {
 		return "", err
 	}

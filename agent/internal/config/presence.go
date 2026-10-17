@@ -25,6 +25,7 @@ func ReportPresence(authDomain, deviceToken, localAgentURL, cwd string) (unautho
 	body, err := json.Marshal(map[string]any{
 		"local_agent_url": localAgentURL,
 		"cwd":             cwd,
+		"platform":        Platform(),
 	})
 	if err != nil {
 		return false

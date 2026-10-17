@@ -337,7 +337,7 @@ def _resolve_attached(db, authorization: str) -> dict | None:
     }
 
 
-def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, requested_label: str | None):
+def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, requested_label: str | None, platform: str | None = None):
     """Idempotent for the *same* user re-pairing the *same* routing_key
     (e.g. reconnecting after a restart) -- rotates credentials in place
     (a fresh UPSERT into host_pairings keyed on (routing_key, user_id)),
@@ -356,6 +356,8 @@ def _pair_host(db, user_id: int, routing_key: str, hostname: str | None, request
         host_id = row["id"]
         if hostname:
             db.execute("UPDATE hosts SET hostname = ? WHERE id = ?", (hostname, host_id))
+    if platform:
+        db.execute("UPDATE hosts SET platform = ? WHERE id = ?", (platform, host_id))
 
     existing_uh = db.execute(
         "SELECT label FROM user_hosts WHERE user_id = ? AND host_id = ?", (user_id, host_id)
@@ -603,7 +605,7 @@ def pair_host(body: HostPairRequest, authorization: str = Header(default="")):
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         host_id, device_token, command_key, label, is_new = _pair_host(
-            db, user_id, body.routing_key, body.hostname, body.label
+            db, user_id, body.routing_key, body.hostname, body.label, body.platform
         )
         if is_new:
             _assign_default_environment(db, user_id, host_id)
@@ -641,6 +643,8 @@ def unpair_host(authorization: str = Header(default="")):
 def report_host_presence(body: HostPresenceReport, authorization: str = Header(default="")):
     with get_db() as db:
         attached = _resolve_attached(db, authorization)
+        if attached is not None and body.platform:
+            db.execute("UPDATE hosts SET platform = ? WHERE id = ?", (body.platform, attached["host_id"]))
     if attached is None:
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
     with _live_lock:
@@ -673,7 +677,7 @@ def list_hosts(authorization: str = Header(default="")):
             raise HTTPException(status_code=401, detail="Invalid or missing token.")
         rows = db.execute(
             """
-            SELECT h.id, h.routing_key, h.hostname, uh.label
+            SELECT h.id, h.routing_key, h.hostname, h.platform, uh.label
             FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
             WHERE uh.user_id = ? ORDER BY uh.label COLLATE NOCASE
             """,
@@ -734,7 +738,7 @@ def list_hosts(authorization: str = Header(default="")):
         connected = mine and live.get("local_agent_url") is not None
         hosts_out.append(
             HostInfo(
-                host_id=r["id"], label=r["label"], hostname=r["hostname"], connected=connected,
+                host_id=r["id"], label=r["label"], hostname=r["hostname"], platform=r["platform"], connected=connected,
                 local_agent_url=live.get("local_agent_url") if connected else None,
                 cwd=live.get("cwd", "") if connected else "",
                 command_key=pairing["command_key"] if mine else None,
@@ -2159,7 +2163,7 @@ def _mcp_list_hosts(user_id: int) -> list[dict]:
     with get_db() as db:
         own = db.execute(
             """
-            SELECT h.id, uh.label FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
+            SELECT h.id, h.platform, uh.label FROM user_hosts uh JOIN hosts h ON h.id = uh.host_id
             JOIN host_pairings hp ON hp.routing_key = h.routing_key AND hp.user_id = uh.user_id
             WHERE uh.user_id = ? ORDER BY uh.label COLLATE NOCASE
             """,
@@ -2174,7 +2178,10 @@ def _mcp_list_hosts(user_id: int) -> list[dict]:
             ).fetchall()
         }
     connected = {c["host_id"] for c in _own_configs(user_id).values()}
-    out = [{"host": r["label"], "role": "owner", "connected": r["id"] in connected} for r in own]
+    out = [
+        {"host": r["label"], "role": "owner", **({"platform": r["platform"]} if r["platform"] else {}), "connected": r["id"] in connected}
+        for r in own
+    ]
     for g in held:
         entry = {
             "host": f"{g['owner']}/{g['host']}",

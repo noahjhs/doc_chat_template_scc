@@ -33,6 +33,7 @@ class HostPairRequest(BaseModel):
     routing_key: str
     hostname: str | None = None
     label: str | None = None
+    platform: Literal["macos", "windows", "linux"] | None = None
 
 
 class HostPairResponse(BaseModel):
@@ -54,6 +55,7 @@ class HostPresenceReport(BaseModel):
     # path_resolution preview (see policy.py's module docstring); the Go
     # daemon itself is what actually enforces this accurately.
     cwd: str = ""
+    platform: Literal["macos", "windows", "linux"] | None = None
 
 
 # The "matches nothing" sentinel a blank blacklist defaults to -- a
@@ -351,6 +353,7 @@ class HostInfo(BaseModel):
     host_id: int
     label: str
     hostname: str | None = None
+    platform: str | None = None
     connected: bool
     local_agent_url: str | None = None
     cwd: str = ""

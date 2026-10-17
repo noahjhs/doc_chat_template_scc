@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -72,11 +71,6 @@ func sameFile(a, b string) bool {
 	ib, err := os.Stat(b)
 	if err != nil {
 		return false
-	}
-	sa, ok1 := ia.Sys().(*syscall.Stat_t)
-	sb, ok2 := ib.Sys().(*syscall.Stat_t)
-	if ok1 && ok2 {
-		return sa.Dev == sb.Dev && sa.Ino == sb.Ino
 	}
 	return os.SameFile(ia, ib)
 }

@@ -506,3 +506,17 @@ def test_conversation_requires_auth(app_env):
     _main, client = app_env
     r = client.post("/conversations/step", json={"message": "hi"})
     assert r.status_code == 401
+
+
+def test_host_platform_from_pair_and_presence(app_env):
+    _main, client = app_env
+    headers = {"Authorization": f"Bearer {_signup(client, 'alice')['token']}"}
+    pair = client.post("/hosts/pair", json={"routing_key": "rk-plat", "hostname": "pc", "platform": "windows"}, headers=headers).json()
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["platform"] == "windows"
+    device = {"Authorization": f"Bearer {pair['device_token']}"}
+    client.post("/hosts/presence", json={"local_agent_url": "https://relay.example/a", "platform": "macos"}, headers=device)
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["platform"] == "macos"
+    assert _main._mcp_list_hosts(1)[0]["platform"] == "macos"
+    # older daemons send none: the stored value stays
+    client.post("/hosts/presence", json={"local_agent_url": "https://relay.example/a"}, headers=device)
+    assert client.get("/hosts", headers=headers).json()["hosts"][0]["platform"] == "macos"
