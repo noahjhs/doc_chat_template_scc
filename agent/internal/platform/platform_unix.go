@@ -26,6 +26,8 @@ func freeBytes(p string) (int64, bool) {
 }
 
 const fileManagerName = "Finder"
+const trayName = "menu bar"
+const keyStoreName = "Keychain"
 
 func killOnExit(*exec.Cmd) error { return nil }
 

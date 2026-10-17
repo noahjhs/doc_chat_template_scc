@@ -28,7 +28,7 @@ const (
 )
 
 // ErrNoMasterKey: this Mac hasn't recovered (or made) the master key yet.
-var ErrNoMasterKey = errors.New("this Mac doesn't have the master key yet")
+var ErrNoMasterKey = errors.New("this computer doesn't have the master key yet")
 
 // KeyStore keeps small secrets by name: the login Keychain on a Mac, a file
 // for the headless test daemon.
@@ -142,7 +142,7 @@ func (k *Keys) ImportMaster(identity string, m []byte) error {
 		return err
 	} else if have != nil {
 		if string(have) != string(m) {
-			return errors.New("this Mac already has a different Casper master key for this account")
+			return errors.New("this computer already has a different Casper master key for this account")
 		}
 		return nil
 	}

@@ -2485,7 +2485,7 @@ def _mcp_create_invite(user_id: int, quota_gb: float, offering_id: int | None, f
             if host and host not in owned:
                 return f"Next: {host} isn't one of their machines ({', '.join(owned) or 'none paired'})."
             if not host and len(owned) != 1:
-                return ("Next: Casper isn't connected on any of their Macs yet." if not owned
+                return ("Next: Casper isn't connected on any of their computers yet." if not owned
                         else f"Next: ask which machine the space is on ({', '.join(owned)}) and pass host.")
             new_offering_host = host or owned[0]
     offering = next((o for o in mine if o["id"] == offering_id), None)
@@ -2922,7 +2922,7 @@ def report_mirror_status(body: dict, authorization: str = Header(default="")):
         retired = retired or _retire_lost_macs(attached["user_id"], attached["host_id"])
         _refresh_folder_parties(now)
         _mirror_refresh(f["owner_user_id"], f["owner_host_id"])  # the lost Mac, if it turns up: it has nothing to send now
-        notify(attached["user_id"], f"{f['label']} is back on {new_home}, and this Mac keeps it mirrored now.")
+        notify(attached["user_id"], f"{f['label']} is back on {new_home}, and this computer keeps it mirrored now.")
     if promoted and retired:
         notify(attached["user_id"], f"{_names_of(retired)} is no longer paired with your account. Its copies and history are kept.")
     for n in nudges:
@@ -3027,7 +3027,7 @@ def _decide_mirror_consent(row, decision: str) -> str:
         hosts = [trust.host_label(db, t["peer_owner_user_id"], t["peer_host_id"]) for t in targets]
     _refresh_folder_parties(f)
     for t in targets:
-        notify(t["peer_owner_user_id"], f"{me}'s {f['label']} is now mirrored on your Mac, encrypted -- you can't read it. Thanks for keeping a copy safe.")
+        notify(t["peer_owner_user_id"], f"{me}'s {f['label']} is now mirrored on your computer, encrypted -- you can't read it. Thanks for keeping a copy safe.")
     where = ", ".join(hosts) or ("Casper's catcher" if f["use_casper_catcher"] else "no one yet")
     return f"Mirroring {f['label']} to {where}. Changes reach them within seconds whenever both computers are on."
 
@@ -3141,7 +3141,7 @@ def _status_text(db, f) -> str:
         return f"{f['label']}: NOT protected yet, waiting for the person to click Mirror in the Casper dialog (or Telegram)."
     if f["restore_host_id"] and st.get("restoring"):
         if _restore_empty(st):
-            return f"{f['label']}: nothing to restore: its mirrors hold nothing for it (the first copy never finished before the Mac was lost)."
+            return f"{f['label']}: nothing to restore: its mirrors hold nothing for it (the first copy never finished before the computer was lost)."
         state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
         return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
     if not st:
@@ -3214,7 +3214,7 @@ def _version_listing(user_id: int, folder_name: str) -> tuple:
         targets = [t for t in mirroring.peers_of(db, f["id"]) if t["role"] == "mirror"]
     owner = _host_config(user_id, f["owner_host_id"])
     if owner is None:
-        raise mirroring.MirrorError("Your Mac that owns this folder is offline; versions are decrypted there.")
+        raise mirroring.MirrorError("Your computer that owns this folder is offline; versions are decrypted there.")
     for t in targets:
         peer = _host_config(t["peer_owner_user_id"], t["peer_host_id"])
         if peer is None:
@@ -3276,12 +3276,12 @@ def _move_version(f: dict, owner: dict, peer: dict, v: dict, **opts) -> str:
 def _restore_plan(owner: dict, f: dict, **opts) -> dict:
     r = backups.daemon_call(owner, "mirror_restore_plan", folder_id=f["id"], **opts)
     if not r.get("success"):
-        raise mirroring.MirrorError(f"Casper on your Mac needs an update to restore: {r.get('stderr')}")
+        raise mirroring.MirrorError(f"Casper on your computer needs an update to restore: {r.get('stderr')}")
     return json.loads(r["stdout"])
 
 
 def _no_fit(what: str, need: int, free: int, replace_ok: bool) -> str:
-    base = f"{what} needs about {backups.human(need)} and your Mac has {backups.human(free)} free."
+    base = f"{what} needs about {backups.human(need)} and your computer has {backups.human(free)} free."
     if replace_ok:
         return (f"{base} It would fit if the old version replaced the current one instead (the current one stays in your history for 30 days). "
                 "Offer that; only on their yes, call again with mode='replace'.")
@@ -3422,7 +3422,7 @@ def _mcp_show_restore_picker(user_id: int, folder: str, name_contains: str = "",
         if not versions:
             return "Nothing earlier matches" + (" among deleted files." if deleted_only else ".")
         if owner is None:
-            return "Can't: your Mac isn't connected right now."
+            return "Can't: your computer isn't connected right now."
         request = secrets.token_urlsafe(12)
         entry = {"user": user_id, "folder": folder, "versions": versions, "event": threading.Event(), "result": ""}
         _restore_picks[request] = entry
@@ -3430,12 +3430,12 @@ def _mcp_show_restore_picker(user_id: int, folder: str, name_contains: str = "",
                                 items=restore_logic.row_labels(versions))
         if not r.get("success"):
             _restore_picks.pop(request, None)
-            return "Can't: Casper on your Mac needs an update to show the list. Ask them for the file's name instead."
+            return "Can't: Casper on your computer needs an update to show the list. Ask them for the file's name instead."
     entry = _restore_picks.get(request)
     if entry is None or entry["user"] != user_id:
         return "That list is no longer open."
     if not entry["event"].wait(timeout=100):
-        return f"They haven't chosen yet (the list is open on their Mac). Call show_restore_picker again with request={request!r} to keep waiting."
+        return f"They haven't chosen yet (the list is open on their computer). Call show_restore_picker again with request={request!r} to keep waiting."
     _restore_picks.pop(request, None)
     return entry["result"]
 
@@ -3523,7 +3523,7 @@ def _start_restore(f, dest_host_id: int, abs_path: str, dest_label: str) -> str:
     return (
         f"Restoring {f['label']} onto {dest_label} at {abs_path} from its mirrors"
         + (" and catcher" if f["use_casper_catcher"] or _has_catcher(f["id"]) else "")
-        + ". This needs the folder's password on that Mac (from the recovery kit: `Casper setup restore`). Check progress with protection_status."
+        + ". This needs the folder's password on that computer (from the recovery kit: `Casper setup restore`). Check progress with protection_status."
     )
 
 
@@ -3538,7 +3538,7 @@ def _mcp_restore_folder(user_id: int, folder: str, dest_host: str, dest_path: st
         return f"Can't: {dest_host} isn't one of your connected machines."
     host_id = configs[dest_host]["host_id"]
     if host_id == f["owner_host_id"]:
-        return "That's the Mac the folder already lives on; use restore_version for individual files."
+        return "That's the computer the folder already lives on; use restore_version for individual files."
     path = dest_path or f"~/Casper Restores/{f['label']}"
     home = configs[dest_host].get("cwd") or ""
     abs_path = path.replace("~", home, 1) if path.startswith("~") and home else path
@@ -3599,11 +3599,11 @@ def host_restore(body: dict, authorization: str = Header(default="")):
             raise HTTPException(status_code=404, detail=f"No such folder to restore: {item.get('id')}.")
         path = str(item.get("path") or f"~/Casper Restores/{f['label']}")
         if path.startswith("~") and not home:
-            raise HTTPException(status_code=409, detail="This Mac isn't reachable yet; try again in a moment.")
+            raise HTTPException(status_code=409, detail="This computer isn't reachable yet; try again in a moment.")
         abs_path = path.replace("~", home, 1) if path.startswith("~") else path
         if home and not (abs_path == home or abs_path.startswith(home + "/")):
-            raise HTTPException(status_code=400, detail="A folder can only be restored inside this Mac's home folder.")
-        _start_restore(f, host_id, abs_path, "this Mac")
+            raise HTTPException(status_code=400, detail="A folder can only be restored inside this computer's home folder.")
+        _start_restore(f, host_id, abs_path, "this computer")
         started.append({"id": f["id"], "label": f["label"], "path": abs_path})
     return {"started": started}
 
@@ -3713,14 +3713,14 @@ def _guide_reply(user_id: int, text: str, event: bool = False,
 # What moved the person on to each step -- the guide's cue to carry on by itself.
 _STEP_NEWS = {
     "install": "Their invite is accepted.",
-    "choose_folder": "Their Mac is connected now.",
+    "choose_folder": "Their computer is connected now.",
     "syncing": "They clicked Mirror; the first copy is under way.",
     "unreadable": "Casper can't read some items in their folder.",
-    "recover_install": "They lost their Mac and signed in on a new one.",
-    "recover_unlock": "Their new Mac is connected.",
-    "recover_choose": "They opened their recovery kit on the new Mac.",
+    "recover_install": "They lost their computer and signed in on a new one.",
+    "recover_unlock": "Their new computer is connected.",
+    "recover_choose": "They opened their recovery kit on the new computer.",
     "recover_copy": "They chose Restore; the folders are coming back.",
-    "recovered": "Their folders are back on the new Mac.",
+    "recovered": "Their folders are back on the new computer.",
     "recovery_kit": "Their folder is protected now.",
     "give_back": "Their recovery kit is done.",
 }
@@ -3806,7 +3806,11 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
                     "SELECT h.id FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key WHERE hp.user_id = ?", (user_id,)).fetchall())
     # "Has a Mac" (paired), not "connected this second": the service forgets who's connected
     # when it restarts, and that must never send someone back to the download step.
-    facts.mac_connected = any(h["role"] == "owner" for h in _mcp_list_hosts(user_id))
+    owned = [h for h in _mcp_list_hosts(user_id) if h["role"] == "owner"]
+    facts.mac_connected = bool(owned)
+    # One word for their computers only when they all agree ("Mac" / "PC"); otherwise "computer".
+    kinds = {h.get("platform") for h in owned}
+    facts.platform = kinds.pop() if len(kinds) == 1 and kinds <= {"macos", "windows"} else ""
     return facts
 
 
@@ -3854,7 +3858,7 @@ def _copy_progress(user_id: int) -> str:
     mirrors = [p for p in st.get("peers", []) if p.get("role") == "mirror"]
     ever = any(p.get("connected") or not str(p.get("last_seen", "")).startswith("1969") for p in mirrors)
     if not ever:
-        return f"Connecting to your friend's Mac to copy {f['label']}…"
+        return f"Connecting to your friend's computer to copy {f['label']}…"
     pct = max((p.get("completion", 0) for p in mirrors), default=0)
     return f"Copying {f['label']}: {pct:.0f}%"
 
@@ -3938,13 +3942,13 @@ def _choose_folder(user_id: int, reply_to: str = "web") -> str:
     host_id = _own_host_id(user_id, hosts[0]["host"]) if hosts else None
     config = _host_config(user_id, host_id) if host_id else None
     if config is None:
-        return "Your Mac isn't connected right now."
+        return "Your computer isn't connected right now."
     request_id = secrets.token_urlsafe(12)
     _folder_requests[request_id] = (user_id, reply_to)
     r = backups.daemon_call(config, "mirror_choose_folder", approval_id=request_id)
     if not r.get("success"):
         _folder_requests.pop(request_id, None)
-        return "Casper on your Mac needs an update to choose a folder. Name the folder instead."
+        return "Casper on your computer needs an update to choose a folder. Name the folder instead."
     return ""
 
 

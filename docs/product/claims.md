@@ -143,7 +143,7 @@ looser than the facts.
 
 - **Wording.** `my_casper`: `Your machines: Noah's Mac (online), …`; `list_hosts`
   `connected`; guide/choose-folder: `"Your Mac isn't connected right now."`;
-  guide stage `choose_folder` gate: "Their Mac is connected now."
+  guide stage `choose_folder` gate: "Their computer is connected now."
   `setup status`: "This Mac: paired and connected as …".
 - **Must hold.** The Mac is on, Casper is running, and we can reach it.
 - **How known.** S1 only (presence, TTL 180 s).
@@ -348,7 +348,7 @@ looser than the facts.
   never compared with the sum of grants. **M**: "asks nothing but their Mac being
   on" omits bandwidth and a bundled Syncthing running.
 
-#### C15. "Casper keeps … safe for you from another Mac. Is that Mac lost?" (recover offer) / menu "Recover from a Lost Mac…" appears
+#### C15. "Casper keeps … safe for you from another computer. Is that computer lost?" (recover offer) / menu "Recover from a Lost Computer…" appears
 
 - **Must hold.** There are folders this account owns that another Mac owns and
   this Mac can restore; the person's folders really are held by peers.

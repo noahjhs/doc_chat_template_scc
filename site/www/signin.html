@@ -9,11 +9,11 @@
 <button class="btn" type="submit">Sign in</button>
 <p class="err" id="err"></p>
 <p class="muted small">New to Casper? <a id="toSignup" href="/signup">Create an account</a></p>
-<p class="muted small" id="lostLine">Lost your Mac? <a id="lostLink" href="/signin?lost=1">I lost my Mac</a></p>
+<p class="muted small" id="lostLine">Lost your computer? <a id="lostLink" href="/signin?lost=1">I lost my computer</a></p>
 </form>
 <div id="status" class="panel hide"><h3 id="statusTitle">One moment…</h3><p class="muted" id="statusText"></p><p id="statusAction"></p></div>
 </section>
-<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
+<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS and Windows 11</span></footer></div><script src="/app.js"></script><script>
 const fromApp = Casper.param("from") === "app";
 const lost = Casper.param("lost") === "1";
 const next = Casper.param("next") || (lost ? "/guide?lost=1" : "/guide");
@@ -26,9 +26,9 @@ if (fromApp) document.getElementById("lostLink").href = "/signin?lost=1&from=app
 if (lost) {
   document.getElementById("lostLine").classList.add("hide");
   document.getElementById("eyebrow").innerText = "Getting your folders back";
-  document.getElementById("title").innerText = "Sign in on this Mac";
+  document.getElementById("title").innerText = "Sign in on this computer";
 }
-if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this Mac"; }
+if (fromApp) { document.getElementById("eyebrow").innerText = "Casper is installed"; document.getElementById("title").innerText = "Sign in to connect this computer"; }
 const $ = id => document.getElementById(id);
 // One thing on screen at a time: the form, or the connection status -- never both.
 function showForm() { $("status").classList.add("hide"); $("f").classList.remove("hide"); $("f").querySelector("input").focus(); }
@@ -60,7 +60,7 @@ function guideOpen(ms = 500) {
     ch.postMessage("anyone?");
   });
 }
-// "I lost my Mac": tell Casper, so its guide helps them recover instead of setting up.
+// "I lost my computer": tell Casper, so its guide helps them recover instead of setting up.
 async function markLost() { if (lost) { try { await Casper.api("/profile/lost-mac", { method: "POST" }); } catch (e) {} } }
 const pairCode = Casper.param("pair");
 async function connect() {
@@ -68,25 +68,25 @@ async function connect() {
   if (pairCode) {
     // Casper on this Mac is waiting for this code: approving it connects the
     // Mac directly -- no "Open Casper?" question from the browser.
-    showStatus("Connecting this Mac…");
+    showStatus("Connecting this computer…");
     try { await Casper.api("/pairing/approve", { method: "POST", body: { code: pairCode } }); }
     catch (e) { showStatus("This link has expired.", "Open Casper again and it'll bring you back here."); return; }
   } else {
-    showStatus("Connecting this Mac…", "If your browser asks to open Casper, choose Open.");
+    showStatus("Connecting this computer…", "If your browser asks to open Casper, choose Open.");
     Casper.pair();
   }
   if (await waitForConnected(before)) {
     // A guide tab already open carries on by itself: leave it to that one
     // rather than opening a second guide here.
     if (await guideOpen()) {
-      showStatus("This Mac is connected.", "Your guide carries on in your other Casper tab.");
+      showStatus("This computer is connected.", "Your guide carries on in your other Casper tab.");
       window.close();  // usually ignored for a tab the app opened; the line above stands
       return;
     }
-    showStatus("This Mac is connected.");
+    showStatus("This computer is connected.");
     setTimeout(() => location.href = next, 700);
   } else {
-    showStatus("Casper didn't connect.", "Make sure Casper is open on this Mac, then try again.",
+    showStatus("Casper didn't connect.", "Make sure Casper is open on this computer, then try again.",
                '<button class="btn" onclick="connect()">Try again</button>');
   }
 }

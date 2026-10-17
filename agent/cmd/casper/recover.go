@@ -54,7 +54,7 @@ func watchRecoverable(state *daemonState, mRecover *systray.MenuItem, logf func(
 			continue
 		}
 		_ = os.WriteFile(offered, nil, 0o600)
-		if yes, answered := dialog.Confirm("Casper keeps "+setup.JoinNames(labels)+" safe for you from another Mac. Is that Mac lost? Bring it back on this Mac with your recovery kit.",
+		if yes, answered := dialog.Confirm("Casper keeps "+setup.JoinNames(labels)+" safe for you from another computer. Is that computer lost? Bring it back on this computer with your recovery kit.",
 			"Recover", "Not Now", 5*time.Minute); answered && yes {
 			recoverFromLostMac(logf)
 		}
@@ -82,7 +82,7 @@ func recoverFromLostMac(logf func(format string, args ...any)) {
 		case strings.Contains(msg, "cancelled"):
 			return
 		case strings.Contains(msg, "wrong passphrase"):
-			msg = "That passphrase didn't open the kit. Choose Recover from a Lost Mac to try again."
+			msg = "That passphrase didn't open the kit. Choose Recover from a Lost Computer to try again."
 		case strings.Contains(msg, "isn't a Casper recovery kit"):
 			msg = "That file isn't a Casper recovery kit."
 		case strings.Contains(msg, "doesn't cover"), strings.Contains(msg, "nothing to recover"):

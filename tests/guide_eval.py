@@ -24,7 +24,8 @@ CODE = "CASPER-ABCD-EFGH-JKMN"
 class FakeCasper:
     """A simulated person's Casper: just enough state for the scenarios."""
 
-    def __init__(self, has_mac=True):
+    def __init__(self, has_mac=True, platform="macos"):
+        self.platform = platform if has_mac else ""
         self.has_mac, self.redeemed, self.mirroring, self.allowed, self.offering, self.invited = has_mac, False, False, False, False, False
         self.kit = False
         self.calls = []
@@ -33,7 +34,7 @@ class FakeCasper:
         """What the real service's _guide_facts would report for this state."""
         said = " ".join(m["content"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str))
         invite = {"code": CODE, "inviter": "sam", "state": "accepted" if self.redeemed else "open"} if CODE in said.upper() else None
-        return guide.Facts(mac_connected=self.has_mac, invite=invite, mirror_hosts=["sam/sams-mini"] if self.redeemed else [],
+        return guide.Facts(mac_connected=self.has_mac, platform=self.platform, invite=invite, mirror_hosts=["sam/sams-mini"] if self.redeemed else [],
                            folder=("active" if self.allowed else "awaiting_consent") if self.mirroring else "none",
                            protected=self.mirroring and self.allowed, recovery_kit=self.kit, offers_space=self.offering)
 
@@ -46,7 +47,7 @@ class FakeCasper:
 
     def list_hosts(self, u):
         self._log("list_hosts")
-        out = [{"host": "Rileys-MacBook", "role": "owner", "connected": True}] if self.has_mac else []
+        out = [{"host": "Rileys-MacBook" if self.platform == "macos" else "Rileys-PC", "role": "owner", "platform": self.platform, "connected": True}] if self.has_mac else []
         if self.redeemed:
             out.append({"host": "sam/sams-mini", "owner": "sam", "role": "mirror_peer", "quota": "10.0 GB", "connected": True})
         return out
@@ -188,7 +189,7 @@ def scenario_invited_newcomer(run):
     checks += [("accepted, then just the download", fake.redeemed and DOWNLOAD in r),
                ("no give-back yet", "offer sam" not in r.lower())]
     fake.has_mac = True
-    r = run(fake, "My Mac is connected.")
+    r = run(fake, "My computer is connected.")
     checks.append(("then which folder", "documents" in r.lower() and not _did(fake.calls, "mirror_folder", preview=False)))
     return checks
 
@@ -272,7 +273,18 @@ def _plan_not_done(run, fake):
     return checks + [("its yes sends the invite, no extra Send?", _did(_turn_calls(fake, c0), "create_invite", preview=False) and "send?" not in r.lower())]
 
 
-SCENARIOS = [scenario_invite_to_protected, scenario_invited_newcomer, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice]
+def scenario_windows_pc(run):
+    """A Windows PC: the guide points at the tray, never the menu bar, and never calls it a Mac."""
+    fake = FakeCasper(platform="windows")
+    fake.redeemed = fake.mirroring = fake.allowed = True
+    r = run(fake, f"My invite code is {CODE}. I installed Casper on my PC and it's mirroring.")
+    print(f"     windows: {r!r}")
+    low = r.lower()
+    return [("names the tray, not the menu bar", "tray" in low and "menu bar" not in low),
+            ("never says Mac", "mac" not in low.replace("make", ""))]
+
+
+SCENARIOS = [scenario_invite_to_protected, scenario_invited_newcomer, scenario_no_mac, scenario_offer_space, scenario_consent_trap, scenario_voice, scenario_windows_pc]
 
 
 JUDGE_MODEL = os.environ.get("GUIDE_JUDGE_MODEL", "z-ai/glm-5.2")
@@ -285,13 +297,13 @@ not cheer.
 Good replies lead with the result or the one decision needed, in one or two
 short lines; ask for missing information as a bare question, with no reason
 or apology; ask only about what isn't settled yet ("Noah's email?", "20 GB
-on this Mac?"), and act once everything is, with no extra "Send?"; and use no
+on this computer?"), and act once everything is, with no extra "Send?"; and use no
 praise, filler ("Great!", "Sure!", "Let me..."), apologies or exclamation
 marks, and no generic offers ("anything else?").
 
 Expected, and NOT a fault:
 - An empty reply: the guide waiting while Casper's own dialog is on screen.
-- Pointing to Casper's own interface the person must use: its menu-bar menu
+- Pointing to Casper's own interface the person must use: its menu-bar or tray menu
   and items like "Make Recovery Kit", the Casper dialog and its Mirror button,
   a download link. Naming these is the product, not internals.
 - Handing over a ready-to-send invitation message to forward: its text is

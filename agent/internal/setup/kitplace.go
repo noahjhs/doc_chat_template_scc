@@ -171,7 +171,7 @@ func (c *cli) offerMoveOldKit(username string, roots []string, explicit string) 
 	}
 	_ = os.WriteFile(offered, nil, 0o600)
 	if explicit == "" {
-		yes, answered := dialog.Confirm("Your recovery kit is in a folder Casper mirrors, so it couldn't open itself after losing this Mac. Move it somewhere safer?", "Move It", "Not Now", 3*time.Minute)
+		yes, answered := dialog.Confirm("Your recovery kit is in a folder Casper mirrors, so it couldn't open itself after losing this computer. Move it somewhere safer?", "Move It", "Not Now", 3*time.Minute)
 		if !answered || !yes {
 			return "", nil
 		}

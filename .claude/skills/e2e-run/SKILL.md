@@ -99,7 +99,7 @@ Write the report as you go, so a run that stops early still leaves one.
 ## Scenario `lost-mac`: Noah's Mac is lost and a new one recovers
 
 Tests recovery v2 as a person would live it: P0 (the kit is saved outside
-mirrored folders), P1 (the app's "Recover from a Lost Mac…") and P2 (the master
+mirrored folders), P1 (the app's "Recover from a Lost Computer…") and P2 (the master
 key covers old and new folders). Same ground rules; still one VM at a time
 (the old VM is discarded before the new one starts). Write this part of the
 report in a section of its own, `## Lost Mac`, and number its screenshots on
@@ -143,11 +143,11 @@ Then the loss and the recovery:
 4. In Noah's Chrome, open the sign-in page of the test stack
    (`https://test-app.casperagent.dev/signin`; check the real address in
    the invitation link's host if unsure). By clicking only, as a person
-   would: use "I lost my Mac" → sign in as Noah → the guide's recovery steps
+   would: use "I lost my computer" → sign in as Noah → the guide's recovery steps
    → download Casper → open it → the macOS dialogs → Move to Applications →
    the app's pairing hand-off. Note every place it asks something that isn't
    obvious to someone who just lost their Mac.
-5. From the ghost menu choose **Recover from a Lost Mac…**. Use only the
+5. From the ghost menu choose **Recover from a Lost Computer…**. Use only the
    app's own dialogs: pick the kit in the Open panel (Downloads), type the
    passphrase, read the Restore confirmation (it must list each folder and
    where it goes: note the exact text), click Restore. Try a wrong

@@ -1032,7 +1032,7 @@ def test_guide_carries_on_by_itself_when_caspers_state_moves_on(app_env, monkeyp
         out = client.post("/guide/continue", headers=riley).json()
         assert out["continued"] and out["reply"].endswith("Which folder should Casper keep safe? Documents is a good start.")
         assert out["choices"][1] == {"label": "Another folder…", "action": "choose_folder"}
-        assert "Their Mac is connected now." in calls[-1]
+        assert "Their computer is connected now." in calls[-1]
         assert not client.post("/guide/continue", headers=riley).json()["continued"]  # once per step
         shown = client.get("/guide/history", headers=riley).json()["messages"]
         assert not any("From Casper" in m["text"] for m in shown)  # the news itself isn't shown
@@ -1365,6 +1365,23 @@ def test_recovery_never_returns_once_closed(app_env):
     assert guide.stage_for(_facts(recovering=True, recover_folders=["Documents"]), history, "u").name == "open"
     # A new loss starts a fresh thread, so recovery steps work again there.
     assert guide.stage_for(_facts(recovering=True, recover_folders=["Documents"]), [], "u").name.startswith("recover")
+
+
+def test_guide_words_follow_the_platform(app_env):
+    """A Windows PC hears "tray" and "PC", a Mac keeps "menu bar" and "Mac", mixed or unknown is "computer"."""
+    import guide
+
+    def kit(platform):
+        return guide.stage_for(guide.Facts(mac_connected=True, platform=platform, folder="active", protected=True), [], "u").say
+
+    assert "tray" in kit("windows") and "menu bar" not in kit("windows")
+    assert "menu bar" in kit("macos") and "tray" not in kit("macos")
+    assert "mac" not in kit("windows").lower().replace("make", "")
+    give_back = guide.stage_for(guide.Facts(mac_connected=True, platform="windows", folder="active", protected=True, recovery_kit=True,
+                                            invite={"code": "C", "inviter": "Sam", "state": "accepted"}), [], "u").say
+    assert give_back.endswith("space on your PC too?")
+    install = guide.stage_for(guide.Facts(), [], "https://x/download")
+    assert "Windows protected your PC" in install.say and "https://x/download" in install.say
 
 
 def test_typed_message_in_a_silent_step_is_not_dropped(app_env):

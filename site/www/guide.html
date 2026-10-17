@@ -8,7 +8,7 @@
 <div id="choices" class="choices"></div>
 <form id="f" class="composer"><input id="t" placeholder="Message Casper's guide" autocomplete="off"><button class="btn" type="submit">Send</button></form>
 </section>
-<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS</span></footer></div><script src="/app.js"></script><script>
+<footer><span>Casper — held by friends, read by no one.</span><span><a href="${WWW_URL}/">Home</a> · <a href="/guide">Guide</a> · Early alpha · macOS and Windows 11</span></footer></div><script src="/app.js"></script><script>
 if (!Casper.session()) location.replace("/signin?next=" + encodeURIComponent(location.pathname + location.search));
 const $ = id => document.getElementById(id);
 const GHOST = document.querySelector(".logo svg").outerHTML;
@@ -24,7 +24,7 @@ function bubble(role, html, extra = "") {
 }
 
 // One "thinking" bubble, however many reasons there are to show it (a reply
-// being written, Casper waiting on their Mac): each reason holds it on.
+// being written, Casper waiting on their computer): each reason holds it on.
 const dotsFor = new Set();
 let dotsEl = null;
 function dots(reason, on) {
@@ -40,14 +40,14 @@ function setChoices(list) {
   // Optional buttons ("box") sit beside the text box; the others replace it.
   $("f").classList.toggle("hide", has && !(list || []).every(c => typeof c === "object" && c.box));
   // The folder step (its buttons include the folder chooser): sizing the folder
-  // picked makes macOS ask whether Casper may see it. Say so before it pops up.
+  // picked makes macOS ask whether Casper may see it (Windows doesn't ask). Say so before it pops up.
   const folderStep = (list || []).some(c => typeof c === "object" && c.action === "choose_folder");
   (list || []).forEach((c, i) => {
     const b = document.createElement("button"); b.className = i === 0 ? "btn" : "btn ghost";
     b.innerText = typeof c === "string" ? c : c.label;
     b.onclick = () => {
       // Sizing a folder makes macOS ask whether Casper may see it: say so before it pops up.
-      if (folderStep && typeof c === "string")
+      if (folderStep && typeof c === "string" && !Casper.isWindows())
         setTimeout(() => { if (busy) bubble("assistant", "If your Mac asks whether Casper can see " + c + ", choose Allow.", "note-bubble"); }, 3000);
       typeof c === "string" ? send(c) : act(c.action);
     };
@@ -191,7 +191,7 @@ async function tick() {
   } catch (e) { /* offline for a moment: try again next tick */ }
 }
 
-// Chrome blocks Casper's download as "suspicious" until it's kept. If the Mac still
+// A browser holds Casper's download until it's kept (Chrome: "suspicious"; on Windows, SmartScreen too). If the computer still
 // hasn't connected a little after Download was clicked, say what to do, once.
 let hinted = false;
 document.addEventListener("click", ev => {
@@ -200,7 +200,9 @@ document.addEventListener("click", ev => {
   hinted = true;
   setTimeout(async () => {
     try { if (!["install", "recover_install"].includes((await Casper.api("/guide/state")).stage)) return; } catch (e) { return; }
-    bubble("assistant", "Chrome blocked it? Click the download arrow in Chrome's toolbar, then Download suspicious file.", "note-bubble");
+    bubble("assistant", Casper.isWindows()
+      ? "Windows warned about it? Keep the download in your browser, open it, then choose More info, then Run anyway."
+      : "Chrome blocked it? Click the download arrow in Chrome's toolbar, then Download suspicious file.", "note-bubble");
   }, 5000);
 });
 
@@ -222,7 +224,7 @@ tabs.onmessage = ev => { if (ev.data === "anyone?") tabs.postMessage("guide-open
   if (lost) {
     history.replaceState(null, "", location.pathname);
     const msgs = (await Casper.api("/guide/history")).messages;
-    if (!msgs.length) await send("They lost their Mac and are signed in on a new one.", { hidden: true });
+    if (!msgs.length) await send("They lost their computer and are signed in on a new one.", { hidden: true });
   }
   setInterval(tick, 3000);
 })();

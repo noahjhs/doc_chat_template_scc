@@ -277,7 +277,7 @@ func onReady(state *daemonState, restart func(), logf func(format string, args .
 	// macOS dialogs.
 	mKit := systray.AddMenuItem("Make Recovery Kit…", "")
 	// Shown only while this account has folders whose Mac is another one.
-	mRecover := systray.AddMenuItem("Recover from a Lost Mac…", "")
+	mRecover := systray.AddMenuItem("Recover from a Lost Computer…", "")
 	mRecover.Hide()
 	systray.AddSeparator()
 	// Restart, not just Quit -- a manual fallback for cases the automatic
@@ -392,7 +392,7 @@ func makeRecoveryKit(logf func(format string, args ...any)) {
 		return
 	}
 	logf("Recovery kit saved to %s", result.Path)
-	if show, _ := dialog.Confirm(fmt.Sprintf("Recovery kit saved in %s. Keep a copy, and your passphrase, somewhere other than this Mac.", filepath.Base(filepath.Dir(result.Path))),
+	if show, _ := dialog.Confirm(fmt.Sprintf("Recovery kit saved in %s. Keep a copy, and your passphrase, somewhere other than this computer.", filepath.Base(filepath.Dir(result.Path))),
 		"Show in "+platform.FileManager(), "Done", 10*time.Minute); show {
 		_ = platform.Reveal(result.Path)
 	}

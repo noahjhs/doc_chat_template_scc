@@ -6,6 +6,14 @@ const Casper = {
   DOWNLOAD_URL: "${DOWNLOAD_URL}",
   WWW_URL: "${WWW_URL}",
 
+  // The browser's own OS, which is the computer the person is setting up
+  // (the page asks about "this computer" and names it only when it knows).
+  isWindows() {
+    const ua = navigator.userAgentData;
+    return /Windows/i.test(ua && ua.platform ? ua.platform : navigator.userAgent);
+  },
+  computer() { return this.isWindows() ? "PC" : "Mac"; },
+
   session() {
     const token = localStorage.getItem("casper_token");
     return token ? { token, username: localStorage.getItem("casper_username") } : null;

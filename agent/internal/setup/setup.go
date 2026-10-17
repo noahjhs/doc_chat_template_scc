@@ -49,7 +49,7 @@ func Main(args []string) int {
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.BoolVar(&c.json, "json", false, "print JSON")
-	fs.StringVar(&c.account, "account", "", "which Casper account (when this Mac has more than one)")
+	fs.StringVar(&c.account, "account", "", "which Casper account (when this computer has more than one)")
 	username := fs.String("username", "", "username")
 	client := fs.String("client", "claude-code", "which agent to connect")
 	fs.StringVar(&c.kitTo, "to", "", "recovery-kit: file to save to")
@@ -93,14 +93,14 @@ const usage = `Casper setup -- the mechanics of setting Casper up, for you or yo
 Every command is safe to re-run.
 
   status                        what's done, and the next step
-  account create --username U   create a Casper account (password kept in the Keychain)
+  account create --username U   create a Casper account (password kept in the OS credential store)
   account login --username U    sign in to an existing account (asks in a dialog)
-  pair                          connect this Mac to the account
+  pair                          connect this computer to the account
   agent [--client claude-code]  connect your AI agent to Casper (then restart the agent)
   notifications                 link Telegram for nudges and approvals (optional)
   recovery-kit [--to FILE]      save what's needed to recover (folder passwords, keys), locked by a passphrase you type; never inside a mirrored folder
-  restore --kit FILE            on a new Mac: import a recovery kit, so mirrored folders can be rebuilt here
-  recover [--kit FILE]          on a new Mac: Casper's "Recover from a Lost Mac" -- kit, passphrase and the Restore yes are all given in Casper's own windows
+  restore --kit FILE            on a new computer: import a recovery kit, so mirrored folders can be rebuilt here
+  recover [--kit FILE]          on a new computer: Casper's "Recover from a Lost Computer" -- kit, passphrase and the Restore yes are all given in Casper's own windows
 
 Flags: --json (machine-readable), --account U (if this Mac has several accounts).
 `

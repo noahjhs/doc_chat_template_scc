@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"casper-agent/internal/platform"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,7 +56,7 @@ func saveIndex(names []string) error {
 func saveAccount(authDomain string, a *storedAccount) error {
 	secret, _ := json.Marshal(a)
 	if err := keychainSave(authDomain+"/"+a.Username, secret); err != nil {
-		return fmt.Errorf("saving to the Keychain: %w", err)
+		return fmt.Errorf("saving to the %s: %w", platform.KeyStore(), err)
 	}
 	names := loadIndex()
 	for _, n := range names {
@@ -81,7 +82,7 @@ func loadAccount(authDomain, username string) (*storedAccount, error) {
 	return &a, nil
 }
 
-var errNoAccount = errors.New("no Casper account is set up on this Mac yet -- run `setup account create --username <name>` (or `account login` for an existing one)")
+var errNoAccount = errors.New("no Casper account is set up on this computer yet -- run `setup account create --username <name>` (or `account login` for an existing one)")
 
 // currentAccount is --account, or the only account on this Mac.
 func (c *cli) currentAccount() (*storedAccount, error) {
@@ -94,7 +95,7 @@ func (c *cli) currentAccount() (*storedAccount, error) {
 		case 1:
 			name = names[0]
 		default:
-			return nil, fmt.Errorf("this Mac has several Casper accounts (%v) -- say which with --account", names)
+			return nil, fmt.Errorf("this computer has several Casper accounts (%v) -- say which with --account", names)
 		}
 	}
 	a, err := loadAccount(c.authDomain, name)
@@ -102,7 +103,7 @@ func (c *cli) currentAccount() (*storedAccount, error) {
 		return nil, err
 	}
 	if a == nil {
-		return nil, fmt.Errorf("no saved credentials for %s on this Mac", name)
+		return nil, fmt.Errorf("no saved credentials for %s on this computer", name)
 	}
 	return a, nil
 }

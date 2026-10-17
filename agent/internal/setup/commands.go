@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"casper-agent/internal/platform"
 	"errors"
 	"fmt"
 	"net/http"
@@ -82,10 +83,10 @@ func (c *cli) status() error {
 	acct, err := c.currentAccount()
 	if names := loadIndex(); err != nil && len(names) > 1 && c.account == "" {
 		// Several people's accounts on one Mac: never guess whose this is.
-		lines = append(lines, "Accounts on this Mac: "+strings.Join(names, ", ")+" (all still set up)")
+		lines = append(lines, "Accounts on this computer: "+strings.Join(names, ", ")+" (all still set up)")
 		set("Ask which account is the person's (or whether they need a new one), then add --account <name> to every setup command")
 	} else if err != nil {
-		lines = append(lines, "Account: none on this Mac")
+		lines = append(lines, "Account: none on this computer")
 		set("Create an account: `setup account create --username <name>` (ask the person what name their friends should know them by)")
 	} else {
 		st["account"] = acct.Username
@@ -128,15 +129,15 @@ func (c *cli) status() error {
 		}
 		switch {
 		case mac == nil:
-			lines = append(lines, "This Mac: not paired")
-			set("Pair this Mac: `setup pair`")
+			lines = append(lines, "This computer: not paired")
+			set("Pair this computer: `setup pair`")
 		case !mac.Connected:
 			st["this_mac"] = mac.Label
-			lines = append(lines, "This Mac: paired as "+mac.Label+", but not connected")
-			set("Make sure Casper is running (and its menu-bar ghost isn't paused), then run `setup status` again")
+			lines = append(lines, "This computer: paired as "+mac.Label+", but not connected")
+			set("Make sure Casper is running (and its ghost in the " + platform.Tray() + " isn't paused), then run `setup status` again")
 		default:
 			st["this_mac"] = mac.Label
-			lines = append(lines, "This Mac: paired and connected as "+mac.Label)
+			lines = append(lines, "This computer: paired and connected as "+mac.Label)
 		}
 		claude := claudeHasCasper()
 		st["claude_code_connected"] = claude
@@ -192,7 +193,7 @@ func (c *cli) accountCreate(username string) error {
 	if existing, _ := loadAccount(c.authDomain, username); existing != nil {
 		c.account = username
 		return c.authed(func(token string) error {
-			c.emit("Account "+username+" is already set up on this Mac.", map[string]any{"ok": true, "username": username, "created": false})
+			c.emit("Account "+username+" is already set up on this computer.", map[string]any{"ok": true, "username": username, "created": false})
 			return nil
 		})
 	}
@@ -201,7 +202,7 @@ func (c *cli) accountCreate(username string) error {
 	// otherwise a refused save (e.g. the login keychain is unreachable from
 	// an SSH session) leaves a real account nobody can ever sign in to.
 	if err := keychainSave(c.authDomain+"/"+username, []byte(`{"pending":true}`)); err != nil {
-		return fmt.Errorf("can't save to this Mac's Keychain (%v) -- if this is an SSH session, run setup in Terminal on the Mac itself, where the login keychain is available; nothing was created", err)
+		return fmt.Errorf("can't save to this computer's %s (%v) -- if this is an SSH session, run setup in a terminal on the computer itself, where the login keychain is available; nothing was created", platform.KeyStore(), err)
 	}
 	var resp struct {
 		Token string `json:"token"`
@@ -209,7 +210,7 @@ func (c *cli) accountCreate(username string) error {
 	if err := c.call("POST", "/signup", "", map[string]string{"username": username, "password": password}, &resp); err != nil {
 		var ae *apiError
 		if errors.As(err, &ae) && ae.status == 409 {
-			return fmt.Errorf("the name %q is taken -- ask the person for another (or, if it's theirs from another Mac, use `setup account login`)", username)
+			return fmt.Errorf("the name %q is taken -- ask the person for another (or, if it's theirs from another computer, use `setup account login`)", username)
 		}
 		return err
 	}
@@ -218,9 +219,9 @@ func (c *cli) accountCreate(username string) error {
 	}
 	extra := ""
 	if len(loadIndex()) > 1 {
-		extra = fmt.Sprintf(" This Mac now has more than one Casper account, so add --account %s to the setup commands that follow.", username)
+		extra = fmt.Sprintf(" This computer now has more than one Casper account, so add --account %s to the setup commands that follow.", username)
 	}
-	c.emit(fmt.Sprintf("Created Casper account %s. Its password is in this Mac's Keychain (\"Casper Account\"); nobody needs to type it.%s", username, extra),
+	c.emit(fmt.Sprintf("Created Casper account %s. Its password is in this computer's %s (\"Casper Account\"); nobody needs to type it.%s", username, platform.KeyStore(), extra),
 		map[string]any{"ok": true, "username": username, "created": true})
 	return nil
 }
@@ -252,7 +253,7 @@ func (c *cli) pair() error {
 		if mac, err := c.thisMac(token); err != nil {
 			return err
 		} else if mac != nil && mac.Connected {
-			c.emit("This Mac is already paired and connected as "+mac.Label+".", map[string]any{"ok": true, "host": mac.Label, "already": true})
+			c.emit("This computer is already paired and connected as "+mac.Label+".", map[string]any{"ok": true, "host": mac.Label, "already": true})
 			return nil
 		}
 		started := time.Now()
@@ -267,11 +268,11 @@ func (c *cli) pair() error {
 				return errors.New("pairing failed: " + st.Message)
 			}
 			if mac, err := c.thisMac(token); err == nil && mac != nil && mac.Connected {
-				c.emit("Paired: this Mac is connected to Casper as "+mac.Label+".", map[string]any{"ok": true, "host": mac.Label})
+				c.emit("Paired: this computer is connected to Casper as "+mac.Label+".", map[string]any{"ok": true, "host": mac.Label})
 				return nil
 			}
 		}
-		return errors.New("timed out waiting for this Mac to connect -- check Casper is running (menu-bar ghost), and that any first-launch dialog was answered, then run `setup pair` again")
+		return errors.New("timed out waiting for this computer to connect -- check Casper is running (ghost in the " + platform.Tray() + "), and that any first-launch dialog was answered, then run `setup pair` again")
 	})
 }
 
@@ -449,7 +450,7 @@ func (c *cli) recoveryKit() error {
 		kit.LegacyBundle, kit.MirrorPasswords = kit.MirrorPasswords, nil
 	}
 	if kit.BackupKeys == nil && len(kit.folderPasswords()) == 0 && kit.MasterKey == nil {
-		return errors.New("this Mac has no keys or mirrored folders yet -- make the kit after setting up mirroring (or after pairing, for backups)")
+		return errors.New("this computer has no keys or mirrored folders yet -- make the kit after setting up mirroring (or after pairing, for backups)")
 	}
 	// Decide where it goes before asking for a passphrase: never inside a
 	// mirrored folder.
@@ -469,7 +470,7 @@ func (c *cli) recoveryKit() error {
 	if err != nil {
 		return err
 	}
-	pass, err := askHidden("Choose a passphrase for your Casper recovery kit (12+ characters). Keep it somewhere other than this Mac.")
+	pass, err := askHidden("Choose a passphrase for your Casper recovery kit (12+ characters). Keep it somewhere other than this computer.")
 	if err != nil {
 		return err
 	}
@@ -491,7 +492,7 @@ func (c *cli) recoveryKit() error {
 	// Tell Casper a kit was made (only that -- the kit stays here), so the
 	// guide knows the step is done. Best effort.
 	report()
-	c.emit(fmt.Sprintf("Saved the recovery kit to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this Mac.", path),
+	c.emit(fmt.Sprintf("Saved the recovery kit to %s. Tell the person to keep a copy of it, and the passphrase they chose, somewhere other than this computer.", path),
 		map[string]any{"ok": true, "path": path, "version": kit.Version, "mirrored_folders": len(kit.folderPasswords())})
 	return nil
 }
@@ -516,7 +517,7 @@ func (c *cli) restore(kitPath string) error {
 		return err
 	}
 	if kit.Account != "" && kit.Account != acct.Username {
-		return fmt.Errorf("this kit is for %s, but this Mac is signed in as %s", kit.Account, acct.Username)
+		return fmt.Errorf("this kit is for %s, but this computer is signed in as %s", kit.Account, acct.Username)
 	}
 	if err := importKitKeys(c.keys(), mirrord.KeychainPasswords{}, c.authDomain, acct.Username, kit); err != nil {
 		return err
@@ -526,7 +527,7 @@ func (c *cli) restore(kitPath string) error {
 			_, _ = (backup.MacKeychain{}).Save(c.backupKeyAccount(acct.Username), kit.BackupKeys)
 		}
 	}
-	c.emit("Imported the recovery kit: this Mac can now rebuild the mirrored folders (ask the agent to restore_folder, or choose Recover from a Lost Mac in Casper's menu).",
+	c.emit("Imported the recovery kit: this computer can now rebuild the mirrored folders (ask the agent to restore_folder, or choose Recover from a Lost Computer in Casper's menu).",
 		map[string]any{"ok": true, "mirrored_folders": len(kit.folderPasswords())})
 	return nil
 }

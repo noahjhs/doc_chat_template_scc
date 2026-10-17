@@ -185,7 +185,7 @@ func (s *Service) Step() {
 				statuses = append(statuses, map[string]any{"folder_id": f.ID, "restoring": true, "need_files": need, "state": state,
 					"local_files": local, "overlaid_from_catcher": overlaid, "error": errString(err),
 					"settled_for_s": s.settledFor(f, err == nil && need == 0 && state == "idle" && local > 0),
-					"empty_for_s": s.emptyFor(f.ID, err == nil && need == 0 && state == "idle" && local == 0 && overlaid == 0)})
+					"empty_for_s":   s.emptyFor(f.ID, err == nil && need == 0 && state == "idle" && local == 0 && overlaid == 0)})
 				continue
 			}
 			st, risk := s.Mgr.OwnedStatus(f)
@@ -361,7 +361,7 @@ type ops struct {
 	user string
 }
 
-var errNotYours = errors.New("no such mirrored folder for this account on this Mac")
+var errNotYours = errors.New("no such mirrored folder for this account on this computer")
 
 func (o *ops) desired() mirror.Desired {
 	o.s.mu.Lock()

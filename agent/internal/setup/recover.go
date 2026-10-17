@@ -52,12 +52,12 @@ func kitFileText(kit Kit, host string, made time.Time, passphrase string) (strin
 	}
 	return fmt.Sprintf(`Casper recovery kit -- %s (made on %s, %s)
 
-This file holds what's needed to get your data back if this Mac is lost:
+This file holds what's needed to get your data back if this computer is lost:
 the key to your mirrored folders (including ones you add later) and your
 backup keys, all locked with the passphrase you chose. With this file and that passphrase,
-a new Mac can rebuild your mirrored folders from your friends' computers:
-choose "Recover from a Lost Mac" in Casper's menu on the new Mac. Keep a copy
-of this file, and the passphrase, somewhere other than this Mac (a password
+a new computer can rebuild your mirrored folders from your friends' computers:
+choose "Recover from a Lost Computer" in Casper's menu on the new computer. Keep a copy
+of this file, and the passphrase, somewhere other than this computer (a password
 manager is ideal).
 %s
 %s`, kit.Account, host, made.Format("2 Jan 2006"), staleNote, armored), nil
@@ -154,7 +154,7 @@ func importKitKeys(keys *recovery.Keys, pw mirrord.Passwords, authDomain, userna
 // folders could come back and, on the person's yes, starts rebuilding them.
 func Recover(a RecoverArgs) (started map[string]string, err error) {
 	if a.Kit.Account != "" && a.Kit.Account != a.Username {
-		return nil, fmt.Errorf("this kit is for %s, but this Mac is signed in as %s", a.Kit.Account, a.Username)
+		return nil, fmt.Errorf("this kit is for %s, but this computer is signed in as %s", a.Kit.Account, a.Username)
 	}
 	if a.Keys == nil {
 		a.Keys = NewKeys(recovery.KeychainStore{}, a.Passwords, a.AuthDomain)
@@ -194,8 +194,8 @@ func Recover(a RecoverArgs) (started map[string]string, err error) {
 			lines = append(lines, fmt.Sprintf("%s  →  %s", f.Label, shortPath(p, a.Home)))
 		}
 	}
-	summary := "Bring back " + JoinNames(labels) + " on this Mac?\n\n" + strings.Join(lines, "\n") +
-		"\n\nThey come back from your friends' computers, and this Mac keeps them mirrored afterwards."
+	summary := "Bring back " + JoinNames(labels) + " on this computer?\n\n" + strings.Join(lines, "\n") +
+		"\n\nThey come back from your friends' computers, and this computer keeps them mirrored afterwards."
 	if len(uncovered) > 0 {
 		summary += "\n\n(The kit doesn't cover " + fmt.Sprint(len(uncovered)) + " other folder(s).)"
 	}
@@ -217,13 +217,13 @@ func (c *cli) recover(kitPath string) error {
 	for i := range sessions {
 		if c.account == "" || sessions[i].Username == c.account {
 			if s != nil {
-				return errors.New("this Mac is signed in to more than one Casper account -- say which with --account")
+				return errors.New("this computer is signed in to more than one Casper account -- say which with --account")
 			}
 			s = &sessions[i]
 		}
 	}
 	if s == nil {
-		return errors.New("this Mac isn't signed in to Casper yet -- sign in first")
+		return errors.New("this computer isn't signed in to Casper yet -- sign in first")
 	}
 	if kitPath == "" {
 		p, ok := dialog.OpenFile("Choose your Casper recovery kit", platform.KnownFolder("Downloads"))
@@ -261,7 +261,7 @@ func (c *cli) recover(kitPath string) error {
 	if err != nil {
 		return err
 	}
-	c.emit(fmt.Sprintf("Restoring %d folder(s) onto this Mac from your friends' computers. Casper keeps them mirrored once they're back.", len(where)),
+	c.emit(fmt.Sprintf("Restoring %d folder(s) onto this computer from your friends' computers. Casper keeps them mirrored once they're back.", len(where)),
 		map[string]any{"ok": true, "folders": where})
 	return nil
 }

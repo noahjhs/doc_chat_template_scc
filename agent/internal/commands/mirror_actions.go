@@ -139,10 +139,10 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 		// Opens the Casper Restores folder in Finder (macOS), where restored folders land.
 		dir := filepath.Join(h.HomeRoot(), RestoresDirName)
 		if _, err := os.Stat(dir); err != nil {
-			return nil, &ActionError{Detail: "There's no Casper Restores folder on this Mac."}
+			return nil, &ActionError{Detail: "There's no Casper Restores folder on this computer."}
 		}
 		if err := platform.OpenFolder(dir); err != nil {
-			return nil, &ActionError{Detail: "Couldn't open it in Finder."}
+			return nil, &ActionError{Detail: "Couldn't open it in " + platform.FileManager() + "."}
 		}
 		return map[string]any{"opened": true}, nil
 	case "mirror_version_trailers":

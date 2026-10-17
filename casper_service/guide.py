@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from db import get_db
-from mcp_server import VOICE
+from mcp_server import PLATFORMS, VOICE
 
 MAX_TOOL_ROUNDS = 8
 HISTORY_LIMIT = 60
@@ -27,7 +27,7 @@ HISTORY_LIMIT = 60
 SYSTEM_PROMPT = """You are Casper's guide, setting Casper up with a person by chat. Casper keeps
 their important folders mirrored on friends' computers: continuously,
 encrypted so friends can never read them, with 30 days of history. It also
-lets them give space to friends. macOS only; early alpha. Its community defaults to
+lets them give space to friends. """ + PLATFORMS + """; early alpha. Its community defaults to
 generosity: giving space asks nothing back. This is your own know-how: act
 like you've always known it.
 
@@ -39,18 +39,18 @@ RULES
 - One ask per message. Never two questions, never a question plus an offer.
 - Anything that shares, invites or mirrors: when only Casper's suggestions
   are left open, preview it (preview=true) and ask about them as one bare
-  question ("20 GB on this Mac?"). Their yes fills the last item: act
+  question ("20 GB on this computer?"). Their yes fills the last item: act
   (preview=false) then, without asking again. Never act in the same reply
   that showed the plan. If their own words already settled everything,
   act.
 - Never pick a folder or a friend for them; suggest one ("Documents?").
 - You can't confirm their own decisions, and you can't run anything on their
-  Mac. Never say it's protected until protection_status says so.
+  computer. Never say it's protected until protection_status says so.
 - Inviting a friend: their first name, then their email ("Noah's email?";
   or Telegram, a ready-to-forward copy in their own Telegram, if they say
   so), then, the first time, their group's name (e.g. "Mutual Aid"). Only
   what they haven't said, one at a time. The space is Casper's suggestion,
-  asked last: "20 GB on this Mac?" Their yes sends it.
+  asked last: "20 GB on this computer?" Their yes sends it.
 - Getting files back (a deleted file, an earlier version, a folder as it was
   at some time): their request is enough, because a copy overwrites nothing:
   no "Restore it?". Search first (list_versions with name_contains, or
@@ -88,7 +88,7 @@ TOOLS = [
           "circle (ask the first time). Delivery: email and/or send_telegram; else a message they pass on. Sets up mirror space if they "
           "have none. quota_gb defaults to 20. preview=true first.",
           {"for_whom": _S, "quota_gb": _N, "email": _S, "send_telegram": _B, "group": _S, "host": _S, "preview": _B}, []),
-    _tool("mirror_folder", "Mirror a folder from the person's Mac to friends' machines (owner/host names from list_hosts). preview=true first; then the PERSON confirms in a Casper dialog.",
+    _tool("mirror_folder", "Mirror a folder from the person's computer to friends' machines (owner/host names from list_hosts). preview=true first; then the PERSON confirms in a Casper dialog.",
           {"source_host": _S, "path": _S, "mirrors": {"type": "array", "items": _S}, "catcher": _S, "use_casper_catcher": _B, "preview": _B},
           ["source_host", "path", "mirrors"]),
     _tool("protection_status", "Whether each mirrored folder is protected right now, mirror by mirror."),
@@ -156,7 +156,8 @@ def _call_tool(services, user_id: int, name: str, args: dict) -> str:
 class Facts:
     """Where the person really is, from Casper's own state -- never inferred
     from the conversation."""
-    mac_connected: bool = False
+    mac_connected: bool = False  # their computer is connected (a Mac or a Windows PC; the name is older than Windows)
+    platform: str = ""  # "macos" | "windows" when all their computers are that; "" when mixed or not yet known
     invite: dict | None = None  # {"code", "inviter", "state": "open" | "accepted"} for a code they gave
     mirror_hosts: list = field(default_factory=list)  # where they hold mirror space, e.g. "riley/Rileys-MacBook"
     catcher_hosts: list = field(default_factory=list)
@@ -177,6 +178,24 @@ class Facts:
     restore_places: dict = field(default_factory=dict)  # label -> short path ("~/Casper Restores/Documents") for folders not coming back in their old place
     restoring_folders: list = field(default_factory=list)  # still coming back
     empty_folders: list = field(default_factory=list)  # restoring, but its mirrors hold nothing for it
+
+
+def noun(facts: "Facts") -> str:
+    """What to call their computer: "Mac" or "PC" once we know, "computer" until then."""
+    return {"macos": "Mac", "windows": "PC"}.get(facts.platform, "computer")
+
+
+def casper_menu(facts: "Facts") -> str:
+    """Where Casper's menu is on their screen."""
+    if facts.platform == "windows":
+        return "Casper's menu (right-click the ghost in the tray at the bottom right; it may be under the ^ arrow)"
+    if facts.platform == "macos":
+        return "Casper's menu (the ghost in the menu bar)"
+    return "Casper's menu (the ghost by the clock)"
+
+
+WARNINGS = ("(Ignore browser warnings. The app is safe. If Windows says \"Windows protected your PC\", "
+            "choose More info, then Run anyway.)")
 
 
 @dataclass
@@ -215,30 +234,30 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         # The recovery's closing line, once; after it they're simply set up.
         if "recovered" in spoken:
             return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
-        say = ("Your folders are back on this Mac, and Casper keeps them mirrored." + _landing(facts)
-               + (" Your old Mac is no longer paired with your account; its copies and history are kept." if facts.old_mac_retired else ""))
-        return Stage("recovered", f"Say only: \"{say}\"", (), ({"label": "Show me in Finder", "action": "show_restores", "box": True},) if facts.restore_places else (), say=say)
+        say = (f"Your folders are back on this {noun(facts)}, and Casper keeps them mirrored." + _landing(facts)
+               + (" Your old computer is no longer paired with your account; its copies and history are kept." if facts.old_mac_retired else ""))
+        return Stage("recovered", f"Say only: \"{say}\"", (), ({"label": ("Show me in File Explorer" if facts.platform == "windows" else "Show me in Finder"), "action": "show_restores", "box": True},) if facts.restore_places else (), say=say)
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
                      "preview=true) and give only the one-line terms, ending \"Accept?\": accepting is theirs to say. On their yes, accept it.", ("redeem_invite",))
     if not facts.mac_connected:
         lead = "If something just happened (an invite accepted), say it in a few words first. " if inv else ""
-        say = f"Download Casper and open it: {download_url}\n(Ignore browser warnings. The app is safe.)"
-        return Stage("install", f"Their Mac isn't connected yet. {lead}Say exactly \"{say}\" "
-                     "and nothing more. Opening it connects their Mac; you'll hear \"My Mac is connected.\"",
+        say = f"Download Casper and open it: {download_url}\n{WARNINGS}"
+        return Stage("install", f"Their {noun(facts)} isn't connected yet. {lead}Say exactly \"{say}\" "
+                     "and nothing more. Opening it connects their computer; you'll hear \"My computer is connected.\"",
                      say=say)
     if facts.mirror_hosts and facts.folder == "none":
         catcher = f' Their catcher: catcher="{facts.catcher_hosts[0]}".' if facts.catcher_hosts else (
             " They have no catcher; leave it out unless they ask.")
         return Stage("choose_folder", "Ask only which folder to keep safe, suggesting Documents. Their answer settles it: start "
-                     f"it right away (mirror_folder, preview=false; source_host: their Mac from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
-                     "Casper's own dialog on their Mac shows the plan and takes their yes, so don't ask \"Start?\".", ("mirror_folder",),
+                     f"it right away (mirror_folder, preview=false; source_host: their computer from list_hosts; mirrors: {facts.mirror_hosts}).{catcher} "
+                     "Casper's own dialog on their computer shows the plan and takes their yes, so don't ask \"Start?\".", ("mirror_folder",),
                      ("Documents", {"label": "Another folder…", "action": "choose_folder"}),
                      say="Which folder should Casper keep safe? Documents is a good start.")
     if facts.folder == "awaiting_consent":
         # Casper's own dialog is in front of them: nothing to say, just wait.
         return Stage("consent", "Casper's dialog is in front of them asking to start mirroring; wait. If they ask, it's the "
-                     "Casper dialog on their Mac: Mirror starts it.", silent=True)
+                     "Casper dialog on their computer: Mirror starts it.", silent=True)
     # "Protected" is said once, after a real finished first copy; a later dip in the
     # copy doesn't take it back.
     if facts.folder == "active" and facts.unreadable and "unreadable" not in spoken:
@@ -251,19 +270,19 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
                      say="Copying now. You can leave this page open.")
     if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in answered:
         lead = "" if facts.unreadable else "Protected. "
-        say = f"{lead}Last step: your recovery kit. In Casper's menu (the ghost in the menu bar), choose Make Recovery Kit."
-        return Stage("recovery_kit", f"Say only: \"{say}\" If they ask why: without it, a lost Mac can't be rebuilt.", (), ("Later",), say=say)
+        say = f"{lead}Last step: your recovery kit. In {casper_menu(facts)}, choose Make Recovery Kit."
+        return Stage("recovery_kit", f"Say only: \"{say}\" If they ask why: without it, a lost computer can't be rebuilt.", (), ("Later",), say=say)
     if inv and not facts.offers_space and "give_back" not in answered:
-        return Stage("give_back", f"Ask only: \"Want to offer {inv['inviter']} space on your Mac too?\" It's a gift, never owed. If yes, invite {inv['inviter']} "
+        return Stage("give_back", f"Ask only: \"Want to offer {inv['inviter']} space on your {noun(facts)} too?\" It's a gift, never owed. If yes, invite {inv['inviter']} "
                      "(create_invite) the usual way.", ("publish_offering", "create_invite"), ("Yes", "No thanks"),
-                     say=f"Want to offer {inv['inviter']} space on your Mac too?")
+                     say=f"Want to offer {inv['inviter']} space on your {noun(facts)} too?")
     return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
 
 
 def _recover_stage(facts: Facts, download_url: str) -> Stage:
-    """Getting folders back on a new Mac, instead of setting up (recovery v2
+    """Getting folders back on a new computer, instead of setting up (recovery v2
     P1: the kit is the key). The key and the Restore yes are given in
-    Casper's own window on the Mac, never here."""
+    Casper's own window on the computer, never here."""
     # "Safe" is said only of folders whose own last report shows a finished copy; the others are named as not copied.
     safe = ""
     if facts.safe_folders:
@@ -272,9 +291,9 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
     if unsafe:
         safe += f"{_names(unsafe)} never finished copying, so {'it' if len(unsafe) == 1 else 'they'} can't come back. "
     if not facts.recover_mac:
-        say = f"{safe}Download Casper and open it on the new Mac: {download_url}\n(Ignore browser warnings. The app is safe.)"
-        return Stage("recover_install", f"They lost their Mac and are signed in on a new one. Say exactly \"{say}\" and nothing more. "
-                     "Opening it connects the new Mac.", (), ("I have no recovery kit",), say=say)
+        say = f"{safe}Download Casper and open it on the new computer: {download_url}\n{WARNINGS}"
+        return Stage("recover_install", f"They lost their computer and are signed in on a new one. Say exactly \"{say}\" and nothing more. "
+                     "Opening it connects the new computer.", (), ("I have no recovery kit",), say=say)
     if facts.restoring:
         # Not a gate: each folder is its own restore. Requests about a folder that is back are acted on.
         waiting = _names(facts.restoring_folders)
@@ -285,16 +304,16 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
                 "(restore_version, restore_as_of, show_restore_picker) as usual. " if waiting else
                 "No folder is still being fetched; act on restore requests as usual. ")
         if empty:
-            now += (f"{empty}: nothing reached your friends' computers before the Mac was lost, so there is nothing to restore. "
+            now += (f"{empty}: nothing reached your friends' computers before the computer was lost, so there is nothing to restore. "
                     "Say so plainly if asked; never say it is still coming. ")
         where = _landing(facts)
         if where:
             now += f"If they ask where they are:{where} Always write paths short like that, never /Users/<name>/. "
         return Stage("recover_copy", now, ("*",), say="Restoring now. You can leave this page open.")
     if not facts.unlocked:
-        say = "In Casper's menu (the ghost in the menu bar), choose Recover from a Lost Mac. Have your recovery kit file and its passphrase ready."
+        say = f"In {casper_menu(facts)}, choose Recover from a Lost Computer. Have your recovery kit file and its passphrase ready."
         return Stage("recover_unlock", f"Say only: \"{say}\" If they have no kit: it can't be rebuilt without it yet; say so plainly.", say=say)
-    say = f"{safe}Casper's dialog on your Mac offers to bring {'it' if len(facts.recover_folders) == 1 else 'them'} back. Choose Restore there."
+    say = f"{safe}Casper's dialog on your {noun(facts)} offers to bring {'it' if len(facts.recover_folders) == 1 else 'them'} back. Choose Restore there."
     return Stage("recover_choose", f"Say only: \"{say}\" Restoring is theirs to say, in that dialog; you can't do it for them.", say=say)
 
 
