@@ -293,8 +293,8 @@ for the pilot's peer-backup users (friends, family, small groups).
 ### 3.3 Open questions this raises
 
 - Does the mirror history keep versions of **locally made** deletes and
-  edits (the Syncthing default does not)? Casper's design says yes
-  (history is computed from what the peer received); worth an explicit test
+  edits (the Syncthing default does not)? I did not check what
+  Casper does (the mirror code was not read for this); worth an explicit test
   in the e2e.
 - What does a person with a new, differently-named Mac expect "put it
   back" to mean? Default to a chosen location with the original path as
