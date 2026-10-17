@@ -70,9 +70,11 @@ class World:
         self.calls, self.free, self.local_bytes, self.versions = [], free, local_bytes, versions
         folder = {"id": "f1", "label": label, "owner_host_id": 1}
 
-        def listing(uid, name):
+        def listing(uid, name, scope=None):
             if name not in (label, "Pictures"):
                 raise main.mirroring.MirrorError(f"No folder called {name}.")
+            if scope is not None:
+                scope.append(main.claims.history_scope({**folder, "label": name}, "riley/Riley's Mac", 1))
             return folder, {"label": "mac"}, {"label": "peer"}, self.versions
 
         monkeypatch.setattr(main, "_version_listing", listing)

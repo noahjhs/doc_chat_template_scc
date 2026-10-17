@@ -239,14 +239,15 @@ def _assess(st: dict) -> tuple[str, str]:
     return UNKNOWN, "copying"
 
 
-def _peer_line(p: dict, who: str, fresh: bool, age: float | None) -> tuple[str, str]:
+def _peer_line(p: dict, who: str, fresh: bool, age: float | None, now: float) -> tuple[str, str]:
     if not fresh:
         return UNKNOWN, f"  - {p.get('role')}: {who}: not confirmed (no report for {age_words(age)})"
     if p.get("connected") and p.get("completion", 0) >= 100 and not p.get("need_files") and peer_seen(p):
         return HOLDS, f"  - {p.get('role')}: {who}: up to date"
     if p.get("connected"):
         return UNKNOWN, f"  - {p.get('role')}: {who}: connected, catching up"
-    return VIOLATED, f"  - {p.get('role')}: {who}: offline (last seen {(p.get('last_seen') or '?')[:16]})"
+    seen = to_unix(p.get("last_seen")) if peer_seen(p) else None  # the daemon's local clock with an offset: shown as an age, never a bare time
+    return VIOLATED, f"  - {p.get('role')}: {who}: offline (" + (f"last seen {age_words(now - seen)} ago" if seen else "never seen") + ")"
 
 
 def folder_report(db, f, names: dict, owner_host: str = "", restore_host: str = "", surface: str = "",
@@ -315,7 +316,7 @@ def folder_report(db, f, names: dict, owner_host: str = "", restore_host: str = 
     for p in st.get("peers", []):
         dev = str(p.get("device_id") or "?")
         who = names.get(dev, dev[:7])
-        pstate, line = _peer_line(p, who, fresh, age)
+        pstate, line = _peer_line(p, who, fresh, age, now)
         lines.append(line)
         _issue(db, now, PEER_CURRENT, f"{sub}:{dev[:7]}", pstate, line.strip(), [ev], {"fresh": fresh}, surface)
     stamp = (st.get("reported_at") or "")[:19]
@@ -534,6 +535,53 @@ def recovery(db, user_id: int, profile: dict, folders: list, fresh_hosts: set, p
                          "unlocked": unlocked, "new_mac": bool(fresh_hosts & pairing_hosts)}, surface, now)
 
 
+# --- history: how far back, and on which mirror ---------------------------------
+HISTORY_DAYS = 30
+
+
+def history_scope(f, asked: str, mirrors_total: int, now: float | None = None, db=None, surface: str = "") -> Issued:
+    """What a version listing can honestly say about history: it comes from ONE mirror (`asked`), and it can reach
+    back only as far as this folder has been mirrored (a new folder has no history), at most 30 days -- a
+    retention policy, not a measured holding. `data["floor"]` is the earliest moment it can reach."""
+    now = time.time() if now is None else now
+    started = to_unix(f["activated_at"] if "activated_at" in f.keys() else None) or to_unix(f["created_at"] if "created_at" in f.keys() else None)
+    floor = max(now - HISTORY_DAYS * 86400, started) if started else now - HISTORY_DAYS * 86400
+    days = max(1, min(HISTORY_DAYS, int((now - floor) // 86400) + 1))
+    ev = Evidence("folder_started", f["id"], "casper_service", "database row", E2, started, {}, None)
+    short = bool(started) and now - started < HISTORY_DAYS * 86400
+    return _issue(db, now, HISTORY_SCOPE, f["id"], HOLDS, f"history of {f['label']} as held by {asked}, back {days} day{'s' if days != 1 else ''}",
+                  [ev], {"floor": datetime.fromtimestamp(floor, timezone.utc), "days": days, "asked": asked, "unasked": max(0, mirrors_total - 1),
+                         "short": short, "label": f["label"]}, surface, started)
+
+
+def _scope_tail(scope: Issued) -> str:
+    n = scope.data["unasked"]
+    return f" (only {scope.data['asked']} was asked; {n} other mirror{'s' if n != 1 else ''} weren't checked)" if n else ""
+
+
+def say_no_deleted_files(scope: Issued) -> str:
+    d = scope.data
+    return (f"No deleted files found on {d['asked']} in the last {d['days']} day{'s' if d['days'] != 1 else ''}{_scope_tail(scope)}."
+            + (f" {d['label']} has only been mirrored that long; there is nothing older." if d["short"] else ""))
+
+
+def say_no_earlier_versions(scope: Issued) -> str:
+    return f"No earlier versions yet on {scope.data['asked']} (they appear when files change or are deleted){_scope_tail(scope)}."
+
+
+def say_versions_header(label: str, scope: Issued) -> str:
+    d = scope.data
+    return (f"Earlier versions in {label} (newest first; as held by {d['asked']}, going back {d['days']} day{'s' if d['days'] != 1 else ''}"
+            f" -- Casper keeps up to {HISTORY_DAYS}; restore with restore_version(folder, name, at)):")
+
+
+def say_before_history(as_of: str, scope: Issued) -> str:
+    d = scope.data
+    reason = (f"{d['label']} has only been mirrored since {d['floor'].strftime('%Y-%m-%d')}" if d["short"]
+              else f"Casper keeps up to {HISTORY_DAYS} days of history")
+    return f"{reason}; {as_of} is before that. The earliest it can reach is about {d['floor'].strftime('%Y-%m-%d')} (as held by {d['asked']})."
+
+
 # --- wording that other modules need (scripted lines, notifications) --------------
 def say_protected_lead() -> str:
     return "Protected. "
@@ -591,6 +639,13 @@ def say_consent_asked(source_host: str) -> str:
 def say_consent_asked_again(label: str, source_host: str) -> str:
     return (f"NOT protected yet. The dialog for {label} was shown again on {source_host}; the person clicks Mirror there "
             "(or answers in Telegram). You can't confirm it for them. Once they say they have, check protection_status.")
+
+
+def say_friend_mirror_started(owner: str) -> str:
+    """To the friend who holds the copy, when the owner agrees to start (before any data has arrived). It names
+    nobody's folder: what the holder can see is in docs/product/privacy-exposure.md."""
+    return (f"{owner} has started mirroring a folder to your computer. What arrives is encrypted: you can't read it, "
+            "but it will take up space and you may notice it arriving. Thanks for keeping a copy safe.")
 
 
 def say_mirroring_started(label: str, where: str) -> str:

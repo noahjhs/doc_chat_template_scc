@@ -160,6 +160,15 @@ def test_weaker_evidence_never_gives_a_stronger_claim(claims):
             assert ": protected." not in fresh.text, v
 
 
+def test_an_offline_mirror_says_how_long_ago_not_a_bare_clock_time(claims):
+    c, main = claims
+    seen = (datetime.now(timezone.utc) - timedelta(minutes=20)).astimezone(timezone(timedelta(hours=-7))).isoformat(timespec="seconds")
+    got = report(c, main, _status(peers=[_peer(connected=False, last_seen=seen)]))
+    assert "offline (last seen 20 min ago)" in got.text
+    never = report(c, main, _status(peers=[_peer(connected=False, last_seen=NEVER)]))
+    assert "offline (never seen)" in never.text
+
+
 def test_no_report_at_all_is_unknown(claims):
     c, main = claims
     got = report(c, main, {}, owner_host="Riley's Mac")
@@ -370,3 +379,51 @@ def _is_rules_text(name: str, line: str) -> bool:
     s = line.strip().lower()
     return name in ("mcp_server.py", "guide.py") and (
         "never" in s or "until" in s or "don't" in s or s.startswith(('"', "'", "#", "-", "_tool(")) or "description=" in s)
+
+
+# --- history: which mirror, how far back (inventory finding 6) -----------------------------
+def test_a_version_listing_says_who_was_asked_and_how_far_back_it_reaches(claims):
+    c, main = claims
+    old = {"id": "f1", "label": "Documents", "activated_at": _iso(40 * 86400)}
+    new = {"id": "f2", "label": "Pictures", "activated_at": _iso(3 * 86400)}
+    full = c.history_scope(old, "sam/Sam's Mac", 3)
+    assert full.data["days"] == 30 and not full.data["short"]
+    none = c.say_no_deleted_files(full)
+    assert "on sam/Sam's Mac" in none and "last 30 days" in none and "2 other mirrors weren't checked" in none
+    young = c.history_scope(new, "sam/Sam's Mac", 1)
+    assert young.data["short"] and young.data["days"] == 4
+    assert "has only been mirrored that long" in c.say_no_deleted_files(young) and "weren't checked" not in c.say_no_deleted_files(young)
+    # the oldest it can reach is when the folder started, not "30 days ago" (it was 30 for every folder before)
+    assert young.data["floor"] > full.data["floor"]
+    cutoff = c.say_before_history("2026-10-01", young)
+    assert "has only been mirrored since" in cutoff and young.data["floor"].strftime("%Y-%m-%d") in cutoff
+    assert "going back 30 days" in c.say_versions_header("Documents", full) and "as held by sam/Sam's Mac" in c.say_versions_header("Documents", full)
+
+
+# --- what the holder of an encrypted mirror can read (inventory finding 8) ----------------------
+def test_the_holder_is_not_told_the_folders_name(app_env):
+    """A friend's Syncthing shows the folder label in plain text, and Casper's notification to them used to carry
+    it too. Whose it is, yes; what it's called, no."""
+    main, client = app_env
+    sent = []
+    main.notify = lambda uid, text, *a, **k: sent.append(text)
+    with client, FakeDaemon(respond_with=lambda b: {}) as sd:
+        _, riley = _signup(client, "riley")
+        _, sam = _signup(client, "sam")
+        _pair(client, riley, "rk-riley", "riley-mac", sd.url)
+        _pair(client, sam, "rk-sam", "sam-mac", sd.url)
+        rid, sid = _user_id(main, "riley"), _user_id(main, "sam")
+        with main.get_db() as db:
+            hosts = {r["routing_key"]: r["id"] for r in db.execute("SELECT id, routing_key FROM hosts").fetchall()}
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("INSERT INTO mirror_devices (routing_key, device_id, updated_at) VALUES ('rk-riley', 'RILEYDEV', 'x')")
+            db.execute("INSERT INTO relation_tuples (id, subject_type, subject_id, relation, object_type, object_id, attrs) "
+                       "VALUES (9, 'user', ?, 'mirror_peer', 'host', ?, '{\"quota_bytes\": 1000}')", (rid, hosts["rk-sam"]))
+            db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES "
+                       "('f1', ?, ?, '/Users/r/Taxes 2025', 'Taxes 2025', 'active')", (rid, hosts["rk-riley"]))
+            db.execute("INSERT INTO mirror_targets (folder_id, role, grant_id, peer_owner_user_id, peer_host_id) VALUES ('f1', 'mirror', 9, ?, ?)",
+                       (sid, hosts["rk-sam"]))
+            held = main.mirroring.desired_state(db, sid, hosts["rk-sam"])["held"]
+        assert len(held) == 1 and "Taxes" not in json.dumps(held) and held[0]["label"] == "riley: encrypted mirror"
+    text = main.claims.say_friend_mirror_started("riley")
+    assert "riley" in text and "Taxes" not in text and "can't read it" in text

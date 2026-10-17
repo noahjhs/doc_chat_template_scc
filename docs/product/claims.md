@@ -1,6 +1,16 @@
 # Claims: what Casper tells people, and what it knows
 
-Status: inventory and proposal, 2026-10-16. Docs only; nothing here is built.
+Status: inventory and proposal, 2026-10-16. **Pilot built 2026-10-17:**
+`casper_service/claims.py` (claims issue from named evidence with an age limit, are rendered
+only there and are written to `claim_log`), routed from the guide, `my_casper`,
+`protection_status`, tool results and Telegram; tests in `tests/test_claims.py`. Built: protected
+/ up to date / copying / unreadable / online / kit saved / invite accepted / done / recovery
+state / history scope. Findings 1-6 are fixed (stale status, logic reading copy, empty folder as
+protected, "Done." after a failure, recovered-but-asleep Mac, history scope); finding 8 is
+measured in `privacy-exposure.md`. Evidence is E1 plus freshness (`REPORT_MAX_AGE` 2 min);
+the sampled read-back (E3) is a hook only (`REQUIRE_READBACK`, `register_readback`). Not built:
+holder-side reports, the read-back itself, restore drills, kit verification, restore manifests,
+and the registry for static copy (site, emails, dialogs).
 Written from the code at commit a5fa94a (+ the 2026-10-16 recovery and restore
 work). Where a finding says "plausible", I read it off the code but didn't
 reproduce it live.

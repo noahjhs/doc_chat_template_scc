@@ -3013,7 +3013,7 @@ def _decide_mirror_consent(row, decision: str) -> str:
         hosts = [trust.host_label(db, t["peer_owner_user_id"], t["peer_host_id"]) for t in targets]
     _refresh_folder_parties(f)
     for t in targets:
-        notify(t["peer_owner_user_id"], f"{me}'s {f['label']} is now mirrored on your computer, encrypted -- you can't read it. Thanks for keeping a copy safe.")
+        notify(t["peer_owner_user_id"], claims.say_friend_mirror_started(me))
     where = ", ".join(hosts) or ("Casper's catcher" if f["use_casper_catcher"] else "no one yet")
     return claims.say_mirroring_started(f["label"], where)
 
@@ -3143,7 +3143,9 @@ def _mcp_protection_status(user_id: int) -> str:
             "Don't add reassurance of your own: say nothing is protected beyond what they say.")
 
 
-def _version_listing(user_id: int, folder_name: str) -> tuple:
+def _version_listing(user_id: int, folder_name: str, scope: list | None = None) -> tuple:
+    """(folder, owner, peer, versions) from the first reachable mirror; a list passed as `scope` receives the history
+    claim for that mirror (claims.history_scope): how far back it can honestly say, and who was asked."""
     with get_db() as db:
         f = mirroring.find_owned(db, user_id, folder_name)
         targets = [t for t in mirroring.peers_of(db, f["id"]) if t["role"] == "mirror"]
@@ -3161,22 +3163,27 @@ def _version_listing(user_id: int, folder_name: str) -> tuple:
         d = backups.daemon_call(owner, "mirror_decrypt_trailers", folder_id=f["id"], items=items)
         if not d.get("success"):
             raise mirroring.MirrorError(d.get("stderr") or "couldn't read the version list")
+        if scope is not None:
+            with get_db() as db:
+                name = f"{trust.username(db, t['peer_owner_user_id'])}/{trust.host_label(db, t['peer_owner_user_id'], t['peer_host_id'])}"
+                scope.append(claims.history_scope(f, name, len(targets), db=db, surface="list_versions"))
         return f, owner, peer, json.loads(d["stdout"])["versions"]
     raise mirroring.MirrorError("None of the computers mirroring this folder is online right now; versions live on them.")
 
 
 def _mcp_list_versions(user_id: int, folder: str, name_contains: str = "", deleted_only: bool = False) -> str:
     try:
-        f, _, _, versions = _version_listing(user_id, folder)
+        scope: list = []
+        f, _, _, versions = _version_listing(user_id, folder, scope)
     except mirroring.MirrorError as e:
         return f"Can't: {e.message}"
     versions = [v for v in versions if name_contains.lower() in v["name"].lower() and (not deleted_only or restore_logic.is_deleted(v))]
     if not versions:
         if deleted_only:
-            return "No deleted files match." if name_contains else "No deleted files in the last 30 days."
-        return "No earlier versions match." if name_contains else "No earlier versions yet (they appear when files change or are deleted)."
+            return "No deleted files match." if name_contains else claims.say_no_deleted_files(scope[0])
+        return "No earlier versions match." if name_contains else claims.say_no_earlier_versions(scope[0])
     ordered = sorted(versions, key=lambda v: v["at"], reverse=True)
-    lines = [f"Earlier versions in {f['label']} (newest first; only the last 30 days exist; restore with restore_version(folder, name, at)):"]
+    lines = [claims.say_versions_header(f["label"], scope[0])]
     for v in ordered[:100]:
         lines.append(f"  - {v['name']}  at={v['at']}  (written {restore_logic.short_time(v['modified'])}, {backups.human(v['size'])}"
                      f"{', deleted afterwards' if restore_logic.is_deleted(v) else ''})")
@@ -3275,7 +3282,8 @@ def _mcp_restore_as_of(user_id: int, folders: list[str], as_of: str, mode: str =
     jobs = []
     for folder in folders:
         try:
-            f, owner, peer, versions = _version_listing(user_id, folder)
+            scope: list = []
+            f, owner, peer, versions = _version_listing(user_id, folder, scope)
         except mirroring.MirrorError as e:
             return f"Can't: {e.message}"
         try:
@@ -3284,8 +3292,8 @@ def _mcp_restore_as_of(user_id: int, folders: list[str], as_of: str, mode: str =
             return f"I can't read {as_of!r} as a time; use a date like 2026-10-10 or 2026-10-10T14:30."
         if moment > datetime.now(timezone.utc):
             return "That time hasn't happened yet."
-        if restore_logic.too_old(moment):
-            return f"Casper keeps 30 days of history; {as_of} is older than that. The oldest available is about {restore_logic.earliest().strftime('%Y-%m-%d')}."
+        if restore_logic.too_old(moment) or moment < scope[0].data["floor"]:
+            return claims.say_before_history(as_of, scope[0])
         chosen = restore_logic.as_of(versions, moment)
         jobs.append((f, owner, peer, moment, chosen))
     try:

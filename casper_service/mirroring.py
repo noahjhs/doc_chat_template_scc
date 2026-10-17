@@ -283,7 +283,9 @@ def desired_state(db, user_id: int, host_id: int) -> dict:
             add_peer(d)
         held.append({
             "folder_id": t["folder_id"],
-            "label": f"{trust.username(db, t['owner_user_id'])}: {t['label']}",
+            # Whose it is, never what it's called: this label sits in plain text in the holder's own Syncthing
+            # (config and window), and a folder's name is the owner's to share (claims.py, finding 8).
+            "label": f"{trust.username(db, t['owner_user_id'])}: encrypted mirror",
             "owner_devices": [d["device_id"] for d in owner_devs],
             "kind": t["role"],
             "quota_bytes": json.loads(t["attrs"]).get("quota_bytes", 0),
