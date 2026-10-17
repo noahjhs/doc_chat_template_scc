@@ -13,6 +13,7 @@ import (
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/mirrord"
+	"casper-agent/internal/platform"
 	"casper-agent/internal/recovery"
 )
 
@@ -224,8 +225,7 @@ func (c *cli) recover(kitPath string) error {
 		return errors.New("this Mac isn't signed in to Casper yet -- sign in first")
 	}
 	if kitPath == "" {
-		home, _ := os.UserHomeDir()
-		p, ok := dialog.OpenFile("Choose your Casper recovery kit", filepath.Join(home, "Downloads"))
+		p, ok := dialog.OpenFile("Choose your Casper recovery kit", platform.KnownFolder("Downloads"))
 		if !ok {
 			return errors.New("cancelled -- no kit was chosen")
 		}

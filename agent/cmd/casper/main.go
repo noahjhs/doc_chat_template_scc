@@ -383,7 +383,7 @@ func makeRecoveryKit(logf func(format string, args ...any)) {
 	}
 	logf("Recovery kit saved to %s", result.Path)
 	if show, _ := dialog.Confirm(fmt.Sprintf("Recovery kit saved in %s. Keep a copy, and your passphrase, somewhere other than this Mac.", filepath.Base(filepath.Dir(result.Path))),
-		"Show in Finder", "Done", 10*time.Minute); show {
+		"Show in "+platform.FileManager(), "Done", 10*time.Minute); show {
 		_ = platform.Reveal(result.Path)
 	}
 }

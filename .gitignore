@@ -214,3 +214,6 @@ nous_key.txt
 # Stack env files (tools/test_stack.sh, docs/user-flows/prod.md)
 .env.test
 .env.prod
+
+# Casper agent package (Flask rule above would hide it)
+!agent/internal/instance/

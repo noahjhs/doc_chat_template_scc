@@ -24,3 +24,5 @@ func freeBytes(p string) (int64, bool) {
 	}
 	return int64(st.Bavail) * int64(st.Bsize), true
 }
+
+const fileManagerName = "Finder"

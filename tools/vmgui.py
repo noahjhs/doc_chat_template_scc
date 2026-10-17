@@ -54,13 +54,13 @@ SHIFTED = {"~": "`", "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
            "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";", '"': "'", "<": ",", ">": ".", "?": "/"}
 
 
-def keystrokes(text: str) -> list[str]:
+def keystrokes(text: str, capitals: bool = True) -> list[str]:
     """vncdo arguments that type `text`: runs of plain characters, and
     shift-down / key / shift-up for capitals and shifted symbols (a "shift--"
     chord would be parsed as an empty key)."""
     out, run = [], ""
     for ch in text:
-        if ch.isupper() or ch in SHIFTED:
+        if (capitals and ch.isupper()) or ch in SHIFTED:
             if run:
                 out += ["type", run]
                 run = ""
@@ -117,7 +117,8 @@ def main(argv: list[str]) -> int:
         vnc(vm, "move", str(round(float(rest[0]) * f)), str(round(float(rest[1]) * f)), "pause", "0.2", "click", "3")
     elif cmd == "type":
         # QEMU's VNC adds Shift itself for a capital or symbol keysym (and drops a Shift sent by hand), so text goes as it is.
-        vnc(vm, "type", rest[0]) if record(vm).get("server") == "qemu" else vnc(vm, *keystrokes(rest[0]))
+        # QEMU's VNC adds Shift for capitals itself, but sends ":" as ";" and "!" as "1".
+        vnc(vm, *keystrokes(rest[0], capitals=record(vm).get("server") != "qemu"))
     elif cmd == "key":
         vnc(vm, "key", rest[0])
     elif cmd == "scroll":

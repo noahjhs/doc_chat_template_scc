@@ -23,12 +23,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"casper-agent/internal/config"
+	"casper-agent/internal/dialog"
 	"casper-agent/internal/platform"
 )
 
@@ -219,16 +218,14 @@ func hostname() string {
 	return h
 }
 
-// askHidden shows a native macOS dialog with a hidden text field and
-// returns what the person typed -- the agent driving this command never
-// sees it.
+// askHidden shows a native dialog with a hidden text field and returns what
+// the person typed -- the agent driving this command never sees it.
 func askHidden(prompt string) (string, error) {
-	script := fmt.Sprintf(`set r to display dialog %q default answer "" with hidden answer with title "Casper" buttons {"Cancel", "OK"} default button "OK" giving up after 180`, prompt)
-	out, err := exec.Command("osascript", "-e", script, "-e", `if gave up of r then error "timed out"`, "-e", "text returned of r").Output()
-	if err != nil {
+	text, ok := dialog.AskHidden(prompt)
+	if !ok {
 		return "", errors.New("the dialog was cancelled or not answered within 3 minutes -- run the command again when the person is ready")
 	}
-	return strings.TrimRight(string(out), "\n"), nil
+	return text, nil
 }
 
 func openURL(u string) error { return platform.OpenURL(u) }

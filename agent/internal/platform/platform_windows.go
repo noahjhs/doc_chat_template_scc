@@ -68,3 +68,5 @@ func freeBytes(p string) (int64, bool) {
 	}
 	return int64(avail), true
 }
+
+const fileManagerName = "File Explorer"

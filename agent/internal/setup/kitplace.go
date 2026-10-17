@@ -12,6 +12,7 @@ import (
 	"casper-agent/internal/config"
 	"casper-agent/internal/dialog"
 	"casper-agent/internal/mirror"
+	"casper-agent/internal/platform"
 )
 
 // A recovery kit must never sit inside a folder Casper mirrors: the mirrored
@@ -96,8 +97,7 @@ func kitDefaultDir(volumes string) string {
 			}
 		}
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Desktop")
+	return platform.KnownFolder("Desktop")
 }
 
 func kitFileName(username string) string {

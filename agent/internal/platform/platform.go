@@ -33,6 +33,9 @@ func KnownFolder(name string) string {
 	return filepath.Join(home, name)
 }
 
+// FileManager names the app that shows files: Finder or File Explorer.
+func FileManager() string { return fileManagerName }
+
 // FreeBytes is the space a person can still use on the volume holding path
 // (or its nearest existing parent).
 func FreeBytes(path string) int64 {

@@ -33,7 +33,7 @@ var ghostPNG []byte
 // is the standard trick for exactly that: activating a real,
 // already-focusable application right before "display dialog" carries the
 // focus over to it.
-func ShowFarewellDialog(logf func(format string, args ...any)) {
+func farewell(logf func(format string, args ...any)) {
 	iconClause := ""
 	if len(ghostPNG) > 0 {
 		tmp, err := os.CreateTemp("", "casper-ghost-*.png")
@@ -72,7 +72,7 @@ func escapeForAppleScript(s string) string {
 // visible to the user at all; previously it just printed to a stdout that
 // went nowhere. Best-effort: if osascript itself fails, there's no more
 // visible fallback left, so this just gives up quietly.
-func ShowFatalError(message string) {
+func showFatalError(message string) {
 	script := fmt.Sprintf(
 		`display dialog "%s" with title "Casper" buttons {"OK"} default button "OK" with icon stop`,
 		escapeForAppleScript(message),
@@ -85,7 +85,7 @@ func ShowFatalError(message string) {
 // directly) -- e.g. a pairing attempt rejected because the host is already
 // attached to another account. Unlike ShowFatalError, the caller keeps
 // running afterward.
-func ShowError(message string) {
+func showError(message string) {
 	script := fmt.Sprintf(
 		`display dialog "%s" with title "Casper" buttons {"OK"} default button "OK" with icon caution`,
 		escapeForAppleScript(message),
@@ -94,7 +94,7 @@ func ShowError(message string) {
 }
 
 // Info tells the person something, with one OK button.
-func Info(message string) {
+func info(message string) {
 	script := fmt.Sprintf(`display dialog "%s" with title "Casper" buttons {"OK"} default button "OK"`, escapeForAppleScript(message))
 	_ = exec.Command("osascript", "-e", script).Run()
 }
@@ -131,7 +131,7 @@ func escapeForJavaScriptString(s string) string {
 // forward otherwise), different mechanism (an in-process NSApplication
 // call, since this alert is being driven directly rather than through
 // another application).
-func ConfirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAskAgain bool) {
+func confirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAskAgain bool) {
 	script := fmt.Sprintf(`
 ObjC.import('Cocoa');
 function run() {
@@ -165,13 +165,9 @@ function run() {
 	return result[0] == '1', result[1] == '1'
 }
 
-// Confirm asks the person a yes/no question in a native dialog and reports
-// their answer; answered is false if they didn't respond within the time
-// limit. Used for consent that must come from the person, not their agent
-// (docs/product/scenarios/mirroring.md, "Setup").
 // ChooseFolder shows the standard folder panel, starting in the home
 // folder: the chosen folder's path, or false if they cancelled.
-func ChooseFolder() (string, bool) {
+func chooseFolder() (string, bool) {
 	// The standard Open panel, run in its own small process: no Automation
 	// permission needed (asking System Events to show it would prompt
 	// "Casper wants to control System Events").
@@ -201,7 +197,7 @@ function run() {
 // ChooseFromList shows a native list where several rows may be chosen
 // (AppleScript's "choose from list", which needs no Automation permission):
 // the rows picked, or false if they cancelled.
-func ChooseFromList(prompt string, rows []string) ([]string, bool) {
+func chooseFromList(prompt string, rows []string) ([]string, bool) {
 	quoted := make([]string, len(rows))
 	for i, r := range rows {
 		quoted[i] = `"` + escapeForAppleScript(r) + `"`
@@ -218,7 +214,7 @@ func ChooseFromList(prompt string, rows []string) ([]string, bool) {
 
 // OpenFile shows the standard Open panel for one file, starting in
 // defaultDir: the chosen path, or false if they cancelled.
-func OpenFile(message, defaultDir string) (string, bool) {
+func openFile(message, defaultDir string) (string, bool) {
 	script := fmt.Sprintf(`
 ObjC.import('Cocoa');
 function run() {
@@ -244,7 +240,7 @@ function run() {
 
 // SaveFile shows the standard Save panel, starting in defaultDir with
 // defaultName filled in: the chosen path, or false if they cancelled.
-func SaveFile(message, defaultDir, defaultName string) (string, bool) {
+func saveFile(message, defaultDir, defaultName string) (string, bool) {
 	script := fmt.Sprintf(`
 ObjC.import('Cocoa');
 function run() {
@@ -267,7 +263,11 @@ function run() {
 	return path, true
 }
 
-func Confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
+// confirm asks the person a yes/no question in a native dialog and reports
+// their answer; answered is false if they didn't respond within the time
+// limit. Used for consent that must come from the person, not their agent
+// (docs/product/scenarios/mirroring.md, "Setup").
+func confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
 	script := fmt.Sprintf(`set r to display dialog %q with title "Casper" buttons {%q, %q} default button %q cancel button %q giving up after %d
 if gave up of r then return "timeout"
 return button returned of r`, message, noLabel, yesLabel, yesLabel, noLabel, int(within.Seconds()))
@@ -283,4 +283,15 @@ return button returned of r`, message, noLabel, yesLabel, yesLabel, noLabel, int
 	default:
 		return false, true
 	}
+}
+
+// askHidden shows a native dialog with a hidden text field and returns what
+// the person typed -- the agent driving `Casper setup` never sees it.
+func askHidden(prompt string) (string, bool) {
+	script := fmt.Sprintf(`set r to display dialog %q default answer "" with hidden answer with title "Casper" buttons {"Cancel", "OK"} default button "OK" giving up after 180`, prompt)
+	out, err := exec.Command("osascript", "-e", script, "-e", `if gave up of r then error "timed out"`, "-e", "text returned of r").Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimRight(string(out), "\n"), true
 }
