@@ -73,6 +73,7 @@ func freeBytes(p string) (int64, bool) {
 }
 
 const fileManagerName = "File Explorer"
+const revealLabel = "Show file"
 const trayName = "tray at the bottom right (it may be under the ^ arrow)"
 const keyStoreName = "Windows credential store"
 

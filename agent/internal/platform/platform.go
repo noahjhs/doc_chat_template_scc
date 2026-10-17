@@ -37,6 +37,10 @@ func KnownFolder(name string) string {
 // FileManager names the app that shows files: Finder or File Explorer.
 func FileManager() string { return fileManagerName }
 
+// RevealLabel is the button that opens the file manager on a file. A Windows
+// dialog button is too narrow for "Show in File Explorer".
+func RevealLabel() string { return revealLabel }
+
 // Tray names where Casper's ghost sits on this OS, for messages that point at it.
 func Tray() string { return trayName }
 

@@ -227,6 +227,7 @@ the experience **differs from the Mac's**: tag those **Windows** in the report
 
 Differences in the tools:
 
+- Preflight, after the reset: `tools/scenario.py exec noah-windows 'Test-Path "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"'` must say True; if not, the base image has no browser: report that as the only finding and stop.
 - Reset: `tools/scenario.py reset invite-windows --vnc --env test` (`--vnc` is
   harmless: the Windows VM is always on VNC and never opens a window; the
   e2e lock is already held by tools/e2e.sh). Restores the clean `windows-base`

@@ -4,6 +4,9 @@
 const Casper = {
   PAIR_SCHEME: "${PAIR_SCHEME}",
   DOWNLOAD_URL: "${DOWNLOAD_URL}",
+  // The guide hands out the browser-sniffing link (.../download/casper: Windows browsers get the
+  // installer, the rest the Mac app); the Mac-only address is the same button.
+  isDownloadLink(url) { return url === this.DOWNLOAD_URL || url === this.DOWNLOAD_URL.replace(/\/macos$/, ""); },
   WWW_URL: "${WWW_URL}",
 
   // The browser's own OS, which is the computer the person is setting up
@@ -80,7 +83,7 @@ const Casper = {
     h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, label, url) => `<a href="${url}" target="_blank" rel="noopener">${label}</a>`);
     h = h.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (m, pre, url) => {
       const clean = url.replace(/[.,;:]+$/, ""), tail = url.slice(clean.length);
-      if (clean === Casper.DOWNLOAD_URL) return `${pre}<a class="btn inline" href="${clean}">Download Casper</a>` +
+      if (Casper.isDownloadLink(clean)) return `${pre}<a class="btn inline" href="${clean}">Download Casper</a>` +
         ` <a class="aside" href="${Casper.WWW_URL}/about-app" target="_blank" rel="noopener">What is it?</a>${tail}`;
       return `${pre}<a href="${clean}" target="_blank" rel="noopener">${clean}</a>${tail}`;
     });

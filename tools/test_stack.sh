@@ -28,7 +28,7 @@ setup() {
     cd ~/$DIR && mkdir -p dist
     if [ ! -f .env.test ]; then
       # dev's settings, minus Telegram and SMTP, pointed at the test addresses
-      grep -vE '^(TELEGRAM_|SMTP_|MAIL_FROM|CATCHER_)' ~/doc_chat_template_scc/.env \
+      grep -vE '^(TELEGRAM_|SMTP_|MAIL_FROM|CATCHER_|GUIDE_DOWNLOAD_URL)' ~/doc_chat_template_scc/.env \
         | sed -e 's/dev-auth\./test-auth./g' -e 's/dev-app\./test-app./g' -e 's/dev-www\./test-www./g' > .env.test
       ADDRS=\$(grep '^CATCHER_ADDRESSES=' ~/doc_chat_template_scc/.env | cut -d= -f2- | sed 's/:22100/:22101/g')
       cat >> .env.test <<EOF

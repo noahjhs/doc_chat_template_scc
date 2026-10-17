@@ -24,15 +24,16 @@ func farewell(logf func(format string, args ...any)) {
 	}
 }
 
-func showFatalError(message string) { _ = zenity.Error(message, title) }
+func showFatalError(message string) { defer toFront()(); _ = zenity.Error(message, title) }
 
-func showError(message string) { _ = zenity.Warning(message, title) }
+func showError(message string) { defer toFront()(); _ = zenity.Warning(message, title) }
 
-func info(message string) { _ = zenity.Info(message, title) }
+func info(message string) { defer toFront()(); _ = zenity.Info(message, title) }
 
 // confirmWithDontAskAgain uses a third button for "Don't ask again": the
 // task dialog's checkbox isn't reachable through zenity.
 func confirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAskAgain bool) {
+	defer toFront()()
 	err := zenity.Question(message, title, zenity.QuestionIcon,
 		zenity.OKLabel(actionLabel), zenity.CancelLabel("Not Now"), zenity.ExtraButton("Don't ask again"))
 	switch {
@@ -46,6 +47,7 @@ func confirmWithDontAskAgain(message, actionLabel string) (accepted bool, dontAs
 }
 
 func confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool, answered bool) {
+	defer toFront()()
 	ctx, cancel := context.WithTimeout(context.Background(), within)
 	defer cancel()
 	err := zenity.Question(message, title, zenity.QuestionIcon,
@@ -61,6 +63,7 @@ func confirm(message, yesLabel, noLabel string, within time.Duration) (yes bool,
 }
 
 func chooseFolder() (string, bool) {
+	defer toFront()()
 	opts := []zenity.Option{zenity.Directory(), zenity.Title("Choose a folder for Casper to keep safe")}
 	if home, _ := os.UserHomeDir(); home != "" {
 		opts = append(opts, zenity.Filename(home))
@@ -73,6 +76,7 @@ func chooseFolder() (string, bool) {
 }
 
 func chooseFromList(prompt string, rows []string) ([]string, bool) {
+	defer toFront()()
 	picked, err := zenity.ListMultiple(prompt, rows, title, zenity.OKLabel("Restore"), zenity.CancelLabel("Cancel"), zenity.DisallowEmpty())
 	if err != nil || len(picked) == 0 {
 		return nil, false
@@ -81,6 +85,7 @@ func chooseFromList(prompt string, rows []string) ([]string, bool) {
 }
 
 func openFile(message, defaultDir string) (string, bool) {
+	defer toFront()()
 	path, err := zenity.SelectFile(zenity.Title(message), zenity.Filename(defaultDir+`\`))
 	if err != nil || path == "" {
 		return "", false
@@ -89,6 +94,7 @@ func openFile(message, defaultDir string) (string, bool) {
 }
 
 func saveFile(message, defaultDir, defaultName string) (string, bool) {
+	defer toFront()()
 	path, err := zenity.SelectFileSave(zenity.Title(message), zenity.Filename(filepath.Join(defaultDir, defaultName)), zenity.ConfirmOverwrite())
 	if err != nil || path == "" {
 		return "", false
@@ -103,6 +109,7 @@ func saveFile(message, defaultDir, defaultName string) (string, bool) {
 const maxLabel = 30
 
 func askHidden(prompt string) (string, bool) {
+	defer toFront()()
 	label := prompt
 	if len(prompt) > maxLabel {
 		if err := zenity.Question(prompt, title, zenity.NoIcon, zenity.OKLabel("Continue"), zenity.CancelLabel("Cancel")); err != nil {

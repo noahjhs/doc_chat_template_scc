@@ -71,7 +71,7 @@ async function refresh() {
   renderPicker(last && last.role === "assistant" ? last.picker : null);
   // A button in the message itself (Download Casper) is the call to action too.
   // Only while that step is current: once the Mac is connected the text box is always back.
-  if (last && last.role === "assistant" && last.text.includes(Casper.DOWNLOAD_URL)) {
+  if (last && last.role === "assistant" && (last.text.includes(Casper.DOWNLOAD_URL) || last.text.includes(Casper.DOWNLOAD_URL.replace(/\/macos$/, "")))) {
     try { if (["install", "recover_install"].includes((await Casper.api("/guide/state")).stage)) $("f").classList.add("hide"); } catch (e) {}
   }
 }

@@ -600,6 +600,8 @@ sets it Private and the rule to any profile). QEMU's VNC adds Shift itself, so `
 sends text as it is for this VM (`"server": "qemu"` in its VNC record). The Windows key is
 `super`. Windows Setup needs the e2e lock like any VM: install and `reset` take it too.
 
-What it does not do yet: the Casper app itself (no Windows build), so the persona has no Casper
+Browser (2026-10-17): the first Windows e2e run found no browser in `windows-base` (the image has Edge's registry entries but no msedge.exe). Edge Stable ARM64 (the enterprise MSI from edgeupdates.microsoft.com) is now in the base, with policies that only silence first-run, sign-in and default-browser nags; SmartScreen and download protection are untouched.
+
+What it did not do at first: the Casper app itself (no Windows build), so the persona has no Casper
 steps (`win_run <powershell>` is the only Windows step); captures (`scenario.py capture`) are
 refused for it (the clean state is `windows-base`; `winvm.py save` makes the current disk the new one).

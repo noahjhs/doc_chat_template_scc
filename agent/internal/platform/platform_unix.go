@@ -26,6 +26,7 @@ func freeBytes(p string) (int64, bool) {
 }
 
 const fileManagerName = "Finder"
+const revealLabel = "Show in Finder"
 const trayName = "menu bar"
 const keyStoreName = "Keychain"
 
