@@ -160,3 +160,19 @@ func isolateHome(t *testing.T, dir string) {
 	t.Setenv("USERPROFILE", dir)
 	t.Setenv("LOCALAPPDATA", dir)
 }
+
+func TestProductName(t *testing.T) {
+	original := embeddedAuthServer
+	defer func() { embeddedAuthServer = original }()
+	t.Setenv("CONTROL_TOOL_AUTH_DOMAIN", "")
+	for domain, want := range map[string]string{
+		"auth.casperagent.dev":      "Casper",
+		"dev-auth.casperagent.dev":  "Casper Dev",
+		"test-auth.casperagent.dev": "Casper Test",
+	} {
+		embeddedAuthServer = domain
+		if got := ProductName(); got != want {
+			t.Errorf("ProductName() for %s = %q, want %q", domain, got, want)
+		}
+	}
+}

@@ -35,6 +35,16 @@ func appConfigSubdir() string {
 	return "Casper"
 }
 
+// ProductName is what people see for this build: "Casper", "Casper Dev" or
+// "Casper Test" (the install folder, the Start menu entry, Apps & features).
+func ProductName() string {
+	name, env, found := strings.Cut(appConfigSubdir(), "-")
+	if !found {
+		return name
+	}
+	return name + " " + strings.ToUpper(env[:1]) + env[1:]
+}
+
 // configBase is where the per-user app directories live: the per-OS config
 // directory, except on Windows, where os.UserConfigDir is %APPDATA% (Roaming)
 // and the Syncthing index database and logs must not roam, so it is

@@ -78,7 +78,7 @@ deploy() {
   [ -n "$(git branch -r --contains "$rev")" ] || { echo "${rev:0:9} isn't on GitHub yet (the mini fetches it from there): push it first"; exit 1; }
   # The app: rebuilt only when agent/ (or the build) changed since the last test build.
   local tree; tree=$(git rev-parse "$rev:agent")-$(git rev-parse "$rev:build")
-  if [ "$(cat dist/Casper-macos-go.test.tree 2>/dev/null)" != "$tree" ]; then
+  if [ "$(cat dist/Casper-macos-go.test.tree 2>/dev/null)" != "$tree" ] || [ ! -f dist/Casper-windows-amd64-setup.test.exe ]; then
     local wt; wt=$(mktemp -d)/build
     git worktree add -q --detach "$wt" "$rev"
     cp auth_server.test.txt relay_server.test.txt app_server.test.txt "$wt/"
@@ -86,10 +86,19 @@ deploy() {
     (cd "$wt" && DEPLOY_ENV=test ./build/build_go_macos.sh > /tmp/casper_test_build.log 2>&1) \
       || { echo "app build failed: /tmp/casper_test_build.log"; git worktree remove --force "$wt"; exit 1; }
     cp "$wt/dist/Casper-macos-go.test.zip" dist/
+    for arch in arm64 amd64; do   # the Windows installer and zip
+      (cd "$wt" && DEPLOY_ENV=test GOARCH=$arch ./build/build_go_windows.sh > /tmp/casper_test_build_windows.log 2>&1) \
+        || { echo "Windows app build failed: /tmp/casper_test_build_windows.log"; git worktree remove --force "$wt"; exit 1; }
+      cp "$wt/dist/Casper-windows-$arch-setup.test.exe" "$wt/dist/Casper-windows-$arch-go.test.zip" dist/
+    done
     git worktree remove --force "$wt"
     echo "$tree" > dist/Casper-macos-go.test.tree
   fi
   scp -q dist/Casper-macos-go.test.zip "$MINI:$DIR/dist/Casper-macos.zip"
+  for arch in arm64 amd64; do
+    scp -q "dist/Casper-windows-$arch-setup.test.exe" "$MINI:$DIR/dist/Casper-windows-$arch-setup.exe"
+    scp -q "dist/Casper-windows-$arch-go.test.zip" "$MINI:$DIR/dist/Casper-windows-$arch.zip"
+  done
   on_mini "cd ~/$DIR && git fetch -q origin && git checkout -q --detach $rev && $COMPOSE up -d --build www auth catcher relay 2>&1 | grep -v -E '^ *(#|=>)' | tail -4"
   for _ in $(seq 30); do
     curl -fs https://test-auth.casperagent.dev/invites/info?code=x >/dev/null 2>&1 && { echo "test stack at ${rev:0:9}"; return; }

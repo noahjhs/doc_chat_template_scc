@@ -29,6 +29,7 @@ import (
 	"casper-agent/internal/server"
 	"casper-agent/internal/setup"
 	"casper-agent/internal/urlscheme"
+	"casper-agent/internal/winpkg"
 
 	"github.com/getlantern/systray"
 )
@@ -72,6 +73,15 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		attachConsole()
 		os.Exit(setup.Main(os.Args[2:]))
+	}
+	// `Casper uninstall` (Windows: Apps & features runs it) removes this install.
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		attachConsole()
+		if err := winpkg.RunUninstall(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	flag.Parse()
 	if *clearPreferences {

@@ -625,6 +625,42 @@ def test_app_download(app_env, tmp_path, monkeypatch):
     assert client.get("/agents.md").headers["cache-control"] == "no-store"
 
 
+def test_windows_download(app_env, tmp_path, monkeypatch):
+    main, client = app_env
+    monkeypatch.setattr(main, "DIST_DIR", str(tmp_path))
+    assert client.get("/download/casper/windows").status_code == 404
+    (tmp_path / "Casper-windows-amd64-setup.exe").write_bytes(b"MZ amd64")
+    (tmp_path / "Casper-windows-amd64.zip").write_bytes(b"PK amd64")
+    # only an amd64 build is published: it serves everyone (ARM runs it under emulation)
+    for query in ("", "?arch=amd64", "?arch=arm64"):
+        r = client.get("/download/casper/windows" + query)
+        assert r.status_code == 200 and r.content == b"MZ amd64"
+        assert r.headers["cache-control"] == "no-store"
+        assert 'filename="Casper-Setup.exe"' in r.headers["content-disposition"]
+    (tmp_path / "Casper-windows-arm64-setup.exe").write_bytes(b"MZ arm64")
+    assert client.get("/download/casper/windows?arch=arm64").content == b"MZ arm64"
+    assert client.get("/download/casper/windows", headers={"Sec-CH-UA-Arch": '"arm"'}).content == b"MZ arm64"
+    assert client.get("/download/casper/windows?arch=amd64").content == b"MZ amd64"
+    assert client.get("/download/casper/windows", headers={"Sec-CH-UA-Arch": '"x86"'}).content == b"MZ amd64"
+    assert client.get("/download/casper/windows?arch=riscv").status_code == 400
+    # an amd64 PC is never handed the arm64 build, even when that is all there is
+    (tmp_path / "Casper-windows-amd64-setup.exe").unlink()
+    assert client.get("/download/casper/windows?arch=amd64").status_code == 404
+    z = client.get("/download/casper/windows/zip")
+    assert z.status_code == 200 and z.content == b"PK amd64" and z.headers["cache-control"] == "no-store"
+
+
+def test_download_link_follows_the_browser(app_env):
+    main, client = app_env
+    for ua, target in (
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130", "/download/casper/windows"),
+        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605", "/download/casper/macos"),
+        ("curl/8", "/download/casper/macos"),
+    ):
+        r = client.get("/download/casper", headers={"User-Agent": ua}, follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == target and r.headers["cache-control"] == "no-store"
+
+
 # --- Mirroring: validation ----------------------------------------------------------------
 def test_catcher_on_a_mirrors_machine_is_refused(app_env):
     main, client = app_env

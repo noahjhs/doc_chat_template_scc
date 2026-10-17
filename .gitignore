@@ -218,3 +218,8 @@ nous_key.txt
 
 # Casper agent package (Flask rule above would hide it)
 !agent/internal/instance/
+
+# Windows installer: the staged payload and the generated resource files
+agent/cmd/casper-setup/payload/payload.zip
+agent/cmd/*/*.syso
+build/winres/

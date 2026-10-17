@@ -75,3 +75,10 @@ func Ensure() error {
 	}
 	return registerScheme(config.PairURLScheme(), exe)
 }
+
+// RegisterFor points the handler for scheme at exe. The installer uses it to
+// register the app it just placed, before that app has ever run.
+func RegisterFor(scheme, exe string) error { return registerScheme(scheme, exe) }
+
+// Unregister removes scheme's handler (the uninstaller).
+func Unregister(scheme string) { unregisterScheme(scheme) }

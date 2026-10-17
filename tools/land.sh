@@ -60,6 +60,11 @@ deploy_app() {
   cp "$MAIN"/{auth,relay,app}_server.dev.txt .   # untracked, per deployment
   DEPLOY_ENV=dev ./build/build_go_macos.sh > "$LOG/build.log" 2>&1 || die "app build failed: $LOG/build.log"
   scp -q dist/Casper-macos-go.dev.zip "$MINI:doc_chat_template_scc/dist/Casper-macos.zip"
+  for arch in arm64 amd64; do   # the Windows installer and zip, served at /download/casper/windows
+    DEPLOY_ENV=dev GOARCH=$arch ./build/build_go_windows.sh > "$LOG/build-windows-$arch.log" 2>&1 || die "Windows app build failed: $LOG/build-windows-$arch.log"
+    scp -q "dist/Casper-windows-$arch-setup.dev.exe" "$MINI:doc_chat_template_scc/dist/Casper-windows-$arch-setup.exe"
+    scp -q "dist/Casper-windows-$arch-go.dev.zip" "$MINI:doc_chat_template_scc/dist/Casper-windows-$arch.zip"
+  done
   on_mini '
     t=$(mktemp -d); cd $t && unzip -q ~/doc_chat_template_scc/dist/Casper-macos.zip
     pkill -f "^/Applications/Casper.app/Contents/MacOS/Casper" || true; sleep 2

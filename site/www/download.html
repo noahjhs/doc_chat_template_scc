@@ -2,12 +2,36 @@
 <nav><a class="logo" href="/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C9.4 3 5 8 5 14.5V28l3.6-2.6L12 28l4-2.8L20 28l3.4-2.6L27 28V14.5C27 8 22.6 3 16 3z" fill="#2b1d14"/><circle cx="12.5" cy="14" r="1.8" fill="#f6efe4"/><circle cx="19.5" cy="14" r="1.8" fill="#f6efe4"/></svg> Casper</a><div class="links"><a href="/#how">How it works</a><a href="/#trust">Trust</a><a href="/#commons">The commons</a><a class="pill" href="${APP_URL}/signin">Sign in</a></div></nav>
 <section style="border:0;padding-top:48px"><div class="eyebrow">Get started</div><h2>The easiest way: let Casper's guide set it up with you.</h2>
 <p style="margin:-16px 0 48px"><a class="btn" href="${APP_URL}/signup?start=guide">Begin setup with Casper's guide →</a></p>
-<p class="muted" style="margin-bottom:20px">Or do it yourself, in three steps:</p>
+<p class="muted" style="margin-bottom:20px">Or do it yourself, in three steps. <span class="small">On <a href="#mac" class="os-pick" data-os="mac">a Mac</a> or <a href="#windows" class="os-pick" data-os="win">a Windows PC</a>?</span></p>
 <ol class="steps">
-<li><h3>Download Casper for Mac</h3><p>It's small, signed and notarized. <a class="alt" href="${DOWNLOAD_URL}" style="color:var(--accent);font-weight:500">Download Casper.zip →</a></p></li>
-<li><h3>Open it</h3><p>Unzip, open <b>Casper</b>, and click <b>Open</b> if macOS asks. Casper appears in your menu bar. If it asks about opening at login, say yes — friends' mirrors only work while Casper runs.</p></li>
-<li><h3>Create your account</h3><p>On the same Mac: <a href="${APP_URL}/signup" style="color:var(--accent);font-weight:500">sign up →</a> That connects this Mac to you, and Casper's guide picks up from there.</p></li>
+<li class="os-mac"><h3>Download Casper for Mac</h3><p>It's small, signed and notarized. <a class="alt" href="${DOWNLOAD_URL}" style="color:var(--accent);font-weight:500">Download Casper.zip →</a></p></li>
+<li class="os-mac"><h3>Open it</h3><p>Unzip, open <b>Casper</b>, and click <b>Open</b> if macOS asks. Casper appears in your menu bar. If it asks about opening at login, say yes — friends' mirrors only work while Casper runs.</p></li>
+<li class="os-win hide"><h3>Download Casper for Windows</h3><p>It's small and installs just for you, with no administrator password. <a class="alt" id="win-dl" href="${DOWNLOAD_URL}" style="color:var(--accent);font-weight:500">Download Casper-Setup.exe →</a></p></li>
+<li class="os-win hide"><h3>Run it</h3><p>Open the file you downloaded. Casper is new, so Windows may say <b>Windows protected your PC</b>: click <b>More info</b>, then <b>Run anyway</b>. Casper appears as a ghost in the tray, bottom right (it may sit behind the <b>^</b>). If it asks about starting with Windows, say yes — friends' mirrors only work while Casper runs.</p></li>
+<li><h3>Create your account</h3><p>On the same computer: <a href="${APP_URL}/signup" style="color:var(--accent);font-weight:500">sign up →</a> That connects this computer to you, and Casper's guide picks up from there.</p></li>
 </ol>
 <p class="muted" style="margin-top:40px;max-width:720px">Already use an AI agent like Claude Code, Hermes or Codex? Skip all of this — just tell it: <code>Set me up with Casper using ${AGENTS_URL}</code></p>
 </section>
+<script>
+(function () {
+  var mac = document.getElementById("win-dl").getAttribute("href").replace(/\/macos$/, "");
+  var winUrl = mac + "/windows";
+  function show(os) {
+    document.querySelectorAll(".os-mac").forEach(function (e) { e.classList.toggle("hide", os !== "mac" && e.tagName === "LI"); });
+    document.querySelectorAll(".os-win").forEach(function (e) { e.classList.toggle("hide", os !== "win"); });
+  }
+  function setArch(arch) { document.getElementById("win-dl").href = winUrl + (arch ? "?arch=" + arch : ""); }
+  setArch("");
+  var ua = navigator.userAgentData;
+  var isWin = /Windows/i.test(ua && ua.platform ? ua.platform : navigator.userAgent);
+  show(isWin ? "win" : "mac");
+  if (isWin && ua && ua.getHighEntropyValues) {
+    ua.getHighEntropyValues(["architecture"]).then(function (v) { setArch(/arm/i.test(v.architecture || "") ? "arm64" : "amd64"); }, function () {});
+  }
+  document.querySelectorAll(".os-pick").forEach(function (a) {
+    a.addEventListener("click", function (ev) { ev.preventDefault(); show(a.getAttribute("data-os")); });
+  });
+  if (location.hash === "#windows") show("win");
+})();
+</script>
 <footer><span>Casper — held by friends, read by no one.</span><span><a href="/download">Download</a> · <a href="${APP_URL}/guide">Guide</a> · Early alpha · macOS</span></footer></div></body></html>

@@ -2807,6 +2807,57 @@ def download_app():
     return FileResponse(path, media_type="application/zip", filename="Casper-macos.zip", headers=_NO_STORE)
 
 
+# Windows: an installer (`Casper-windows-<arch>-setup.exe`, per-user, silent with
+# /VERYSILENT) and the bare folder as a zip, built by build/build_go_windows.sh.
+# arm64 PCs run the amd64 build under emulation, so an ARM request falls back to it
+# when no native build is published; the reverse never works.
+_WINDOWS_ARCHES = ("arm64", "amd64")
+
+
+def _windows_file(request: Request, arch: str, name: str) -> tuple[str, str]:
+    """The published file for `name` (with {arch}) and the arch that was found."""
+    if arch and arch not in _WINDOWS_ARCHES:
+        raise HTTPException(status_code=400, detail="arch must be arm64 or amd64.")
+    if not arch:
+        # a browser sends this client hint only when asked (the download page asks)
+        hint = request.headers.get("sec-ch-ua-arch", "").strip('"').lower()
+        arch = "arm64" if hint in ("arm", "arm64") else "amd64"
+    for candidate in (("arm64", "amd64") if arch == "arm64" else ("amd64",)):
+        path = os.path.join(DIST_DIR, name.format(arch=candidate))
+        if os.path.isfile(path):
+            return path, candidate
+    raise HTTPException(status_code=404, detail="No Windows build is published on this deployment.")
+
+
+@app.get("/download/casper/windows", include_in_schema=False)
+@app.get("/download/casper-windows-setup.exe", include_in_schema=False)
+def download_app_windows(request: Request, arch: str = ""):
+    """The installer. The extensionless path is the one to publish (see download_app)."""
+    from fastapi.responses import FileResponse
+
+    path, _ = _windows_file(request, arch, "Casper-windows-{arch}-setup.exe")
+    return FileResponse(path, media_type="application/vnd.microsoft.portable-executable", filename="Casper-Setup.exe", headers=_NO_STORE)
+
+
+@app.get("/download/casper/windows/zip", include_in_schema=False)
+def download_app_windows_zip(request: Request, arch: str = ""):
+    """Casper.exe and syncthing.exe in a zip, for an agent that would rather unpack than install."""
+    from fastapi.responses import FileResponse
+
+    path, got = _windows_file(request, arch, "Casper-windows-{arch}.zip")
+    return FileResponse(path, media_type="application/zip", filename=f"Casper-windows-{got}.zip", headers=_NO_STORE)
+
+
+@app.get("/download/casper", include_in_schema=False)
+def download_app_for_browser(request: Request):
+    """One link for everyone (the guide hands it out): Windows browsers get the
+    installer, everything else the Mac app."""
+    from fastapi.responses import RedirectResponse
+
+    target = "windows" if "windows" in request.headers.get("user-agent", "").lower() else "macos"
+    return RedirectResponse(f"/download/casper/{target}", status_code=302, headers=_NO_STORE)
+
+
 for _name, _fn in {
     "my_casper": _mcp_my_casper,
     "add_friend": _mcp_add_friend,
@@ -3604,7 +3655,8 @@ def _guide_lock(user_id: int) -> threading.Lock:
 
 
 def _guide_download_url() -> str:
-    return os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper/macos"
+    # the browser-sniffing link: it opens in the person's own browser, which knows their OS
+    return os.environ.get("GUIDE_DOWNLOAD_URL") or f"{_public_base_url()}/download/casper"
 
 
 def _guide_stage(user_id: int, messages: list[dict]) -> "guide.Stage":
