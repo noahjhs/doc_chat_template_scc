@@ -2261,6 +2261,15 @@ def _gb(n: int) -> str:
     return backups.human(n)
 
 
+def _copy_done(st: dict) -> bool:
+    """The one test for "the first copy is on a mirror", shared by the owner's
+    guide and the holder's ledger so they can't disagree: nothing unprotected,
+    nothing unreadable, and a connected mirror reporting it needs nothing."""
+    return bool(st) and not st.get("unprotected_files") and not st.get("unreadable_items") and any(
+        p.get("role") == "mirror" and p.get("connected") and p.get("completion", 0) >= 100 and not p.get("need_files")
+        for p in st.get("peers", []))
+
+
 def _holding(grant_id: int) -> str:
     """What a friend mirrors under a grant you give, from their Mac's own
     reports: how many folders, how big, and whether your copy is current.
@@ -2275,8 +2284,7 @@ def _holding(grant_id: int) -> str:
         for f in folders:
             st = mirroring.latest_status(db, f["id"]) or {}
             total += st.get("local_bytes", 0) or 0
-            if not st or st.get("unprotected_files") or not any(p.get("connected") or not str(p.get("last_seen", "")).startswith("1969")
-                                                               for p in st.get("peers", [])):
+            if not _copy_done(st):
                 copying += 1
     what = f"{len(folders)} folder{'s' if len(folders) > 1 else ''} of theirs" + (f" ({_gb(total)})" if total else "")
     return f", holding {what}, " + ("still copying" if copying else "up to date")
@@ -3059,7 +3067,7 @@ def _first_copy_done(db, f) -> bool:
     """A mirror really holds everything (its own completion report), not
     merely "connected and nothing flagged"."""
     st = mirroring.latest_status(db, f["id"]) or {}
-    return not st.get("unreadable_items") and any(p.get("role") == "mirror" and p.get("completion", 0) >= 100 for p in st.get("peers", []))
+    return _copy_done(st)
 
 
 def _status_text(db, f) -> str:

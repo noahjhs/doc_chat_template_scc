@@ -17,7 +17,11 @@ const fromApp = Casper.param("from") === "app";
 if (invite) { document.getElementById("eyebrow").innerText = "You're invited"; document.getElementById("toSignin").href = "/signin?invite=" + encodeURIComponent(invite); }
 const guide = "/guide" + (invite ? "?invite=" + encodeURIComponent(invite) : "");
 if (Casper.session()) Casper.api("/hosts").then(() => location.href = guide).catch(() => {});
-document.getElementById("f").addEventListener("submit", async ev => {
+const form = document.getElementById("f");
+// Editing a field clears its stale error; Enter in any field submits (not left to the browser's implicit submit).
+form.addEventListener("input", ev => { document.getElementById(ev.target.name === "username" ? "uerr" : "err").innerText = ""; });
+form.addEventListener("keydown", ev => { if (ev.key === "Enter" && ev.target.tagName === "INPUT" && !ev.isComposing) { ev.preventDefault(); if (!form.querySelector("button").disabled) form.requestSubmit(); } });
+form.addEventListener("submit", async ev => {
   ev.preventDefault(); const err = document.getElementById("err"), uerr = document.getElementById("uerr"), btn = ev.target.querySelector("button");
   err.innerText = ""; uerr.innerText = "";
   const d = Object.fromEntries(new FormData(ev.target));

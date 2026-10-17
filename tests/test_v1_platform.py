@@ -1195,11 +1195,33 @@ def test_a_giver_sees_what_they_hold_without_folder_names(app_env, monkeypatch):
         db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES ('f1', 2, 2, '~/Documents', 'Documents', 'active')")
         db.execute("INSERT INTO mirror_targets (folder_id, role, grant_id, peer_owner_user_id, peer_host_id) VALUES ('f1', 'mirror', 7, 1, 1)")
     assert main._holding(8) == ", holding nothing yet"
-    copying = {"local_bytes": 417 * 1024**2, "unprotected_files": 3, "peers": [{"role": "mirror", "connected": True, "last_seen": "2026-10-12T01:00:00Z"}]}
+    peer = {"role": "mirror", "connected": True, "last_seen": "2026-10-12T01:00:00Z", "completion": 100, "need_files": 0}
+    copying = {"local_bytes": 417 * 1024**2, "unprotected_files": 3, "peers": [peer]}
     for status, want in ((copying, "still copying"), ({**copying, "unprotected_files": 0}, "up to date")):
         monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: st)
         got = main._holding(7)
         assert got.startswith(", holding 1 folder of theirs (") and got.endswith(want) and "Documents" not in got
+
+
+def test_guide_and_holder_agree_on_the_first_copy(app_env, monkeypatch):
+    """Run 2026-10-16: the guide said Protected ~20 s after Mirror while the
+    holder's agent said "still copying" (417 MB). Connected, nothing flagged,
+    but the mirror still needing files: neither side may call that done."""
+    main, _ = app_env
+    with main.get_db() as db:
+        db.execute("PRAGMA foreign_keys = OFF")
+        db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES ('f1', 2, 2, '~/Documents', 'Documents', 'active')")
+        db.execute("INSERT INTO mirror_targets (folder_id, role, grant_id, peer_owner_user_id, peer_host_id) VALUES ('f1', 'mirror', 7, 1, 1)")
+    base = {"local_bytes": 417 * 1024**2, "local_files": 9, "unprotected_files": 0,
+            "peers": [{"role": "mirror", "connected": True, "last_seen": "2026-10-12T01:00:00Z", "completion": 100, "need_files": 0}]}
+    for need, done in ((12, False), (0, True)):
+        st = {**base, "peers": [{**base["peers"][0], "need_files": need}]}
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=st: st)
+        with main.get_db() as db:
+            f = db.execute("SELECT * FROM mirror_folders WHERE id = 'f1'").fetchone()
+            guide = main._first_copy_done(db, f)
+        assert guide == done
+        assert main._holding(7).endswith("up to date" if done else "still copying")
 
 
 def test_restore_without_an_agent_then_promotion(app_env):
