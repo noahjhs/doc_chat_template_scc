@@ -25,6 +25,7 @@ import conversations
 import mailer
 import restore as restore_logic
 import mcp_server
+import claims
 import trust
 from models import (
     AccessRequestCreate,
@@ -2159,7 +2160,7 @@ def _shell_output_text(tier: str, output: str) -> str:
     return "\n".join(parts) or "(no output)"
 
 
-def _mcp_list_hosts(user_id: int) -> list[dict]:
+def _mcp_list_hosts(user_id: int, with_status: bool = False) -> list[dict]:
     with get_db() as db:
         own = db.execute(
             """
@@ -2178,17 +2179,23 @@ def _mcp_list_hosts(user_id: int) -> list[dict]:
             ).fetchall()
         }
     connected = {c["host_id"] for c in _own_configs(user_id).values()}
+    with get_db() as db:  # "online" is a claim (claims.mac_online), not just "a beat arrived lately"
+        online = {r["id"]: claims.mac_online(db, r["id"], r["label"], r["id"] in connected, surface="list_hosts") for r in own}
     out = [
-        {"host": r["label"], "role": "owner", **({"platform": r["platform"]} if r["platform"] else {}), "connected": r["id"] in connected}
+        {"host": r["label"], "role": "owner", **({"platform": r["platform"]} if r["platform"] else {}),
+         "connected": online[r["id"]].holds, **({"status": online[r["id"]].text} if with_status else {})}
         for r in own
     ]
     for g in held:
+        with get_db() as db:
+            peer_up = claims.mac_online(db, g["host_id"], f"{g['owner']}/{g['host']}", _host_config(g["owner_user_id"], g["host_id"]) is not None,
+                                        friend=True, surface="list_hosts")
         entry = {
             "host": f"{g['owner']}/{g['host']}",
             "owner": g["owner"],
             "role": g["relation"],
             "quota": backups.human(g["quota_bytes"]),
-            "connected": _host_config(g["owner_user_id"], g["host_id"]) is not None,
+            "connected": peer_up.holds,
         }
         if g["relation"] == "backup_peer":
             entry["used"] = backups.human(used_by_host.get(g["host_id"]) or 0)
@@ -2261,33 +2268,17 @@ def _gb(n: int) -> str:
     return backups.human(n)
 
 
-def _copy_done(st: dict) -> bool:
-    """The one test for "the first copy is on a mirror", shared by the owner's
-    guide and the holder's ledger so they can't disagree: nothing unprotected,
-    nothing unreadable, and a connected mirror reporting it needs nothing."""
-    return bool(st) and not st.get("unprotected_files") and not st.get("unreadable_items") and any(
-        p.get("role") == "mirror" and p.get("connected") and p.get("completion", 0) >= 100 and not p.get("need_files")
-        for p in st.get("peers", []))
-
-
 def _holding(grant_id: int) -> str:
     """What a friend mirrors under a grant you give, from their Mac's own
-    reports: how many folders, how big, and whether your copy is current.
+    reports: how many folders, how big, and whether your copy is current
+    (claims.holder_view: a report that has gone quiet is not confirmed).
     Never the folders' names (that's theirs to share)."""
     with get_db() as db:
         folders = db.execute(
             """SELECT f.id FROM mirror_targets t JOIN mirror_folders f ON f.id = t.folder_id
                WHERE t.grant_id = ? AND t.removed_at IS NULL AND f.status = 'active'""", (grant_id,)).fetchall()
-        if not folders:
-            return ", holding nothing yet"
-        total, copying = 0, 0
-        for f in folders:
-            st = mirroring.latest_status(db, f["id"]) or {}
-            total += st.get("local_bytes", 0) or 0
-            if not _copy_done(st):
-                copying += 1
-    what = f"{len(folders)} folder{'s' if len(folders) > 1 else ''} of theirs" + (f" ({_gb(total)})" if total else "")
-    return f", holding {what}, " + ("still copying" if copying else "up to date")
+        total, copying, unconfirmed, _ = claims.holder_view(db, [f["id"] for f in folders], "my_casper")
+    return claims.holding_text(len(folders), total, copying, unconfirmed)
 
 
 def _mcp_my_casper(user_id: int) -> str:
@@ -2313,9 +2304,9 @@ def _mcp_my_casper(user_id: int) -> str:
         my_backups = db.execute(
             "SELECT * FROM backups WHERE owner_user_id = ? AND status = 'complete' ORDER BY created_at DESC", (user_id,)
         ).fetchall()
-    hosts = [h for h in _mcp_list_hosts(user_id) if h["role"] == "owner"]
+    hosts = [h for h in _mcp_list_hosts(user_id, with_status=True) if h["role"] == "owner"]
     lines = [f"Casper account: {me}"]
-    lines.append("Your machines: " + (", ".join(f"{h['host']} ({'online' if h['connected'] else 'offline'})" for h in hosts) or "none paired"))
+    lines.append("Your machines: " + (", ".join(f"{h['host']} ({h['status']})" for h in hosts) or "none paired"))
     lines.append("Friends: " + (", ".join(friends) or "none yet"))
     with get_db() as db:
         groups = trust.groups_of(db, user_id)
@@ -2340,14 +2331,14 @@ def _mcp_my_casper(user_id: int) -> str:
             with get_db() as db:
                 gname = trust.group_name(db, i["group_id"])
                 who = trust.username(db, i["used_by_user_id"]) if i["used_by_user_id"] else None
-            state = f"accepted by {who}, still setting up" if who else f"expires {i['expires_at'][:10]}"
+                state = claims.invite_accepted(db, i, who, "my_casper").text
             lines.append(f"  - {_gb(i['quota_bytes'])}{' for ' + i['note'] if i['note'] else ''}{' to join ' + gname if gname else ''}, {state} [invite {i['id']}]")
     with get_db() as db:
-        done = [(i, trust.username(db, i["used_by_user_id"])) for i in trust.accepted_invites(db, user_id)]
+        done = [(i, claims.invite_accepted(db, i, trust.username(db, i["used_by_user_id"]), "my_casper")) for i in trust.accepted_invites(db, user_id)]
     if done:
         lines.append("Invites already accepted and set up (these friends are in; never say they haven't accepted):")
-        for i, who in done:
-            lines.append(f"  - {who}{' (invited as ' + i['note'] + ')' if i['note'] else ''}: accepted {i['used_at'][:10]}, first mirror running [invite {i['id']}]")
+        for i, c in done:
+            lines.append(f"  - {c.text} [invite {i['id']}]")
     kinds = {"backup_peer": "backup", "mirror_peer": "mirror", "catcher_peer": "catcher"}
     if given:
         lines.append("Space you give friends (everything arrives encrypted; you can't read it):")
@@ -2365,7 +2356,7 @@ def _mcp_my_casper(user_id: int) -> str:
         if mirrored:
             lines.append("Mirrored folders:")
             for f in mirrored:
-                lines.append("  " + _status_text(db, f).replace("\n", "\n  "))
+                lines.append("  " + _status_text(db, f, "my_casper").replace("\n", "\n  "))
     if my_backups:
         lines.append("Your backups:")
         for b in my_backups:
@@ -2922,17 +2913,12 @@ def report_mirror_status(body: dict, authorization: str = Header(default="")):
         retired = retired or _retire_lost_macs(attached["user_id"], attached["host_id"])
         _refresh_folder_parties(now)
         _mirror_refresh(f["owner_user_id"], f["owner_host_id"])  # the lost Mac, if it turns up: it has nothing to send now
-        notify(attached["user_id"], f"{f['label']} is back on {new_home}, and this computer keeps it mirrored now.")
+        notify(attached["user_id"], claims.say_promoted(f["label"], new_home))
     if promoted and retired:
         notify(attached["user_id"], f"{_names_of(retired)} is no longer paired with your account. Its copies and history are kept.")
     for n in nudges:
         st = n["status"]
-        notify(
-            attached["user_id"],
-            f"{st.get('unprotected_files')} recent change(s) in your {n['folder']['label']} aren't on any mirror yet -- "
-            "the computers mirroring it have been off for a while. Nothing to do if they'll be back soon; "
-            "otherwise, ask your agent about adding a mirror or a catcher.",
-        )
+        notify(attached["user_id"], claims.say_nudge(st.get("unprotected_files"), n["folder"]["label"]))
     return {"ok": True}
 
 
@@ -3029,7 +3015,7 @@ def _decide_mirror_consent(row, decision: str) -> str:
     for t in targets:
         notify(t["peer_owner_user_id"], f"{me}'s {f['label']} is now mirrored on your computer, encrypted -- you can't read it. Thanks for keeping a copy safe.")
     where = ", ".join(hosts) or ("Casper's catcher" if f["use_casper_catcher"] else "no one yet")
-    return f"Mirroring {f['label']} to {where}. Changes reach them within seconds whenever both computers are on."
+    return claims.say_mirroring_started(f["label"], where)
 
 
 _APPROVAL_HANDLERS["mirror_consent"] = _decide_mirror_consent
@@ -3092,8 +3078,7 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
             return f"{same['label']} is already being mirrored. Check protection_status for how it's going; no dialog is open."
         if same and same["approval_id"]:
             backups.daemon_call(config, "ask_consent", approval_id=same["approval_id"], text=f"Start mirroring {same['label']}?")
-            return (f"NOT protected yet. The dialog for {same['label']} was shown again on {source_host}; the person clicks Mirror there "
-                    "(or answers in Telegram). You can't confirm it for them. Once they say they have, check protection_status.")
+            return claims.say_consent_asked_again(same["label"], source_host)
         folder_id = mirroring.create_folder(db, user_id, config["host_id"], abs_path, label, mirror_grants, catcher_grant, use_casper_catcher)
     description = f"Start mirroring {label} ({backups.human(size)}) to {where}?"
     approval_id = create_approval(user_id, user_id, "mirror_consent", description, {"folder_id": folder_id})
@@ -3101,12 +3086,7 @@ def _mcp_mirror_folder(user_id: int, source_host: str, path: str, mirrors: list,
         db.execute("UPDATE mirror_folders SET approval_id = ? WHERE id = ?", (approval_id, folder_id))
     # The dialog says just the decision (Mirror / Cancel); the plan was already shown.
     backups.daemon_call(config, "ask_consent", approval_id=approval_id, text=f"Start mirroring {label}?")
-    return (
-        f"NOT protected yet. Nothing is mirrored until the person confirms. Tell them: a Casper dialog is open on {source_host}; "
-        "click Mirror (or answer in Telegram). You can't confirm it for them. Once they say they have, check "
-        "protection_status before telling them they're protected."
-        + (f" Tell them, once, unless you already have: {PHOTOS_NOTE}" if photos else "")
-    )
+    return claims.say_consent_asked(source_host) + (f" Tell them, once, unless you already have: {PHOTOS_NOTE}" if photos else "")
 
 
 def _short_path(p: str) -> str:
@@ -3120,15 +3100,8 @@ def _short_path(p: str) -> str:
     return re.sub(r"^/Users/[^/]+(?=/|$)", "~", p)
 
 
-def _first_copy_done(db, f) -> bool:
-    """A mirror really holds everything (its own completion report), not
-    merely "connected and nothing flagged"."""
-    st = mirroring.latest_status(db, f["id"]) or {}
-    return _copy_done(st)
-
-
-def _status_text(db, f) -> str:
-    st = mirroring.latest_status(db, f["id"]) or {}
+def _status_text(db, f, surface: str = "protection_status") -> str:
+    """The folder's protection claim (claims.folder_report) as the person's agent reads it."""
     names = {}
     for t in mirroring.peers_of(db, f["id"]):
         dev = mirroring._device_for_host(db, t["peer_host_id"])
@@ -3137,50 +3110,10 @@ def _status_text(db, f) -> str:
     cd = mirroring.catcher_device()
     if cd:
         names[cd["device_id"]] = "Casper's catcher"
-    if f["status"] == "awaiting_consent":
-        return f"{f['label']}: NOT protected yet, waiting for the person to click Mirror in the Casper dialog (or Telegram)."
-    if f["restore_host_id"] and st.get("restoring"):
-        if _restore_empty(st):
-            return f"{f['label']}: nothing to restore: its mirrors hold nothing for it (the first copy never finished before the computer was lost)."
-        state = "restored" if st.get("need_files") == 0 and st.get("state") == "idle" and st.get("local_files") else "restoring"
-        return f"{f['label']}: {state} on {trust.host_label(db, f['owner_user_id'], f['restore_host_id'])} -- {st.get('local_files', 0)} files so far."
-    if not st:
-        return f"{f['label']}: starting up (no report from {trust.host_label(db, f['owner_user_id'], f['owner_host_id'])} yet)."
-    lines = []
-    unprotected = st.get("unprotected_files", 0)
-    unreadable = st.get("unreadable_items", 0)
-    peers = st.get("peers", [])
-    # Until a mirror has connected at least once, nothing can be "missing"
-    # from it yet -- so "no unprotected files" would falsely read as
-    # protected. After that, the per-file count below is the truth.
-    ever = any(p.get("role") == "mirror" and (p.get("connected") or not str(p.get("last_seen", "")).startswith("1969"))
-               for p in peers)
-    if st.get("local_files") and not ever:
-        lines.append(f"{f['label']}: NOT protected yet: no mirror has connected yet, so nothing has been copied.")
-    elif unprotected:
-        import time as _t
-
-        age = int((_t.time() - st.get("unprotected_oldest_unix", _t.time())) / 60)
-        lines.append(f"{f['label']}: {unprotected} recent change(s) not on any mirror or catcher yet (oldest {age} min).")
-        files = _unprotected_names(f)
-        if files:
-            more = f" (and {unprotected - min(len(files), 10)} more)" if unprotected > min(len(files), 10) else ""
-            lines.append("  not yet protected: " + ", ".join(files[:10]) + more)
-    elif st.get("at_risk_files"):
-        lines.append(f"{f['label']}: " + (f"{st['at_risk_files']} readable change(s)" if unreadable else f"protected. {st['at_risk_files']} recent change(s)")
-                     + " are held by the catcher until a mirror wakes up.")
-    elif not unreadable:
-        lines.append(f"{f['label']}: protected. Every change is on at least one mirror.")
-    if unreadable:  # never "protected" while something in it can't be read
-        n = unreadable
-        lines.insert(0, f"{f['label']}: {n} item{'s' if n != 1 else ''} can't be read, so {'they aren' if n != 1 else 'it isn'}'t copied. "
-                        "NOT fully protected." + (" Everything else is on a mirror." if not unprotected and not st.get("at_risk_files") else ""))
-    for p in st.get("peers", []):
-        who = names.get(p["device_id"], p["device_id"][:7])
-        state = "up to date" if p.get("completion") == 100 and p.get("connected") else ("connected, catching up" if p.get("connected") else f"offline (last seen {(p.get('last_seen') or '?')[:16]})")
-        lines.append(f"  - {p['role']}: {who}: {state}")
-    lines.append(f"  ({st.get('local_files', 0)} files, {backups.human(st.get('local_bytes', 0))}; as of {st.get('reported_at', '')[:19]})")
-    return "\n".join(lines)
+    return claims.folder_report(
+        db, f, names, surface=surface, unprotected_names=lambda: _unprotected_names(f),
+        owner_host=trust.host_label(db, f["owner_user_id"], f["owner_host_id"]),
+        restore_host=trust.host_label(db, f["owner_user_id"], f["restore_host_id"]) if f["restore_host_id"] else "").text
 
 
 def _unprotected_names(f) -> list[str]:
@@ -3205,7 +3138,9 @@ def _mcp_protection_status(user_id: int) -> str:
         ).fetchall()
         if not rows:
             return "Nothing is mirrored yet."
-        return "\n".join(_status_text(db, f) for f in rows)
+        return "\n".join(_status_text(db, f) for f in rows) + (
+            "\nNext: quote these lines as they are (they carry when they were last confirmed). "
+            "Don't add reassurance of your own: say nothing is protected beyond what they say.")
 
 
 def _version_listing(user_id: int, folder_name: str) -> tuple:
@@ -3729,16 +3664,16 @@ _STEP_NEWS = {
 _CODE = re.compile(r"CASPER-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", re.I)
 
 
-def _unreadable_line(db, user_id: int) -> str:
-    """"Pictures: 3 items can't be read" for each active folder with any, from
-    the owner's own reports; "" when nothing is unreadable."""
-    out = []
+def _unreadable_items(db, user_id: int) -> dict:
+    """{"Pictures": 3} for each active folder with items Casper can't read, from the owner's own reports
+    (claims.unreadable_items); {} when nothing is."""
+    out = {}
     for f in db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' AND restore_host_id IS NULL ORDER BY created_at",
                         (user_id,)).fetchall():
-        n = (mirroring.latest_status(db, f["id"]) or {}).get("unreadable_items") or 0
-        if n:
-            out.append(f"{f['label']}: {n} item{'s' if n != 1 else ''} can't be read")
-    return "; ".join(out)
+        c = claims.unreadable_items(db, f, "guide")
+        if c.state == claims.VIOLATED:
+            out[f["label"]] = c.data["n"]
+    return out
 
 
 def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
@@ -3750,8 +3685,8 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
     with get_db() as db:
         if codes:
             code = codes[-1].upper()
-            row = db.execute("SELECT owner_user_id, used_by_user_id FROM invites WHERE code_hash = ?", (trust._invite_hash(code),)).fetchone()
-            if row and row["used_by_user_id"] == user_id:
+            row = db.execute("SELECT * FROM invites WHERE code_hash = ?", (trust._invite_hash(code),)).fetchone()
+            if row and row["used_by_user_id"] == user_id and claims.invite_accepted(db, dict(row), None, "guide").data["accepted"]:
                 invite = {"code": code, "inviter": trust.display_name(trust.username(db, row["owner_user_id"])), "state": "accepted"}
             elif row:
                 try:
@@ -3768,9 +3703,9 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             mirror_hosts=[f"{g['owner']}/{g['host']}" for g in held if g["relation"] == "mirror_peer"],
             catcher_hosts=[f"{g['owner']}/{g['host']}" for g in held if g["relation"] == "catcher_peer"],
             folder=f["status"] if f else "none",
-            protected=bool(f) and f["status"] == "active" and ": protected." in _status_text(db, f) and _first_copy_done(db, f),
-            recovery_kit=bool(kit and kit["recovery_kit_at"]),
-            unreadable=_unreadable_line(db, user_id),
+            protected=bool(f) and f["status"] == "active" and claims.folder_done(db, f, "guide").data["done"],
+            recovery_kit=claims.kit_saved(db, user_id, kit["recovery_kit_at"] if kit else None, "guide").data["saved"],
+            unreadable=_unreadable_items(db, user_id),
             offers_space=bool(trust.list_offerings(db, user_id)["mine"]),
         )
         profile = db.execute("SELECT lost_mac_at, recovery_unlocked_at FROM user_profile WHERE user_id = ?", (user_id,)).fetchone()
@@ -3780,27 +3715,30 @@ def _guide_facts(user_id: int, messages: list[dict]) -> "guide.Facts":
             fresh_hosts = {r["id"] for r in db.execute(
                 "SELECT h.id FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key "
                 "WHERE hp.user_id = ? AND datetime(hp.paired_at) >= datetime(?)", (user_id, profile["lost_mac_at"])).fetchall()}
-            connected = {c["host_id"] for c in _own_configs(user_id).values()} & fresh_hosts
+            # Which computers are the new ones is a fact about pairings, not about which are awake this minute: a new
+            # Mac that sleeps for three minutes must never move anyone back a step (claims.recovery).
+            mine = {r["id"] for r in db.execute("SELECT h.id FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key "
+                                                "WHERE hp.user_id = ?", (user_id,)).fetchall()}
             folders = db.execute("SELECT owner_host_id, restore_host_id FROM mirror_folders WHERE owner_user_id = ? AND status = 'active'",
                                  (user_id,)).fetchall()
-            facts.restoring = any(r["restore_host_id"] in connected for r in folders)
+            rec = claims.recovery(db, user_id, dict(profile), folders, fresh_hosts, mine, "guide").data
             # Every folder Casper has on record, whatever state it's in, and per folder how its restore is going.
             rows = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at", (user_id,)).fetchall()
             facts.recover_folders = [r["label"] for r in rows]
             facts.restore_places = {r["label"]: _short_path(r["restore_path"] or r["path"]) for r in rows
                                     if "/Casper Restores/" in str(r["restore_path"] or r["path"] or "")}
-            facts.safe_folders = [r["label"] for r in rows if not r["restore_host_id"] and _first_copy_done(db, r)]
+            facts.safe_folders = [r["label"] for r in rows if not r["restore_host_id"] and claims.folder_done(db, r, "guide").data["done"]]
             for r in rows:
-                if r["restore_host_id"] in connected:
-                    if _restore_empty(mirroring.latest_status(db, r["id"]) or {}):
+                if r["restore_host_id"] in fresh_hosts:
+                    if claims.restore_empty(mirroring.latest_status(db, r["id"]) or {}):
                         facts.empty_folders.append(r["label"])
                     else:
                         facts.restoring_folders.append(r["label"])
-            lost = any(r["restore_host_id"] is None and r["owner_host_id"] not in connected for r in folders)
-            facts.recovering = facts.restoring or lost
-            facts.recover_mac = bool(connected)
-            facts.unlocked = bool(profile["recovery_unlocked_at"])
-            facts.recovered = bool(profile["recovery_unlocked_at"]) and bool(folders) and not facts.recovering
+            facts.restoring = rec["restoring"]
+            facts.recovering = rec["recovering"]
+            facts.recover_mac = rec["new_mac"]
+            facts.unlocked = rec["unlocked"]
+            facts.recovered = rec["recovered"]
             facts.old_mac_retired = facts.recovered and not any(
                 r["id"] not in fresh_hosts for r in db.execute(
                     "SELECT h.id FROM host_pairings hp JOIN hosts h ON h.routing_key = hp.routing_key WHERE hp.user_id = ?", (user_id,)).fetchall())
@@ -3848,28 +3786,11 @@ def lost_mac(authorization: str = Header(default="")):
 
 
 def _copy_progress(user_id: int) -> str:
-    """How the first copy is going, in a few words (from the owner's own report)."""
+    """How the first copy is going, in a few words (claims.copy_progress, from the owner's own report)."""
     with get_db() as db:
         f = db.execute("SELECT * FROM mirror_folders WHERE owner_user_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
                        (user_id,)).fetchone()
-        if f is None:
-            return ""
-        st = mirroring.latest_status(db, f["id"]) or {}
-    mirrors = [p for p in st.get("peers", []) if p.get("role") == "mirror"]
-    ever = any(p.get("connected") or not str(p.get("last_seen", "")).startswith("1969") for p in mirrors)
-    if not ever:
-        return f"Connecting to your friend's computer to copy {f['label']}…"
-    pct = max((p.get("completion", 0) for p in mirrors), default=0)
-    return f"Copying {f['label']}: {pct:.0f}%"
-
-
-EMPTY_RESTORE_AFTER_SECONDS = 60  # idle with nothing in it this long: the mirrors hold nothing for it
-
-
-def _restore_empty(st: dict) -> bool:
-    """A restoring folder whose mirrors have nothing for it (it never finished
-    copying before the Mac was lost)."""
-    return bool(st.get("restoring")) and st.get("empty_for_s", 0) >= EMPTY_RESTORE_AFTER_SECONDS
+        return claims.copy_progress(db, f, "guide_state").text if f else ""
 
 
 def _restore_progress(user_id: int) -> str:
@@ -3880,10 +3801,8 @@ def _restore_progress(user_id: int) -> str:
         lines = []
         for f in rows:
             st = mirroring.latest_status(db, f["id"]) or {}
-            if _restore_empty(st):
-                lines.append(f"{f['label']}: nothing to bring back; it never finished copying to your friends' computers.")
-            else:
-                lines.append(f"Restoring {f['label']}: {st.get('local_files', 0)} files so far…")
+            lines.append(claims.say_nothing_to_bring_back(f["label"]) if claims.restore_empty(st)
+                         else claims.say_restoring_progress(f["label"], st.get("local_files", 0)))
     return "\n".join(lines)
 
 

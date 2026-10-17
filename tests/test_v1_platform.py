@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 CASPER_SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "casper_service")
-_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide", "mailer", "devtools", "restore")
+_MODULES = ("main", "db", "models", "policy", "conversations", "mcp_server", "trust", "backups", "mirroring", "guide", "mailer", "devtools", "restore", "claims")
 
 
 @pytest.fixture()
@@ -934,7 +934,7 @@ def test_guide_setup_gates_go_one_step_at_a_time(app_env):
     assert "Your Documents and Pictures are safe" in both.say and "never finished" not in both.say
     assert guide.stage_for(F(**r), [], url).choices  # the first recovery message carries buttons
     import main
-    assert main._restore_empty({"restoring": True, "empty_for_s": 90}) and not main._restore_empty({"restoring": True, "empty_for_s": 5})
+    assert main.claims.restore_empty({"restoring": True, "empty_for_s": 90}) and not main.claims.restore_empty({"restoring": True, "empty_for_s": 5})
     # Once folders are back: one closing line, then simply set up.
     back = dict(mac_connected=True, recovered=True, folder="active")
     assert step(F(**back)) == "recovered"
@@ -1062,6 +1062,13 @@ def test_another_folder_opens_the_macs_own_chooser_and_the_guide_carries_on(app_
         assert client.post("/hosts/folder-chosen", json={"request_id": req["approval_id"], "cancelled": True}, headers=device).status_code == 404
 
 
+def _reported_now(st: dict) -> dict:
+    """A status report as latest_status returns it: stamped with when it arrived (claims only trust fresh ones)."""
+    from datetime import datetime, timezone
+
+    return {**st, "reported_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
 def test_not_protected_until_a_mirror_has_ever_connected(app_env, monkeypatch):
     """Noah's walkthrough: Riley's Mac never connected, nothing was missing
     on paper (unprotected 0 before the first scan), and the guide said
@@ -1074,9 +1081,9 @@ def test_not_protected_until_a_mirror_has_ever_connected(app_env, monkeypatch):
     monkeypatch.setattr(main.mirroring, "peers_of", lambda db, fid: [])
     monkeypatch.setattr(main.mirroring, "catcher_device", lambda: None)
     for status, protected in ((never, False), (copied, True)):
-        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: st)
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: _reported_now(st))
         with main.get_db() as db:
-            assert (": protected." in main._status_text(db, folder)) is protected
+            assert main.claims.folder_report(db, folder, {}).holds is protected
 
 
 def test_never_protected_while_items_cant_be_read(app_env, monkeypatch):
@@ -1089,17 +1096,18 @@ def test_never_protected_while_items_cant_be_read(app_env, monkeypatch):
     monkeypatch.setattr(main.mirroring, "peers_of", lambda db, fid: [])
     monkeypatch.setattr(main.mirroring, "catcher_device", lambda: None)
     for n, word in ((0, "protected."), (1, "1 item can't be read"), (3, "3 items can't be read")):
-        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st={**base, "unreadable_items": n}: st)
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st={**base, "unreadable_items": n}: _reported_now(st))
         with main.get_db() as db:
-            text, done = main._status_text(db, folder), main._first_copy_done(db, folder)
+            c = main.claims.folder_done(db, folder)
+            text, done = c.text, c.data["done"]
         assert word in text
-        assert (": protected." in text) is (n == 0) and done is (n == 0)
+        assert c.holds is (n == 0) and done is (n == 0)
         if n:
             assert text.startswith("Pictures: ") and "NOT fully protected" in text and "protected. " not in text.replace("fully protected.", "")
     # The guide says it once, in Casper's own words, and never says "Protected." for it.
     F, url = main.guide.Facts, "https://x/dl"
     facts = F(mac_connected=True, invite={"code": "C", "inviter": "riley", "state": "accepted"}, mirror_hosts=["riley/Mac"],
-              folder="active", unreadable="Pictures: 3 items can't be read")
+              folder="active", unreadable={"Pictures": 3})
     stage = main.guide.stage_for(facts, [], url)
     assert stage.name == "unreadable" and stage.say.startswith("Pictures: 3 items can't be read")
     said = [{"role": "assistant", "content": stage.say, "_stage": "unreadable"}]
@@ -1233,8 +1241,8 @@ def test_a_giver_sees_what_they_hold_without_folder_names(app_env, monkeypatch):
     assert main._holding(8) == ", holding nothing yet"
     peer = {"role": "mirror", "connected": True, "last_seen": "2026-10-12T01:00:00Z", "completion": 100, "need_files": 0}
     copying = {"local_bytes": 417 * 1024**2, "unprotected_files": 3, "peers": [peer]}
-    for status, want in ((copying, "still copying"), ({**copying, "unprotected_files": 0}, "up to date")):
-        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: st)
+    for status, want in ((copying, "still copying"), ({**copying, "unprotected_files": 0, "local_files": 9}, "up to date")):
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=status: _reported_now(st))
         got = main._holding(7)
         assert got.startswith(", holding 1 folder of theirs (") and got.endswith(want) and "Documents" not in got
 
@@ -1252,10 +1260,10 @@ def test_guide_and_holder_agree_on_the_first_copy(app_env, monkeypatch):
             "peers": [{"role": "mirror", "connected": True, "last_seen": "2026-10-12T01:00:00Z", "completion": 100, "need_files": 0}]}
     for need, done in ((12, False), (0, True)):
         st = {**base, "peers": [{**base["peers"][0], "need_files": need}]}
-        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=st: st)
+        monkeypatch.setattr(main.mirroring, "latest_status", lambda db, fid, st=st: _reported_now(st))
         with main.get_db() as db:
             f = db.execute("SELECT * FROM mirror_folders WHERE id = 'f1'").fetchone()
-            guide = main._first_copy_done(db, f)
+            guide = main.claims.folder_done(db, f).data["done"]
         assert guide == done
         assert main._holding(7).endswith("up to date" if done else "still copying")
 

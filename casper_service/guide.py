@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
+import claims
 from db import get_db
 from mcp_server import PLATFORMS, VOICE
 
@@ -164,7 +165,7 @@ class Facts:
     folder: str = "none"  # their newest mirror: "none" | "awaiting_consent" | "active"
     protected: bool = False
     recovery_kit: bool = False
-    unreadable: str = ""  # e.g. "Pictures: 3 items can't be read" -- never "protected" while this is set
+    unreadable: dict = field(default_factory=dict)  # {"Pictures": 3}: items Casper can't read, per folder (claims) -- never "protected" while set
     offers_space: bool = False
     # Recovering after a lost Mac (they said so, and folders still need a Mac):
     recovering: bool = False
@@ -235,8 +236,7 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
         # The recovery's closing line, once; after it they're simply set up.
         if "recovered" in spoken:
             return Stage("open", "Set up. Help with whatever they ask, one ask at a time.", ("*",))
-        say = (f"Your folders are back on this {noun(facts)}, and Casper keeps them mirrored." + _landing(facts)
-               + (" Your old computer is no longer paired with your account; its copies and history are kept." if facts.old_mac_retired else ""))
+        say = claims.say_folders_back(noun(facts), _landing(facts), facts.old_mac_retired)
         return Stage("recovered", f"Say only: \"{say}\"", (), ({"label": ("Show me in File Explorer" if facts.platform == "windows" else "Show me in Finder"), "action": "show_restores", "box": True},) if facts.restore_places else (), say=say)
     if inv and inv["state"] == "open":
         return Stage("accept_invite", f"They have {inv['inviter']}'s invite ({inv['code']}). Preview it (redeem_invite, "
@@ -262,15 +262,15 @@ def stage_for(facts: Facts, history: list[dict], download_url: str) -> Stage:
     # "Protected" is said once, after a real finished first copy; a later dip in the
     # copy doesn't take it back.
     if facts.folder == "active" and facts.unreadable and "unreadable" not in spoken:
-        say = f"{facts.unreadable}. Casper can't copy those; everything else is being kept safe."
+        say = claims.say_unreadable(facts.unreadable)
         return Stage("unreadable", f"Say only: \"{say}\" Never call that folder protected.", say=say)
     protected = facts.protected or "recovery_kit" in spoken or (bool(facts.unreadable) and "unreadable" in spoken)
     if facts.folder == "active" and not protected:
         return Stage("syncing", "The first copy is under way; the page shows its progress. Say only: \"Copying now. You can leave "
                      "this page open.\" If they ask how it's going, check protection_status.",
-                     say="Copying now. You can leave this page open.")
+                     say=claims.say_copy_started())
     if facts.folder == "active" and not facts.recovery_kit and "recovery_kit" not in answered:
-        lead = "" if facts.unreadable else "Protected. "
+        lead = claims.say_protected_lead() if facts.protected and not facts.unreadable else ""
         say = f"{lead}Last step: your recovery kit. In {casper_menu(facts)}, choose Make Recovery Kit."
         return Stage("recovery_kit", f"Say only: \"{say}\" If they ask why: without it, a lost computer can't be rebuilt.", (), ("Later",), say=say)
     if inv and not facts.offers_space and "give_back" not in answered:
@@ -287,10 +287,10 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
     # "Safe" is said only of folders whose own last report shows a finished copy; the others are named as not copied.
     safe = ""
     if facts.safe_folders:
-        safe = f"Your {_names(facts.safe_folders)} {'is' if len(facts.safe_folders) == 1 else 'are'} safe on your friends' computers. "
+        safe = claims.say_folders_safe(facts.safe_folders, _names)
     unsafe = [x for x in facts.recover_folders if x not in facts.safe_folders]
     if unsafe:
-        safe += f"{_names(unsafe)} never finished copying, so {'it' if len(unsafe) == 1 else 'they'} can't come back. "
+        safe += claims.say_folders_not_copied(unsafe, _names)
     if not facts.recover_mac:
         say = f"{safe}Download Casper and open it on the new computer: {download_url}\n{WARNINGS}"
         return Stage("recover_install", f"They lost their computer and are signed in on a new one. Say exactly \"{say}\" and nothing more. "
@@ -310,7 +310,7 @@ def _recover_stage(facts: Facts, download_url: str) -> Stage:
         where = _landing(facts)
         if where:
             now += f"If they ask where they are:{where} Always write paths short like that, never /Users/<name>/. "
-        return Stage("recover_copy", now, ("*",), say="Restoring now. You can leave this page open.")
+        return Stage("recover_copy", now, ("*",), say=claims.say_restore_started())
     if not facts.unlocked:
         say = f"In {casper_menu(facts)}, choose Recover from a Lost Computer. Have your recovery kit file and its passphrase ready."
         return Stage("recover_unlock", f"Say only: \"{say}\" If they have no kit: it can't be rebuilt without it yet; say so plainly.", say=say)
@@ -401,6 +401,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
     if event:
         said["_event"] = True
     messages = list(history) + [said]
+    claims.begin_turn()  # every claim issued while this reply is made (tool results) is collected here
     proposed = False
     previewed: set[str] = set()  # tools previewed in this turn: acting on one needs the person's answer first
     acted = False  # something changed this turn (a confirmed action)
@@ -419,6 +420,9 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
         messages.append(entry)
         if not calls:
             reply = (msg.content or "").strip()
+            if not claims.reply_backed(reply):  # the model said "protected" with no protection claim behind it this turn
+                reply = _casper_words(services, user_id)
+                entry["content"] = reply
             if stage and stage.silent and event and not proposed and "?" not in user_text:
                 reply = ""  # a waiting step: the page shows the wait
                 entry["content"] = ""
@@ -426,6 +430,7 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 # A scripted step begins: Casper says its line. The model keeps
                 # at most a short note on what just happened (e.g. "Accepted.").
                 note = reply.split("\n")[0].strip() if acted else ""
+                note = note if claims.reply_backed(note) else ""
                 keep = note and "?" not in note and len(note) <= 90 and stage.say not in note
                 note = note if keep else ("Done." if acted else "")
                 reply = (note + "\n\n" if note else "") + stage.say
@@ -457,9 +462,18 @@ def run(client, model: str, services, user_id: int, history: list[dict], user_te
                 proposed = True
                 previewed.add(c.function.name)
             elif args.get("preview") is False:
-                acted = True
+                with get_db() as db:  # "Done." only if the tool's result says it happened (claims.action_done)
+                    acted = claims.action_done(db, c.function.name, result, surface="guide").holds or acted
             messages.append({"role": "tool", "tool_call_id": c.id, "content": result[:6000]})
     return "That didn't go through. Say it another way?", messages
+
+
+def _casper_words(services, user_id: int) -> str:
+    """Casper's own sentence for a reply the model made without a claim behind it: the headline lines of
+    protection_status, as issued (claims.py), or an honest "can't say" if that isn't available."""
+    out = _call_tool(services, user_id, "protection_status", {})
+    lines = [x for x in out.splitlines() if x.strip() and not x.startswith((" ", "(", "Next:"))]
+    return "\n".join(lines) if lines and not out.startswith("That didn't work") else "I can't say yet. Casper hasn't confirmed anything about your folders."
 
 
 # --- Stored conversations (one per person, shared by web and Telegram) -----------

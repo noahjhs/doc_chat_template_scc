@@ -386,6 +386,22 @@ CREATE TABLE IF NOT EXISTS mirror_status (
     nudged_at TEXT
 );
 
+-- Every claim Casper issued to a person (casper_service/claims.py): what it
+-- said, its state, and the evidence it stood on. Repeats of the same claim
+-- in the same state are not re-logged for ten minutes.
+CREATE TABLE IF NOT EXISTS claim_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    state TEXT NOT NULL,
+    as_of REAL,
+    evidence TEXT NOT NULL,
+    text TEXT NOT NULL,
+    surface TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS claim_log_key ON claim_log (claim, subject, surface, id);
+
 -- Casper's guide (casper_service/guide.py): one conversation per person,
 -- shared by the web chat and Telegram. OpenAI-format messages, including
 -- tool calls and results.
