@@ -242,15 +242,7 @@ def test_mirroring_end_to_end(world):
         except OSError:
             return False
 
-    try:
-        _wait(rebuilt, "the replacement Mac to rebuild Documents, including the caught change", timeout=240)
-    except AssertionError:
-        # Known race (2026-10-17, docs/product/claims.md C10): when Sam already holds everything but the one change
-        # only the catcher has, the replacement Mac can look finished (nothing needed, idle, 10 s) before it has
-        # reached the catcher, and is promoted without that change. Everything else must be there.
-        if (target / "taxes" / "return.pdf").exists() and (target / "notes.txt").exists() and not (target / "written-while-sam-slept.txt").exists():
-            pytest.xfail("replacement Mac promoted before the catcher's change arrived (catcher not yet reached)")
-        raise
+    _wait(rebuilt, "the replacement Mac to rebuild Documents, including the caught change", timeout=240)
 
     # Promotion: the replacement becomes Documents' Mac (no agent involved).
     def owner():

@@ -184,6 +184,9 @@ func skipLocal(rel string, d fs.DirEntry) bool {
 	if restoredName.MatchString(base) {
 		return true
 	}
+	if rel == ".stignore" { // Casper's carve-out list at the folder's root
+		return true
+	}
 	return strings.HasPrefix(base, ".syncthing.") || isSystemNoise(base) || strings.HasSuffix(base, ".casper-restoring")
 }
 

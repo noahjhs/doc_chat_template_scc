@@ -274,6 +274,9 @@ func (s *Service) carryLegacy(id Identity, ident string, d mirror.Desired) {
 	s.mu.Unlock()
 }
 
+// catcherWait caps how long a restore waits to reach Casper's catcher.
+const catcherWait = 3 * time.Minute
+
 // settledFor is how long (seconds) a restoring folder has looked finished:
 // the mirrors' copy in, and the catcher's gap (if any) received and laid
 // over it. casper_service promotes this Mac to the folder's Mac only after
@@ -284,10 +287,32 @@ func (s *Service) settledFor(f mirror.OwnedFolder, looksDone bool) int {
 		looksDone = err == nil && need == 0 && state == "idle"
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.settled == nil {
 		s.settled = map[string]time.Time{}
 	}
+	// A catcher folder that was never reached also reads "needs nothing, idle",
+	// so the catcher must have been connected to at least once (a couple of
+	// minutes' cap, for a catcher that is simply unreachable) before the gap
+	// counts as received.
+	if looksDone && f.Catcher != "" {
+		key := f.ID + "/catcher"
+		if _, ok := s.settled[key]; !ok {
+			started, ok := s.settled[f.ID+"/begun"]
+			if !ok {
+				started = time.Now()
+				s.settled[f.ID+"/begun"] = started
+			}
+			s.mu.Unlock()
+			reached := s.Mgr.Connected(f.Catcher)
+			s.mu.Lock()
+			if reached || time.Since(started) > catcherWait {
+				s.settled[key] = time.Now()
+			} else {
+				looksDone = false
+			}
+		}
+	}
+	defer s.mu.Unlock()
 	if !looksDone {
 		delete(s.settled, f.ID)
 		return 0

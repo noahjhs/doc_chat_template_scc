@@ -122,6 +122,12 @@ func (m *Manager) connections() (map[string]bool, map[string]string) {
 	return connected, seen
 }
 
+// Connected reports whether this device is connected to Syncthing peer id right now.
+func (m *Manager) Connected(device string) bool {
+	conns, _ := m.connections()
+	return conns[device]
+}
+
 // OwnedStatus computes protection for one owned folder, and returns the
 // at-risk paths (for the catcher's staging area).
 func (m *Manager) OwnedStatus(f OwnedFolder) (FolderStatus, []string) {
