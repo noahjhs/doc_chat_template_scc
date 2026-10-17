@@ -1381,7 +1381,7 @@ def test_guide_words_follow_the_platform(app_env):
                                             invite={"code": "C", "inviter": "Sam", "state": "accepted"}), [], "u").say
     assert give_back.endswith("space on your PC too?")
     install = guide.stage_for(guide.Facts(), [], "https://x/download")
-    assert "Windows protected your PC" in install.say and "https://x/download" in install.say
+    assert "Windows" not in install.say and "https://x/download" in install.say  # unknown platform: neutral
 
 
 def test_typed_message_in_a_silent_step_is_not_dropped(app_env):

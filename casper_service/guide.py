@@ -194,8 +194,9 @@ def casper_menu(facts: "Facts") -> str:
     return "Casper's menu (the ghost by the clock)"
 
 
-WARNINGS = ("(Ignore browser warnings. The app is safe. If Windows says \"Windows protected your PC\", "
-            "choose More info, then Run anyway.)")
+# The platform isn't known before anything is paired, so the line stays neutral; the web page adds the
+# SmartScreen hint itself on Windows (guide.html).
+WARNINGS = "(Ignore browser warnings. The app is safe.)"
 
 
 @dataclass
