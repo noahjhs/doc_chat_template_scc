@@ -32,9 +32,9 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
-# What Casper runs on, as told to agents and the guide. Windows joins this
-# line (e.g. "macOS and Windows 11") once the Windows e2e passes (windows.md, phase 7).
-PLATFORMS = "macOS only"
+# What Casper runs on, as told to agents and the guide. Windows joined on
+# 2026-10-17, when the invite-windows e2e run (tools/e2e.sh invite-windows) reached done.
+PLATFORMS = "macOS and Windows 11"
 
 VOICE = """VOICE -- the tone is the experience.
 Sound like a calm, capable friend who's good with computers and has done this

@@ -4,7 +4,7 @@
 // registers the casper:// link, the Start menu entry and the Apps & features
 // entry, and starts Casper. Switches (Inno Setup's work too, for agents):
 //
-//	Casper-Setup.exe                    install, with a message at the end
+//	Casper-Setup.exe                    install and start Casper (its first-run hint is the message)
 //	Casper-Setup.exe /VERYSILENT        install without any window
 //	Casper-Setup.exe /VERYSILENT /NOLAUNCH /DIR="C:\path"
 //
@@ -37,7 +37,9 @@ func main() {
 	if err := winpkg.Install(zip, o); err != nil {
 		fail(o, err.Error())
 	}
-	if !o.Silent {
+	// When it starts Casper, Casper's own first-run hint says where the ghost is;
+	// a second message about the same thing would be a second window to close.
+	if !o.Silent && o.NoLaunch {
 		dialog.Info(config.ProductName() + " is installed. Look for its ghost in the tray, bottom right.")
 	}
 	fmt.Println("installed")
