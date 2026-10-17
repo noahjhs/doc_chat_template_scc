@@ -383,7 +383,11 @@ CREATE TABLE IF NOT EXISTS mirror_status (
     folder_id TEXT PRIMARY KEY REFERENCES mirror_folders(id),
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    nudged_at TEXT
+    nudged_at TEXT,
+    -- When this folder's (files, bytes) last changed from one report to the next: a copy that
+    -- "looks finished" while the count is still moving is a folder still being scanned.
+    stable_since TEXT,
+    signature TEXT
 );
 
 -- Every claim Casper issued to a person (casper_service/claims.py): what it
@@ -514,6 +518,18 @@ def _add_system_prompt_column_to_user_profile(db):
     db.execute("ALTER TABLE user_profile ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''")
 
 
+def _add_stability_to_mirror_status(db):
+    """One-time ALTER TABLE ADD COLUMN for mirror_status.stable_since/signature (claims.py: a copy only counts
+    as finished once the folder's file count and size have stopped moving). Idempotent."""
+    existing = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "mirror_status" not in existing:
+        return
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(mirror_status)").fetchall()}
+    for col in ("stable_since", "signature"):
+        if col not in columns:
+            db.execute(f"ALTER TABLE mirror_status ADD COLUMN {col} TEXT")
+
+
 def _add_telegram_columns_to_user_profile(db):
     """One-time ALTER TABLE ADD COLUMN for user_profile.telegram_chat_id/
     telegram_notifications_enabled (see main.py's telegram_link/
@@ -604,6 +620,7 @@ def init_db():
         _add_group_columns_to_invites(db)
         _add_key_scheme_to_mirror_folders(db)
         _add_platform_to_hosts(db)
+        _add_stability_to_mirror_status(db)
 
 
 def _add_platform_to_hosts(db):

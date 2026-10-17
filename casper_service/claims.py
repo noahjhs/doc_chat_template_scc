@@ -41,6 +41,10 @@ REPORT_MAX_AGE = 120  # the owner's Mac reports every 15 s while Casper runs
 PRESENCE_MAX_AGE = 180  # = main.LIVE_TTL_SECONDS: the app beats about once a minute
 KIT_MAX_AGE = 180 * 86400  # a recovery kit is a one-time event; this is how long we vouch for the record
 PEER_SEEN_MAX_AGE = REPORT_MAX_AGE
+# A copy counts as finished only once the folder's (files, bytes) have stopped changing for this long. Syncthing
+# reports a peer "100%, needs nothing" while a big folder is still being scanned (2026-10-16 and 2026-10-17 runs:
+# "Protected" 20 s after Mirror, with 417 MB still to copy). store_status stamps when the count last moved.
+SETTLE_SECONDS = 20
 
 # Set when a sampled read-back from a mirror is required before "Protected"
 # (E3, docs/product/claims.md 5.4 #4). Pilot: off. Flip it together with
@@ -210,14 +214,21 @@ def peer_seen(p: dict) -> bool:
     return bool(p.get("connected")) or not str(p.get("last_seen", "")).startswith("1969")
 
 
-def copy_done(st: dict) -> bool:
-    """The first copy is on a mirror, from a report: files exist, nothing unprotected or unreadable, and a
-    connected mirror that has been reached says it needs nothing. Ignores age: callers ask `fresh` too."""
-    return bool(st) and bool(st.get("local_files")) and not st.get("unprotected_files") and not st.get("unreadable_items") and any(
+def settled(st: dict, now: float) -> bool:
+    """The folder's size has been steady for SETTLE_SECONDS (a report with no stamp can't say, so: no)."""
+    since = to_unix(st.get("stable_since"))
+    return since is not None and now - since >= SETTLE_SECONDS
+
+
+def copy_done(st: dict, now: float | None = None) -> bool:
+    """The first copy is on a mirror, from a report: files exist and have stopped changing, nothing unprotected or
+    unreadable, and a connected mirror that has been reached says it needs nothing. Ignores age: callers ask `fresh` too."""
+    now = time.time() if now is None else now
+    return bool(st) and bool(st.get("local_files")) and settled(st, now) and not st.get("unprotected_files") and not st.get("unreadable_items") and any(
         p.get("connected") and peer_seen(p) and p.get("completion", 0) >= 100 and not p.get("need_files") for p in _mirrors(st))
 
 
-def _assess(st: dict) -> tuple[str, str]:
+def _assess(st: dict, now: float) -> tuple[str, str]:
     """(state, kind) from the report's contents alone, as if it were fresh. Freshness then only demotes a HOLDS."""
     peers = _mirrors(st)
     ever = any(peer_seen(p) for p in peers)
@@ -230,7 +241,9 @@ def _assess(st: dict) -> tuple[str, str]:
         return VIOLATED, "unreadable"
     if unprotected:
         return VIOLATED, "unprotected"
-    if copy_done(st):
+    if not settled(st, now):
+        return UNKNOWN, "settling"  # the count is still moving: more may yet be found; no positive claim
+    if copy_done(st, now):
         return HOLDS, "protected"
     # nothing flagged and a mirror reached once, but none shows a finished copy right now
     complete_asleep = any(peer_seen(p) and p.get("completion", 0) >= 100 and not p.get("need_files") for p in peers)
@@ -272,10 +285,10 @@ def folder_report(db, f, names: dict, owner_host: str = "", restore_host: str = 
     if not st:
         return _issue(db, now, FOLDER_PROTECTED, sub, UNKNOWN, f"{label}: starting up (no report from {owner_host or 'the computer'} yet).",
                       refs, {"kind": "no_report", "fresh": False}, surface)
-    state, kind = _assess(st)
+    state, kind = _assess(st, now)
     unreadable, unprotected = st.get("unreadable_items") or 0, st.get("unprotected_files") or 0
     data = {"kind": kind, "fresh": fresh, "age": age, "unreadable": unreadable, "unprotected": unprotected,
-            "copy_done": copy_done(st) and fresh, "local_files": st.get("local_files", 0)}
+            "copy_done": copy_done(st, now) and fresh, "local_files": st.get("local_files", 0)}
     if state == HOLDS and (not fresh or (REQUIRE_READBACK and not any(
             e.kind == "sampled_read" and e.level >= E3 and e.fresh(now) for e in refs[1:]))):
         state, kind = UNKNOWN, ("stale" if not fresh else "unverified")
@@ -292,6 +305,9 @@ def folder_report(db, f, names: dict, owner_host: str = "", restore_host: str = 
         lines.append(f"{label}: NOT protected yet: no mirror has connected yet, so nothing has been copied.")
     elif kind == "empty":
         lines.append(f"{label}: nothing in it has been seen yet, so there is nothing protected to report.")
+    elif kind == "settling":
+        lines.append(f"{label}: NOT protected yet: Casper is still finding files in it. It counts once a mirror has everything "
+                     "and the folder has stopped growing.")
     elif kind == "copying":
         lines.append(f"{label}: NOT protected yet: still copying to the mirror. It counts once a mirror has everything.")
     elif kind == "stale":
@@ -412,7 +428,7 @@ def holder_view(db, folder_ids: list, surface: str = "", now: float | None = Non
         st = mirroring.latest_status(db, fid) or {}
         ev = report_evidence(st or None, fid, "the friend's computer")
         total += st.get("local_bytes", 0) or 0
-        if not copy_done(st):
+        if not copy_done(st, now):
             state, text = UNKNOWN, "still copying"
             copying += 1
         elif not ev.fresh(now):

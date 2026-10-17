@@ -1066,7 +1066,10 @@ def _reported_now(st: dict) -> dict:
     """A status report as latest_status returns it: stamped with when it arrived (claims only trust fresh ones)."""
     from datetime import datetime, timezone
 
-    return {**st, "reported_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    return {**st, "reported_at": now.isoformat(timespec="seconds"), "stable_since": (now - timedelta(minutes=5)).isoformat(timespec="seconds")}
 
 
 def test_not_protected_until_a_mirror_has_ever_connected(app_env, monkeypatch):

@@ -7,7 +7,10 @@ only there and are written to `claim_log`), routed from the guide, `my_casper`,
 / up to date / copying / unreadable / online / kit saved / invite accepted / done / recovery
 state / history scope. Findings 1-6 are fixed (stale status, logic reading copy, empty folder as
 protected, "Done." after a failure, recovered-but-asleep Mac, history scope); finding 8 is
-measured in `privacy-exposure.md`. Evidence is E1 plus freshness (`REPORT_MAX_AGE` 2 min);
+measured in `privacy-exposure.md`. Evidence is E1 plus freshness (`REPORT_MAX_AGE` 2 min) plus a settle rule (the folder's
+file count and size must have stopped moving for `SETTLE_SECONDS`, because Syncthing says
+"100%, needs nothing" while it is still scanning; the 2026-10-17 e2e run said "Protected" with
+417 MB left);
 the sampled read-back (E3) is a hook only (`REQUIRE_READBACK`, `register_readback`). Not built:
 holder-side reports, the read-back itself, restore drills, kit verification, restore manifests,
 and the registry for static copy (site, emails, dialogs).

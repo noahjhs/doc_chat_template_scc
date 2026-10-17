@@ -26,9 +26,10 @@ def _peer(**kw):
     return {"device_id": "DEVICE1", "role": "mirror", "connected": True, "completion": 100, "need_files": 0, "last_seen": "2026-10-12T01:00:00Z", **kw}
 
 
-def _status(ago: float = 0, **kw) -> dict:
+def _status(ago: float = 0, steady: float = 600, **kw) -> dict:
+    """A stored report as latest_status returns it: `ago` seconds old, its size steady for `steady` seconds."""
     st = {"local_files": 5, "local_bytes": 2048, "unprotected_files": 0, "at_risk_files": 0, "unreadable_items": 0, "peers": [_peer()], **kw}
-    return {**st, "reported_at": _iso(ago)}
+    return {**st, "reported_at": _iso(ago), "stable_since": _iso(ago + steady)}
 
 
 FOLDER = {"id": "f1", "label": "Documents", "status": "active", "restore_host_id": None, "owner_user_id": 1, "owner_host_id": 1}
@@ -181,7 +182,7 @@ def test_copy_progress_says_so_when_the_report_stops(claims):
     with main.get_db() as db:
         db.execute("PRAGMA foreign_keys = OFF")
         db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES ('f1', 1, 1, '~/Documents', 'Documents', 'active')")
-        db.execute("INSERT INTO mirror_status (folder_id, status, updated_at) VALUES ('f1', ?, ?)", (json.dumps(_status(peers=[_peer(completion=42)])), _iso(5)))
+        db.execute("INSERT INTO mirror_status (folder_id, status, updated_at, stable_since) VALUES ('f1', ?, ?, ?)", (json.dumps(_status(peers=[_peer(completion=42)])), _iso(5), _iso(600)))
         assert c.copy_progress(db, f).text == "Copying Documents: 42%"
         db.execute("UPDATE mirror_status SET updated_at = ?", (_iso(1800),))
         got = c.copy_progress(db, f)
@@ -192,7 +193,7 @@ def test_the_givers_view_is_not_confirmed_when_the_friend_goes_quiet(claims):
     c, main = claims
     with main.get_db() as db:
         db.execute("PRAGMA foreign_keys = OFF")
-        db.execute("INSERT INTO mirror_status (folder_id, status, updated_at) VALUES ('f1', ?, ?)", (json.dumps(_status()), _iso(5)))
+        db.execute("INSERT INTO mirror_status (folder_id, status, updated_at, stable_since) VALUES ('f1', ?, ?, ?)", (json.dumps(_status()), _iso(5), _iso(600)))
         assert c.holding_text(1, 2048, *c.holder_view(db, ["f1"])[1:3]).endswith("up to date")
         db.execute("UPDATE mirror_status SET updated_at = ?", (_iso(7200),))
         total, copying, unconfirmed, _ = c.holder_view(db, ["f1"])
@@ -210,7 +211,7 @@ def test_the_guide_reads_the_claim_not_the_sentence(app_env, monkeypatch):
         with main.get_db() as db:
             db.execute("PRAGMA foreign_keys = OFF")
             db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES ('f1', ?, 1, '~/Documents', 'Documents', 'active')", (uid,))
-            db.execute("INSERT INTO mirror_status (folder_id, status, updated_at) VALUES ('f1', ?, ?)", (json.dumps(_status()), _iso(5)))
+            db.execute("INSERT INTO mirror_status (folder_id, status, updated_at, stable_since) VALUES ('f1', ?, ?, ?)", (json.dumps(_status()), _iso(5), _iso(600)))
         monkeypatch.setattr(main, "_status_text", lambda *a, **k: "gibberish nobody could parse")
         assert main._guide_facts(uid, []).protected is True
         with main.get_db() as db:  # the same report, gone quiet: the fact turns false
@@ -427,3 +428,45 @@ def test_the_holder_is_not_told_the_folders_name(app_env):
         assert len(held) == 1 and "Taxes" not in json.dumps(held) and held[0]["label"] == "riley: encrypted mirror"
     text = main.claims.say_friend_mirror_started("riley")
     assert "riley" in text and "Taxes" not in text and "can't read it" in text
+
+
+# --- a folder still being scanned is not protected (2026-10-16 and 2026-10-17 e2e runs) -------------------
+def test_a_big_folder_still_being_found_is_not_protected_however_complete_it_looks(claims):
+    """Syncthing says the mirror needs nothing and is 100% while it is still scanning a large folder; the guide
+    said "Protected." 20 s after Mirror with 417 MB still to copy and the holder's agent said "still copying"."""
+    c, main = claims
+    looks_done = dict(peers=[_peer(completion=100, need_files=0)])
+    moving = report(c, main, _status(steady=5, **looks_done))  # the file count changed 5 s ago
+    assert moving.state == c.UNKNOWN and not moving.holds and "still finding files" in moving.text and ": protected." not in moving.text
+    assert moving.data["copy_done"] is False
+    assert report(c, main, _status(steady=c.SETTLE_SECONDS + 1, **looks_done)).holds
+    # a report with no stamp can't say it is steady
+    bare = {k: v for k, v in _status(**looks_done).items() if k != "stable_since"}
+    assert not report(c, main, bare).holds
+    # the giver's view agrees with the owner's
+    with main.get_db() as db:
+        db.execute("PRAGMA foreign_keys = OFF")
+        db.execute("INSERT INTO mirror_status (folder_id, status, updated_at, stable_since) VALUES ('f9', ?, ?, ?)",
+                   (json.dumps(_status(**looks_done)), _iso(2), _iso(5)))
+        assert c.holder_view(db, ["f9"])[1] == 1  # still copying
+        db.execute("UPDATE mirror_status SET stable_since = ?", (_iso(300),))
+        assert c.holder_view(db, ["f9"])[3] == 1  # current
+
+
+def test_the_stamp_moves_when_the_count_moves(app_env):
+    """store_status keeps the time the folder's (files, bytes) last changed; claims use it."""
+    main, client = app_env
+    with client:
+        _signup(client, "riley")
+        uid = _user_id(main, "riley")
+        with main.get_db() as db:
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("INSERT INTO mirror_folders (id, owner_user_id, owner_host_id, path, label, status) VALUES ('f1', ?, 1, '~/Documents', 'Documents', 'active')", (uid,))
+            report1 = {"folder_id": "f1", "local_files": 10, "local_bytes": 1000, "peers": []}
+            main.mirroring.store_status(db, uid, [report1], 1)
+            db.execute("UPDATE mirror_status SET stable_since = ?", (_iso(300),))  # pretend it has been steady for 5 minutes
+            main.mirroring.store_status(db, uid, [report1], 1)  # same count: the stamp stays
+            steady = main.claims.to_unix(main.mirroring.latest_status(db, "f1")["stable_since"])
+            assert time.time() - steady > 290
+            main.mirroring.store_status(db, uid, [{**report1, "local_files": 11}], 1)  # a file found: it resets
+            assert main.claims.to_unix(main.mirroring.latest_status(db, "f1")["stable_since"]) > time.time() - 5

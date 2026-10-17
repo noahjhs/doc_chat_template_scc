@@ -395,13 +395,17 @@ def store_status(db, user_id: int, folders: list[dict], host_id: int | None = No
         if f["restore_host_id"] and promote_restored(db, f, st, host_id):
             promoted.append(f)
             continue
-        prev = db.execute("SELECT nudged_at FROM mirror_status WHERE folder_id = ?", (f["id"],)).fetchone()
+        prev = db.execute("SELECT nudged_at, stable_since, signature FROM mirror_status WHERE folder_id = ?", (f["id"],)).fetchone()
+        now_iso = trust.now_iso()
+        sig = f"{st.get('local_files', 0)}:{st.get('local_bytes', 0)}"
+        stable_since = prev["stable_since"] if prev and prev["signature"] == sig and prev["stable_since"] else now_iso
         db.execute(
             """
-            INSERT INTO mirror_status (folder_id, status, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(folder_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
+            INSERT INTO mirror_status (folder_id, status, updated_at, stable_since, signature) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(folder_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at,
+                stable_since = excluded.stable_since, signature = excluded.signature
             """,
-            (f["id"], json.dumps(st), trust.now_iso()),
+            (f["id"], json.dumps(st), now_iso, stable_since, sig),
         )
         oldest = st.get("unprotected_oldest_unix") or 0
         if st.get("unprotected_files") and oldest and time.time() - oldest > NUDGE_AFTER_SECONDS:
@@ -419,7 +423,7 @@ def _iso_to_unix(s: str) -> float:
 
 
 def latest_status(db, folder_id: str) -> dict | None:
-    row = db.execute("SELECT status, updated_at FROM mirror_status WHERE folder_id = ?", (folder_id,)).fetchone()
+    row = db.execute("SELECT status, updated_at, stable_since FROM mirror_status WHERE folder_id = ?", (folder_id,)).fetchone()
     if row is None:
         return None
-    return {**json.loads(row["status"]), "reported_at": row["updated_at"]}
+    return {**json.loads(row["status"]), "reported_at": row["updated_at"], "stable_since": row["stable_since"]}
