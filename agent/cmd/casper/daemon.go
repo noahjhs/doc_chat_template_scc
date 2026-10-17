@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"casper-agent/internal/commands"
 	"casper-agent/internal/config"
 	"casper-agent/internal/mirrord"
+	"casper-agent/internal/platform"
 	"casper-agent/internal/server"
 	"casper-agent/internal/tunnel"
 
@@ -455,11 +455,11 @@ func (d *daemonState) pairByCode(appDomain string) {
 	code, secret, err := config.StartPairing(d.authDomain)
 	if err != nil {
 		d.logf("pairing: couldn't start (%s); opening plain sign-in", err)
-		_ = exec.Command("open", config.BaseURL(appDomain)+"/signin?from=app").Run()
+		_ = platform.OpenURL(config.BaseURL(appDomain) + "/signin?from=app")
 		return
 	}
 	d.logf("Not signed in yet -- opening sign-in")
-	if err := exec.Command("open", config.BaseURL(appDomain)+"/signin?from=app&pair="+url.QueryEscape(code)).Run(); err != nil {
+	if err := platform.OpenURL(config.BaseURL(appDomain) + "/signin?from=app&pair=" + url.QueryEscape(code)); err != nil {
 		d.logf("Couldn't open sign-in: %s", err)
 	}
 	for deadline := time.Now().Add(15 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {

@@ -410,6 +410,8 @@ PCs with AppLocker or WDAC; Windows 10 (target Windows 11 22H2+, 10 only
 by accident); 32-bit; a Windows `run_shell_command` sandbox; auto-update;
 Microsoft Store.
 
+**Status (2026-10-16).** Phase 0 landed (`sameFile`, `%LOCALAPPDATA%`, `platform` on hosts, the Windows build check in `tools/land.sh`). Phase 1 landed: `internal/platform` (`OpenURL`, `Reveal`, `OpenFolder`, `KnownFolder`, `FreeBytes`, `HideWindow`; the `open` calls and `mirror.FreeBytes` use it) and `internal/secretstore` (DPAPI-sealed files behind the five Keychain consumers; its Windows test runs in the VM, `go test ./internal/secretstore` on the guest); the risk-model entry is written.
+
 ## 7. End-to-end test plan: Windows 11 ARM VM
 
 The existing rig is Tart (Apple Virtualization), which only runs macOS and

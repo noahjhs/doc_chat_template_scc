@@ -2,11 +2,26 @@
 
 package recovery
 
-import "errors"
+import "casper-agent/internal/secretstore"
 
+// KeychainService holds the master key (account: <authDomain>/<username>).
+const KeychainService = "Casper Master Key"
+
+// KeychainStore keeps secrets in the sealed-file store (Windows).
 type KeychainStore struct{}
 
-func (KeychainStore) Get(string) ([]byte, error) {
-	return nil, errors.New("mirroring is macOS-only for now")
+func (KeychainStore) Get(name string) ([]byte, error) {
+	s, err := secretstore.Default()
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(KeychainService, name)
 }
-func (KeychainStore) Set(string, []byte) error { return errors.New("mirroring is macOS-only for now") }
+
+func (KeychainStore) Set(name string, data []byte) error {
+	s, err := secretstore.Default()
+	if err != nil {
+		return err
+	}
+	return s.Set(KeychainService, name, data)
+}

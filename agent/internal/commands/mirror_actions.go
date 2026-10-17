@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
+
+	"casper-agent/internal/platform"
 )
 
 // MirrorOps is what one paired identity's mirroring can do on this Mac
@@ -140,7 +141,7 @@ func (h *Handler) runMirrorAction(m MirrorOps, req *Request) (map[string]any, er
 		if _, err := os.Stat(dir); err != nil {
 			return nil, &ActionError{Detail: "There's no Casper Restores folder on this Mac."}
 		}
-		if err := exec.Command("open", dir).Run(); err != nil {
+		if err := platform.OpenFolder(dir); err != nil {
 			return nil, &ActionError{Detail: "Couldn't open it in Finder."}
 		}
 		return map[string]any{"opened": true}, nil

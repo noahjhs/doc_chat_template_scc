@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"casper-agent/internal/platform"
 )
 
 const (
@@ -138,7 +140,9 @@ func (m *Manager) Start() error {
 		return err
 	}
 	if _, err := os.Stat(filepath.Join(m.home, "cert.pem")); err != nil {
-		out, err := exec.Command(m.bin, "generate", "--home="+m.home, "--no-port-probing").CombinedOutput()
+		gen := exec.Command(m.bin, "generate", "--home="+m.home, "--no-port-probing")
+		platform.HideWindow(gen)
+		out, err := gen.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("syncthing generate: %v: %s", err, out)
 		}
@@ -158,6 +162,7 @@ func (m *Manager) Start() error {
 	cmd := exec.Command(m.bin, "serve", "--home="+m.home, "--no-browser", "--no-upgrade",
 		"--gui-address="+m.guiAddr, "--gui-apikey="+m.apiKey)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
+	platform.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "STNOUPGRADE=1", "STNORESTART=1")
 	if err := cmd.Start(); err != nil {
 		m.mu.Unlock()

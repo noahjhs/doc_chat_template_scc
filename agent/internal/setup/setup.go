@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"casper-agent/internal/config"
+	"casper-agent/internal/platform"
 )
 
 // Main runs one setup command and returns the process exit code.
@@ -230,15 +231,14 @@ func askHidden(prompt string) (string, error) {
 	return strings.TrimRight(string(out), "\n"), nil
 }
 
-func openURL(u string) error { return exec.Command("open", u).Run() }
+func openURL(u string) error { return platform.OpenURL(u) }
 
 func pairURL(token, username string) string {
 	return fmt.Sprintf("%s://pair?token=%s&username=%s", config.PairURLScheme(), url.QueryEscape(token), url.QueryEscape(username))
 }
 
 func documentsDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Documents")
+	return platform.KnownFolder("Documents")
 }
 
 func recoveryKitPath(username string) string {

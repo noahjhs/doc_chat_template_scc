@@ -51,3 +51,9 @@ can't read. v1 is an alpha for hand-picked participants only.
 | Harassment or coercion through the social graph | Users | Blocking, one-sided revocation, no discovery of strangers in v1 |
 | Compromised account or agent | Everyone connected to it | Scoped grants, ask-tier on sensitive actions, key rotation, audit log |
 | Lost encryption key | Backup owner | v1: synchronizable macOS Keychain item plus passphrase export; later, splitting the key among friends (see [scenarios/peer-backup.md](scenarios/peer-backup.md)) |
+
+## Secrets on Windows
+
+On a Mac, Casper's keys (session, master key, folder passwords, account password, backup keys) sit in the login Keychain. An item made by Casper.app opens for Casper without a prompt, but any other program, such as a script run by the person's own agent, gets macOS's "allow access?" prompt, which only the person can answer. That is what stops an agent with a shell from impersonating the daemon, for example to forge consent.
+
+**Windows has no equivalent.** Casper seals each secret with DPAPI (current-user scope) into a file under `%LOCALAPPDATA%\Casper\secrets` (`agent/internal/secretstore`). DPAPI unlocks for any program running as the same Windows user, and so does Credential Manager, the alternative. So on Windows a program the person runs, including their own agent, can read Casper's keys and act as the daemon. We accept that for the pilot (chosen 2026-10-16 as the recommendation in `windows.md` §2; the Principal's yes is still to be recorded) and say it plainly to anyone invited onto Windows. A stronger design (a separate service holding the keys, behind a pipe with its own ACL) is a later project and still would not stop an agent that is itself administrator.

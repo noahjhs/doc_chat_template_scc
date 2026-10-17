@@ -2,18 +2,30 @@
 
 package backup
 
-import (
-	"errors"
-)
+import "casper-agent/internal/secretstore"
 
-// MacKeychain has no non-macOS implementation yet -- peer backup is
-// macOS-only for the alpha (docs/product/v1-implementation-plan.md).
+const keychainService = "Casper Backup Keys"
+
+// MacKeychain (named for the Mac, where it's the Keychain) is the sealed-file
+// store on Windows. There's no iCloud there, so keys are always "local" and
+// the passphrase export (ExportKeys) is the recovery path.
 type MacKeychain struct{}
 
-func (MacKeychain) Load(string) ([]byte, error) {
-	return nil, errors.New("backup keys are macOS-only for now")
+func (MacKeychain) Load(account string) ([]byte, error) {
+	s, err := secretstore.Default()
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(keychainService, account)
 }
 
-func (MacKeychain) Save(string, []byte) (string, error) {
-	return "", errors.New("backup keys are macOS-only for now")
+func (MacKeychain) Save(account string, secret []byte) (string, error) {
+	s, err := secretstore.Default()
+	if err != nil {
+		return "", err
+	}
+	if err := s.Set(keychainService, account, secret); err != nil {
+		return "", err
+	}
+	return "local", nil
 }

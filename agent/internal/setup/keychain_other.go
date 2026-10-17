@@ -2,8 +2,22 @@
 
 package setup
 
-import "errors"
+import "casper-agent/internal/secretstore"
 
-func keychainLoad(string) ([]byte, error) { return nil, errors.New("setup is macOS-only for now") }
+const keychainService = "Casper Account"
 
-func keychainSave(string, []byte) error { return errors.New("setup is macOS-only for now") }
+func keychainLoad(account string) ([]byte, error) {
+	s, err := secretstore.Default()
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(keychainService, account)
+}
+
+func keychainSave(account string, secret []byte) error {
+	s, err := secretstore.Default()
+	if err != nil {
+		return err
+	}
+	return s.Set(keychainService, account, secret)
+}
